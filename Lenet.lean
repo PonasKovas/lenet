@@ -6,6 +6,7 @@ import Lenet.Time
 import Lenet.Checksum
 import Lenet.Address
 import Lenet.Packet
+import Lenet.Channel
 import Lenet.Protocol.Header
 import Lenet.Protocol.Command
 import Lenet.Protocol.Datagram

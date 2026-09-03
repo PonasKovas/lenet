@@ -54,4 +54,12 @@ def commandThrottleConfigure      : UInt8 := 11
 def commandSendUnreliableFragment : UInt8 := 12
 def commandCount                  : Nat   := 13
 
+/-! ### Packet Flags -/
+
+def packetFlagReliable           : UInt32 := (1 : UInt32) <<< 0
+def packetFlagUnsequenced        : UInt32 := (1 : UInt32) <<< 1
+def packetFlagNoAllocate         : UInt32 := (1 : UInt32) <<< 2
+def packetFlagUnreliableFragment : UInt32 := (1 : UInt32) <<< 3
+def packetFlagSent               : UInt32 := (1 : UInt32) <<< 8
+
 end Lenet.Constants

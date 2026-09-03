@@ -1,9 +1,14 @@
+import Lenet.Constants
+
 namespace Lenet
 
 /--
 Delivery reliability and sequencing mode for a user packet.
-In ENet, reliable packets are always sequenced, while unreliable packets may be sequenced,
-unsequenced, or fragmented.
+In ENet:
+- `reliable`: Guaranteed in-order delivery. If packet exceeds MTU, sent as reliable fragments.
+- `unreliable`: Sequenced, dropped if out of order. If packet exceeds MTU, sent as reliable fragments by default.
+- `unsequenced`: No ordering, no reliability.
+- `unreliableFragment`: Unreliable packet that explicitly permits unreliable fragmentation if larger than MTU.
 -/
 inductive DeliveryMode where
   | reliable
@@ -16,18 +21,18 @@ namespace DeliveryMode
 
 /-- Converts a `DeliveryMode` to ENet packet flag bits. -/
 def toFlags : DeliveryMode → UInt32
-  | .reliable           => (1 : UInt32) <<< 0 -- ENET_PACKET_FLAG_RELIABLE
-  | .unsequenced        => (1 : UInt32) <<< 1 -- ENET_PACKET_FLAG_UNSEQUENCED
+  | .reliable           => Constants.packetFlagReliable
+  | .unsequenced        => Constants.packetFlagUnsequenced
   | .unreliable         => 0
-  | .unreliableFragment => (1 : UInt32) <<< 3 -- ENET_PACKET_FLAG_UNRELIABLE_FRAGMENT
+  | .unreliableFragment => Constants.packetFlagUnreliableFragment
 
 /-- Parses ENet packet flag bits into a strongly-typed `DeliveryMode`. -/
 def fromFlags (flags : UInt32) : DeliveryMode :=
-  if (flags &&& ((1 : UInt32) <<< 0)) != 0 then
+  if (flags &&& Constants.packetFlagReliable) != 0 then
     .reliable
-  else if (flags &&& ((1 : UInt32) <<< 1)) != 0 then
+  else if (flags &&& Constants.packetFlagUnsequenced) != 0 then
     .unsequenced
-  else if (flags &&& ((1 : UInt32) <<< 3)) != 0 then
+  else if (flags &&& Constants.packetFlagUnreliableFragment) != 0 then
     .unreliableFragment
   else
     .unreliable
