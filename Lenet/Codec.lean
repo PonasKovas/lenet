@@ -152,6 +152,14 @@ end WriterM
 -- Typeclasses & Helpers
 --------------------------------------------------------------------------------
 
+/--
+A pure packet compressor interface for datagram payload compression/decompression.
+Matches ENet's compressor contract without mutable global state.
+-/
+structure Compressor where
+  compress   : ByteArray → ByteArray
+  decompress : ByteArray → Except CodecError ByteArray
+
 class Encode (α : Type) where
   encode : α → WriterM Unit
 
