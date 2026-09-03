@@ -2,5 +2,8 @@
 -- Import modules here that should be built as part of the library.
 import Lenet.Constants
 import Lenet.Codec
+import Lenet.Time
+import Lenet.Checksum
+import Lenet.Address
 import Lenet.Protocol.Header
 import Lenet.Protocol.Command
