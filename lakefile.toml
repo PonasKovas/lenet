@@ -1,0 +1,6 @@
+name = "lenet"
+version = "0.1.0"
+defaultTargets = ["Lenet"]
+
+[[lean_lib]]
+name = "Lenet"
