@@ -30,10 +30,13 @@ State at end of session: M1 golden-trace replay 16/16 PASS, M2 live interop
    substitution is the BE serialization). New `checksum` scenario recorded
    with `enet_crc32` on both C hosts; replay verifies recorded checksums and
    18/18 PASS.
-4. Feature-completion scenarios (mostly test-side): nonzero bandwidth
-   configs + `windowSize` negotiation (lenet currently ignores windowSize
-   on BANDWIDTH_LIMIT receive - C recomputes it), multi-peer + broadcast,
-   unreliable-fragment delivery, `disconnectLater`.
+4. ~~Feature-completion scenarios~~ — done: `bandwidth` (nonzero bandwidth
+   configs: ENet's iterative BANDWIDTH_LIMIT share algorithm, bandwidth-
+   derived windowSize negotiation on connect/verify/bandwidthLimit receive,
+   window congestion check in the packer), `unfrag` (unreliable-fragment
+   delivery), `disclater` (`Host.disconnectLater` + drain transition),
+   `multip` (two clients + broadcast; new peer-address check on receive,
+   peer-indexed SEND in the trace format). 13 scenarios, all PASS.
 5. Robustness fuzz: seeded random/truncated datagrams into
    `Host.handleDatagram`, assert no panics (design rule). Goes in its own
    executable — the replay exe stays replay-specific.

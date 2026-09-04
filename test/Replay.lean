@@ -25,34 +25,58 @@ namespace Replay
 
 inductive Role where
   | client
+  | client2
   | server
   deriving BEq, Inhabited
 
 def Role.label : Role → String
   | .client => "client"
+  | .client2 => "client2"
   | .server => "server"
 
 /-- Wire direction: client→server or server→client. -/
 inductive Dir where
   | c2s
   | s2c
+  | d2s
+  | s2d
   deriving BEq, Inhabited
 
 /-- Does a datagram travelling in `d` arrive at `r`? -/
 def Dir.targets : Dir → Role → Bool
   | .c2s, .server => true
   | .s2c, .client => true
+  | .d2s, .server => true
+  | .s2d, .client2 => true
   | _, _ => false
 
 /-- `Dir` of datagrams emitted by role `r`. -/
 def Role.outDir : Role → Dir
   | .client => .c2s
+  | .client2 => .d2s
   | .server => .s2c
+
+/-- Does role `r` emit datagrams in direction `d`? (The server emits into
+both client directions in multi-peer scenarios.) -/
+def Role.emits : Role → Dir → Bool
+  | .client, .c2s => true
+  | .client2, .d2s => true
+  | .server, .s2c => true
+  | .server, .s2d => true
+  | _, _ => false
+
+/-- The `Dir` a role's client sends its CONNECT into. -/
+def Role.connectDir : Role → Dir
+  | .client => .c2s
+  | .client2 => .d2s
+  | .server => .s2c -- unused for the server
 
 inductive ApiCall where
   | connect (channels : Nat) (data : UInt32)
-  | send (ch : UInt8) (flags : UInt32) (payload : ByteArray)
+  | send (peer : UInt16) (ch : UInt8) (flags : UInt32) (payload : ByteArray)
+  | broadcast (ch : UInt8) (flags : UInt32) (payload : ByteArray)
   | disconnect (peer : UInt16) (data : UInt32)
+  | disclater (peer : UInt16) (data : UInt32)
   | peertimeout (limit mn mx : UInt32)
   | stop
 
@@ -90,10 +114,17 @@ private def parseU32 (s : String) : UInt32 := (s.toNat? |>.getD 0).toUInt32
 private def parseU8 (s : String) : UInt8 := (s.toNat? |>.getD 0).toUInt8
 
 private def parseRole (s : String) : Option Role :=
-  if s == "C" then some .client else if s == "S" then some .server else none
+  if s == "C" then some .client
+  else if s == "S" then some .server
+  else if s == "D" then some .client2
+  else none
 
 private def parseDir (s : String) : Option Dir :=
-  if s == "C2S" then some .c2s else if s == "S2C" then some .s2c else none
+  if s == "C2S" then some .c2s
+  else if s == "S2C" then some .s2c
+  else if s == "D2S" then some .d2s
+  else if s == "S2D" then some .s2d
+  else none
 
 private def parseApiCall (kind : String) (ts : Array String) : Option ApiCall :=
   match kind with
@@ -102,13 +133,22 @@ private def parseApiCall (kind : String) (ts : Array String) : Option ApiCall :=
       let d ← kvVal "data" ts
       some (.connect (ch.toNat? |>.getD 0) (parseU32 d))
   | "SEND" => do
+      let peer := (kvVal "peer" ts).map parseU16 |>.getD 0
       let ch ← kvVal "ch" ts
       let fl ← kvVal "flags" ts
       let hx ← kvVal "hex" ts
-      some (.send (parseU8 ch) (parseU32 fl) (parseHex hx))
+      some (.send peer (parseU8 ch) (parseU32 fl) (parseHex hx))
+  | "BROADCAST" => do
+      let ch ← kvVal "ch" ts
+      let fl ← kvVal "flags" ts
+      let hx ← kvVal "hex" ts
+      some (.broadcast (parseU8 ch) (parseU32 fl) (parseHex hx))
   | "DISCONNECT" => do
       let d ← kvVal "data" ts
       some (.disconnect ((kvVal "peer" ts).map parseU16 |>.getD 0) (parseU32 d))
+  | "DISCLATER" => do
+      let d ← kvVal "data" ts
+      some (.disclater ((kvVal "peer" ts).map parseU16 |>.getD 0) (parseU32 d))
   | "PEERTIMEOUT" => do
       let a ← kvVal "limit" ts
       let b ← kvVal "min" ts
@@ -219,6 +259,21 @@ def decodeDatagram (hasChecksum : Bool) (bytes : ByteArray) : Except CodecError 
 enet_crc32` on both sides). -/
 def scenarioChecksum (scenario : String) : Bool := scenario == "checksum"
 
+/-- Addresses mirroring the recorded harness topology. -/
+def proxyAddr : Address := Address.ipv4 127 0 0 1 40000
+def proxy2Addr : Address := Address.ipv4 127 0 0 1 40010
+def clientAddr : Address := Address.ipv4 127 0 0 1 40001
+def client2Addr : Address := Address.ipv4 127 0 0 1 40011
+def serverAddr : Address := Address.ipv4 127 0 0 1 40002
+
+/-- Scenario host bandwidth configs, mirroring the harness's Scenario table
+(the trace format does not record host configs). `(inBw, outBw)` for both
+hosts of the scenario. -/
+def scenarioBandwidth (scenario : String) : UInt32 × UInt32 :=
+  match scenario with
+  | "bandwidth" => (1000000, 500000)
+  | _ => (0, 0)
+
 /-! ## Replay -/
 
 structure ReplayState where
@@ -235,6 +290,8 @@ structure ReplayState where
   connectID the *recorded* client used, so the replay pins it to the trace
   value right after connecting (mirrors what really happened). -/
   connectIdOverride : Option UInt32 := none
+  /-- Address this role's client connects through (proxy or proxy2). -/
+  connectAddr : Address := proxyAddr
 
 structure ReplayResult where
   role : Role
@@ -246,10 +303,11 @@ structure ReplayResult where
   expCmds : Array Protocol.Command
   expDecodeErrors : Array CodecError
 
-/-- Addresses mirroring the recorded harness topology. -/
-def proxyAddr : Address := Address.ipv4 127 0 0 1 40000
-def clientAddr : Address := Address.ipv4 127 0 0 1 40001
-def serverAddr : Address := Address.ipv4 127 0 0 1 40002
+/-- Per-role connect target and local address (mirrors the harness). -/
+def roleAddrs : Role → Address × Address
+  | .client => (proxyAddr, clientAddr)
+  | .client2 => (proxy2Addr, client2Addr)
+  | .server => (proxyAddr, serverAddr)
 
 private def collectOutgoing (st : ReplayState) (outs : Array (Address × ByteArray)) : ReplayState :=
   outs.foldl (init := st) fun s (_, bytes) =>
@@ -265,7 +323,7 @@ private def service (st : ReplayState) (now : UInt32) : ReplayState :=
 
 private def applyApi (st : ReplayState) (ms : UInt32) : ApiCall → ReplayState
   | .connect channels data =>
-    match st.host.connect proxyAddr channels data with
+    match st.host.connect st.connectAddr channels data with
     | .ok (h, pid) =>
       -- Pin the peer's connectID to the recorded value (checksum key parity).
       let h := match st.connectIdOverride with
@@ -278,11 +336,15 @@ private def applyApi (st : ReplayState) (ms : UInt32) : ApiCall → ReplayState
         | none => h
       service { st with host := h } ms
     | .error e => service { st with errors := st.errors.push s!"connect failed: {e}" } ms
-  | .send ch flags payload =>
-    match st.host.send 0 ch { data := payload, delivery := DeliveryMode.fromFlags flags } with
+  | .send peer ch flags payload =>
+    match st.host.send peer ch { data := payload, delivery := DeliveryMode.fromFlags flags } with
     | .ok h => service { st with host := h } ms
     | .error e => service { st with errors := st.errors.push s!"send failed: {e}" } ms
+  | .broadcast ch flags payload =>
+    let h := st.host.broadcast ch { data := payload, delivery := DeliveryMode.fromFlags flags }
+    service { st with host := h } ms
   | .disconnect peer data => service { st with host := st.host.disconnect peer data } ms
+  | .disclater peer data => service { st with host := st.host.disconnectLater peer data } ms
   | .peertimeout limit mn mx =>
     let st2 :=
       if h : 0 < st.host.peers.size then
@@ -292,6 +354,14 @@ private def applyApi (st : ReplayState) (ms : UInt32) : ApiCall → ReplayState
       else st
     service st2 ms
   | .stop => { st with stoppedFlag := true }
+
+/-- The proxy address a datagram in `dir` travels through (the `from`
+address the receiver sees). -/
+def fromAddrOf : Dir → Address
+  | .c2s => proxyAddr
+  | .s2c => proxyAddr
+  | .d2s => proxy2Addr
+  | .s2d => proxy2Addr
 
 private def step (role : Role) (st : ReplayState) (line : Line) : ReplayState :=
   if st.errors.size ≥ 3 then st -- stop accumulating after a blow-up
@@ -310,23 +380,26 @@ private def step (role : Role) (st : ReplayState) (line : Line) : ReplayState :=
         let st2 := service st ms
         if st2.stoppedFlag then st2
         else
-          let (h, evs) := st2.host.handleDatagram ms proxyAddr bytes
+          let (h, evs) := st2.host.handleDatagram ms (fromAddrOf dir) bytes
           service { st2 with host := h, events := st2.events ++ evs } ms
       else
         service st ms
 
 def initialHost (scenario : String) (role : Role) : Host :=
+  let (inBw, outBw) := scenarioBandwidth scenario
   let h := match role with
-    | .client => Host.create clientAddr 1 2 0 0 0x12345678
-    | .server => Host.create serverAddr 16 2 0 0 0x12345678
+    | .client => Host.create clientAddr 1 2 inBw outBw 0x12345678
+    | .client2 => Host.create client2Addr 1 2 inBw outBw 0x12345678
+    | .server => Host.create serverAddr 16 2 inBw outBw 0x12345678
   { h with checksumEnabled := scenarioChecksum scenario }
 
-/-- The connectID the recorded client used, taken from the first C2S CONNECT
-datagram in the trace (needed as the checksum key on checksum scenarios). -/
-def traceConnectId (hasChecksum : Bool) (lines : Array Line) : Option UInt32 :=
+/-- The connectID the recorded client used, taken from its CONNECT datagram
+in the trace (needed as the checksum key on checksum scenarios). -/
+def traceConnectId (hasChecksum : Bool) (role : Role) (lines : Array Line) : Option UInt32 :=
+  let dir := role.connectDir
   let connectIdOf := lines.filterMap fun
     | .dat _ d bytes =>
-      if d == .c2s then
+      if d == dir then
         match decodeDatagram hasChecksum bytes with
         | .ok cmds => cmds.find? fun c => match c.body with | .connect _ _ => true | _ => false
         | .error _ => none
@@ -343,13 +416,14 @@ def replayRole (scenario : String) (role : Role) (lines : Array Line) : ReplayRe
   let st := lines.foldl (step role) {
     host := initialHost scenario role
     decodeChecksummed := hasChecksum
-    connectIdOverride := if role == .client then traceConnectId hasChecksum lines else none
+    connectIdOverride := if role == .server then none else traceConnectId hasChecksum role lines
+    connectAddr := (roleAddrs role).1
   }
   let expEvents := lines.filterMap fun
     | .ev _ r e => if r == role then some e else none
     | _ => none
   let expDatagrams := lines.filterMap fun
-    | .dat _ d bytes => if d == role.outDir then some bytes else none
+    | .dat _ d bytes => if role.emits d then some bytes else none
     | _ => none
   let (expCmds, expDecodeErrors) := expDatagrams.foldl (init := (#[], #[])) fun (cs, es) b =>
     match decodeDatagram hasChecksum b with
@@ -422,7 +496,7 @@ private def cmdDiffOf (exp act : Array Protocol.Command) : Option (Nat × String
     | none, none => none
 
 private def replayAndReport (scenario : String) (lines : Array Line) : IO Bool := do
-  let results := [Role.client, Role.server].map (fun r => replayRole scenario r lines)
+  let results := [Role.client, Role.client2, Role.server].map (fun r => replayRole scenario r lines)
   let mut allOk := true
   for res in results do
     let label := s!"{scenario}/{res.role.label}"
@@ -457,7 +531,7 @@ private def replayAndReport (scenario : String) (lines : Array Line) : IO Bool :
 
 def scenarioNames : Array String :=
   #["connect", "send_c2s", "send_s2c", "frag", "disc_client", "disc_server",
-    "idle", "timeout", "checksum"]
+    "idle", "timeout", "checksum", "bandwidth", "unfrag", "disclater", "multip"]
 
 end Replay
 

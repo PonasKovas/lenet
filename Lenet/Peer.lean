@@ -65,6 +65,9 @@ structure Peer where
   packetThrottleAcceleration     : UInt32 := Constants.defaultPacketThrottleAcceleration
   packetThrottleDeceleration     : UInt32 := Constants.defaultPacketThrottleDeceleration
   packetThrottleInterval         : UInt32 := Constants.defaultPacketThrottleInterval
+  /-- ENet: marks peers already bandwidth-adjusted within the current
+  bandwidth-throttle epoch (incomingBandwidthThrottleEpoch). -/
+  incomingBandwidthThrottleEpoch : UInt32 := 0
   eventData                      : UInt32 := 0
   reliableDataInTransit          : Nat := 0
   /-- Sequence counter for reliable control commands sent on channel 0xFF
@@ -114,6 +117,7 @@ def reset (p : Peer) : Peer :=
     packetThrottleLimit          := Constants.packetThrottleScale
     packetThrottleCounter        := 0
     packetThrottleEpoch          := 0
+    incomingBandwidthThrottleEpoch := 0
     reliableDataInTransit        := 0
     outgoingControlSeq           := 0
     outgoingUnsequencedGroup     := 0
@@ -562,6 +566,9 @@ def handleCommand (p : Peer) (now : UInt32) (cmd : Protocol.Command) (sentTime :
     ({ pAck with state := .zombie, eventData := data }, #[Event.disconnect pAck.peerId data])
 
   | .bandwidthLimit inBw outBw =>
+    -- ENet recomputes the peer's windowSize here too (handle_bandwidth_limit),
+    -- but that needs the *host's* outgoing bandwidth, so the recompute happens
+    -- at host level after the command fold (see Host.handleDatagram).
     ({ pAck with incomingBandwidth := inBw, outgoingBandwidth := outBw }, #[])
 
   | .throttleConfigure interval accel decel =>
@@ -578,13 +585,18 @@ def handleCommand (p : Peer) (now : UInt32) (cmd : Protocol.Command) (sentTime :
       -- ENet removes the client's CONNECT from the sent-reliable list here
       -- (nothing ever ACKs it - the VERIFY_CONNECT replaces it).
       let (pRm, _) := pAck.removeSentReliableCommand 0xFF 1
+      -- ENet clamps the received windowSize to [min, max] and only shrinks
+      -- the peer's own (bandwidth-derived) window to match.
+      let ws := Nat.min Constants.maximumWindowSize (Nat.max Constants.minimumWindowSize params.windowSize.toNat)
       let p' := { pRm with
         outgoingPeerId      := params.outgoingPeerId
         incomingSessionId   := params.incomingSessionId
         outgoingSessionId   := params.outgoingSessionId
         connectId           := params.connectId
         mtu                 := params.mtu
-        windowSize          := params.windowSize
+        windowSize          := Nat.min pRm.windowSize.toNat ws |>.toUInt32
+        incomingBandwidth   := params.incomingBandwidth
+        outgoingBandwidth   := params.outgoingBandwidth
         state               := .connected
       }
       (p', #[Event.connect p'.peerId p'.eventData])

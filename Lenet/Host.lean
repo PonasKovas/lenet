@@ -37,6 +37,23 @@ deriving Inhabited
 
 namespace Host
 
+/-- ENet's bandwidth-derived receive window size (protocol.c: same formula at
+connect, handle_connect, handle_verify_connect and handle_bandwidth_limit):
+- both bandwidths 0 → maximum window
+- exactly one set → `max(hostOutBw, peerInBw) / 64k * 4096`
+- both set → `min(hostOutBw, peerInBw) / 64k * 4096`
+clamped to `[minimumWindowSize, maximumWindowSize]`. -/
+def windowSizeFor (hostOutBw : UInt32) (peerInBw : UInt32) : UInt32 :=
+  let scale := Constants.windowSizeScale.toNat
+  let raw : Nat :=
+    if peerInBw.toNat == 0 ∧ hostOutBw.toNat == 0 then
+      Constants.maximumWindowSize
+    else if peerInBw.toNat == 0 ∨ hostOutBw.toNat == 0 then
+      Nat.max peerInBw.toNat hostOutBw.toNat / scale * Constants.minimumWindowSize
+    else
+      Nat.min peerInBw.toNat hostOutBw.toNat / scale * Constants.minimumWindowSize
+  Nat.min Constants.maximumWindowSize (Nat.max Constants.minimumWindowSize raw) |>.toUInt32
+
 /-- Creates an initialized host with `peerCount` allocated peer slots. -/
 def create (address : Address := {}) (peerCount : Nat := 32) (channelLimit : Nat := Constants.maximumChannelCount) (inBw : UInt32 := 0) (outBw : UInt32 := 0) (seed : UInt32 := 0x87654321) : Host :=
   let cl := if channelLimit == 0 ∨ channelLimit > Constants.maximumChannelCount then Constants.maximumChannelCount else channelLimit
@@ -83,7 +100,9 @@ def connect (h : Host) (remoteAddress : Address) (channelCount : Nat := 2) (data
       incomingSessionId          := 0xFF
       outgoingSessionId          := 0xFF
       mtu                        := hRand.mtu
-      windowSize                 := Constants.maximumWindowSize.toUInt32
+      -- ENet: the client's window derives from its own outgoing bandwidth
+      -- (enet_host_connect); a fresh peer slot has incomingBandwidth = 0.
+      windowSize                 := windowSizeFor hRand.outgoingBandwidth 0
       channelCount               := channels.toUInt32
       incomingBandwidth          := hRand.incomingBandwidth
       outgoingBandwidth          := hRand.outgoingBandwidth
@@ -163,6 +182,38 @@ def disconnect (h : Host) (peerId : UInt16) (data : UInt32 := 0) : Host :=
   else
     h
 
+/-- ENet's deferred disconnect (enet_peer_disconnect_later): if the peer
+still has commands queued or in flight, enter `disconnectLater` and defer
+the DISCONNECT until everything is flushed; otherwise disconnect now. -/
+def disconnectLater (h : Host) (peerId : UInt16) (data : UInt32 := 0) : Host :=
+  let idx := peerId.toNat
+  if hIdx : idx < h.peers.size then
+    let p := h.peers[idx]
+    if (p.state == .connected ∨ p.state == .disconnectLater) ∧
+       (!p.outgoingCommands.isEmpty ∨ !p.sentReliableCommands.isEmpty) then
+      { h with peers := h.peers.set idx { p with state := .disconnectLater, eventData := data } hIdx }
+    else
+      h.disconnect peerId data
+  else
+    h
+
+/-- ENet's disconnectLater drain transition (protocol.c:1593): once a
+`disconnectLater` peer has no queued or in-flight commands left, the queued
+DISCONNECT (carrying the deferred data) goes out. -/
+def flushDisconnectLater (p : Peer) : Peer :=
+  if p.state == .disconnectLater ∧ p.outgoingCommands.isEmpty ∧ p.sentReliableCommands.isEmpty then
+    let (p, controlSeq) := p.nextControlSeq
+    let cmd : Protocol.Command := {
+      channelId              := 0xFF
+      reliableSequenceNumber := controlSeq
+      acknowledge            := true
+      unsequenced            := false
+      body                   := .disconnect p.eventData
+    }
+    { p with state := .disconnecting }.queueOutgoingCommand { command := cmd }
+  else
+    p
+
 /--
 Consumes an incoming raw UDP datagram received from `fromAddr`.
 Updates host/peer states, processes commands, and emits high-level `Event`s.
@@ -208,12 +259,23 @@ def handleDatagram (h : Host) (now : UInt32) (fromAddr : Address) (bytes : ByteA
               let base := if params.outgoingSessionId == 0xFF then p.incomingSessionId else params.outgoingSessionId
               let inc := (base + 1) &&& 3
               if inc == p.incomingSessionId then (inc + 1) &&& 3 else inc
+            -- ENet: the peer's receive window derives from the host's outgoing
+            -- bandwidth and the peer's offered incoming bandwidth
+            -- (enet_protocol_handle_connect).
+            let peerWindowSize := windowSizeFor h.outgoingBandwidth params.incomingBandwidth
+            -- ENet: the VERIFY_CONNECT advertises the server's incoming-
+            -- bandwidth-derived window, shrunk to the client's offer.
+            let hostInWindow : UInt32 :=
+              if h.incomingBandwidth == 0 then Constants.maximumWindowSize.toUInt32
+              else (h.incomingBandwidth.toNat / Constants.windowSizeScale.toNat * Constants.minimumWindowSize).toUInt32
+            let verifyWindow := Nat.min Constants.maximumWindowSize (Nat.max Constants.minimumWindowSize
+              (Nat.min hostInWindow.toNat params.windowSize.toNat)) |>.toUInt32
             let verifyParams : Protocol.ConnectParams := {
               outgoingPeerId             := p.peerId
               incomingSessionId          := outSession
               outgoingSessionId          := inSession
               mtu                        := Nat.min h.mtu.toNat params.mtu.toNat |>.toUInt32
-              windowSize                 := Constants.maximumWindowSize.toUInt32
+              windowSize                 := verifyWindow
               channelCount               := channels.toUInt32
               incomingBandwidth          := h.incomingBandwidth
               outgoingBandwidth          := h.outgoingBandwidth
@@ -245,6 +307,9 @@ def handleDatagram (h : Host) (now : UInt32) (fromAddr : Address) (bytes : ByteA
               channels             := peerChannels
               eventData            := data
               mtu                  := verifyParams.mtu
+              windowSize           := peerWindowSize
+              incomingBandwidth    := params.incomingBandwidth
+              outgoingBandwidth    := params.outgoingBandwidth
               incomingSessionId    := inSession
               outgoingSessionId    := outSession
             }.queueOutgoingCommand outCmd
@@ -263,24 +328,44 @@ def handleDatagram (h : Host) (now : UInt32) (fromAddr : Address) (bytes : ByteA
       let idx := peerId.toNat
       if hIdx : idx < h.peers.size then
         let p := h.peers[idx]
-        -- ENet drops datagrams whose header session doesn't match the peer's
-        -- negotiated incoming session ID (protocol.c peer lookup). The check
-        -- only applies once the remote peer ID is known (post-negotiation);
-        -- while `outgoingPeerId` is unset (0xFFF) any session is tolerated.
+        -- ENet peer lookup (protocol.c): datagrams for a negotiated peer must
+        -- come from the peer's address (broadcast targets exempt). This drops
+        -- datagrams whose header peerId collides with a different host's peer.
         if p.outgoingPeerId < Constants.maximumPeerId ∧
-           datagram.header.session ≠ p.incomingSessionId then
+           (!(p.address == {}) && p.address.host != Address.broadcast &&
+              fromAddr != p.address) then
           (h, #[])
         else
-          let (curPeer, events) := datagram.commands.foldl (init := (p, #[])) fun (cur, evs) cmd =>
-            let (nextPeer, newEvs) := cur.handleCommand now cmd datagram.header.sentTime
-            (nextPeer, evs ++ newEvs)
-          let newPeers := h.peers.set idx curPeer hIdx
-          -- ENet: connect/disconnect notifications flag a bandwidth recalculation.
-          let recalc := events.any fun
-            | .connect _ _ => true
-            | .disconnect _ _ => true
-            | .receive _ _ _ => false
-          ({ h with peers := newPeers, recalculateBandwidthLimits := h.recalculateBandwidthLimits || recalc }, events)
+          -- ENet drops datagrams whose header session doesn't match the peer's
+          -- negotiated incoming session ID (protocol.c peer lookup). The check
+          -- only applies once the remote peer ID is known (post-negotiation);
+          -- while `outgoingPeerId` is unset (0xFFF) any session is tolerated.
+          if p.outgoingPeerId < Constants.maximumPeerId ∧
+             datagram.header.session ≠ p.incomingSessionId then
+            (h, #[])
+          else
+            let (curPeer, events) := datagram.commands.foldl (init := (p, #[])) fun (cur, evs) cmd =>
+              let (nextPeer, newEvs) := cur.handleCommand now cmd datagram.header.sentTime
+              (nextPeer, evs ++ newEvs)
+            -- ENet (handle_bandwidth_limit): a BANDWIDTH_LIMIT command also
+            -- recomputes the peer's receive window from the (just-updated) peer
+            -- incoming bandwidth and the host's outgoing bandwidth. The recompute
+            -- happens here because the formula needs host-level state; with the
+            -- fold's last-write-wins semantics this matches ENet's per-command
+            -- recompute.
+            let bwChanged := datagram.commands.any fun c =>
+              match c.body with | .bandwidthLimit _ _ => true | _ => false
+            let curPeer :=
+              if bwChanged then
+                { curPeer with windowSize := windowSizeFor h.outgoingBandwidth curPeer.incomingBandwidth }
+              else curPeer
+            let newPeers := h.peers.set idx curPeer hIdx
+            -- ENet: connect/disconnect notifications flag a bandwidth recalculation.
+            let recalc := events.any fun
+              | .connect _ _ => true
+              | .disconnect _ _ => true
+              | .receive _ _ _ => false
+            ({ h with peers := newPeers, recalculateBandwidthLimits := h.recalculateBandwidthLimits || recalc }, events)
       else
         (h, #[])
 
@@ -363,28 +448,41 @@ def packOutgoingCommands (p : Peer) (now : UInt32) : Peer × Array Protocol.Comm
       if outCmd.command.acknowledge && !isWindowAvail then
         { acc with remainingOutgoing := acc.remainingOutgoing.push outCmd }
       else
-        let inFlightCmd := { outCmd with
-          sendAttempts := outCmd.sendAttempts + 1
-          sentTime     := now
-          roundTripTimeout :=
-            -- ENet: initialize on first send from the peer's RTT estimate.
-            if outCmd.roundTripTimeout == 0 then
-              p.roundTripTime + 4 * p.roundTripTimeVariance
-            else
-              outCmd.roundTripTimeout
-        }
-        -- Only reliable (ack-flagged) commands are tracked in-flight for
-        -- retransmission; others are fire-and-forget (ENet semantics).
-        let acc :=
-          if outCmd.command.acknowledge then
-            { acc with
-              sentReliables := acc.sentReliables.push inFlightCmd
-              inTransitAdd  := acc.inTransitAdd + outCmd.fragmentLength }
-          else acc
-        { acc with
-          commandsToPack := acc.commandsToPack.push outCmd.command
-          packetSize     := acc.packetSize + cmdSize + outCmd.fragmentLength
-          commandCount   := acc.commandCount + 1 }
+        -- ENet (check_outgoing_commands): reliable commands carrying a packet
+        -- are blocked while the reliable data in flight exceeds the
+        -- throttle-scaled receive window (`reliableDataInTransit +
+        -- fragmentLength > max(throttle * windowSize, mtu)`). Blocked
+        -- commands stay queued; they don't add to in-transit, so every
+        -- further payload command is blocked the same way within the pass.
+        let isCongested :=
+          outCmd.command.acknowledge ∧ outCmd.fragmentLength > 0 ∧
+            p.reliableDataInTransit + acc.inTransitAdd + outCmd.fragmentLength >
+              Nat.max ((p.packetThrottle * p.windowSize) / Constants.packetThrottleScale).toNat p.mtu.toNat
+        if isCongested then
+          { acc with remainingOutgoing := acc.remainingOutgoing.push outCmd }
+        else
+          let inFlightCmd := { outCmd with
+            sendAttempts := outCmd.sendAttempts + 1
+            sentTime     := now
+            roundTripTimeout :=
+              -- ENet: initialize on first send from the peer's RTT estimate.
+              if outCmd.roundTripTimeout == 0 then
+                p.roundTripTime + 4 * p.roundTripTimeVariance
+              else
+                outCmd.roundTripTimeout
+          }
+          -- Only reliable (ack-flagged) commands are tracked in-flight for
+          -- retransmission; others are fire-and-forget (ENet semantics).
+          let acc :=
+            if outCmd.command.acknowledge then
+              { acc with
+                sentReliables := acc.sentReliables.push inFlightCmd
+                inTransitAdd  := acc.inTransitAdd + outCmd.fragmentLength }
+            else acc
+          { acc with
+            commandsToPack := acc.commandsToPack.push outCmd.command
+            packetSize     := acc.packetSize + cmdSize + outCmd.fragmentLength
+            commandCount   := acc.commandCount + 1 }
 
   let updatedPeer := { p with
     acknowledgements      := p.acknowledgements.drop withAcks.packedAcks.size
@@ -405,6 +503,7 @@ def pollPeer (p : Peer) (now : UInt32) (checksumEnabled : Bool) (compressor : Op
       match fuel with
       | 0 => (p, acc)
       | fuel' + 1 =>
+        let p := flushDisconnectLater p
         let (updatedPeer, commandsToPack) := packOutgoingCommands p now
         if commandsToPack.isEmpty then
           (updatedPeer, acc)
@@ -561,25 +660,57 @@ def bandwidthThrottle (h : Host) (now : UInt32) : Host :=
       -- ENet: when recalculateBandwidthLimits is set, queue a BANDWIDTH_LIMIT
       -- command for every connected peer at the epoch boundary
       -- (enet_host_bandwidth_throttle, recalculateBandwidthLimits block).
+      -- ENet iteratively shares the host's incoming bandwidth out: a peer
+      -- whose own outgoing bandwidth is below the current per-peer share gets
+      -- marked and its rate is removed from the pool; marked peers are told
+      -- to limit their incoming to their own outgoing rate, unmarked peers
+      -- get the final share.
       let (updatedPeers, recalc) :=
         if h.recalculateBandwidthLimits then
-          (updatedPeers.map fun p =>
+          let connected := connectedPeers
+          let rec loop (bandwidth : UInt32) (peersRemaining : Nat) (bandwidthLimit : UInt32)
+              (marked : Array UInt16) (fuel : Nat) : UInt32 × UInt32 × Array UInt16 :=
+            match fuel with
+            | 0 => (bandwidth, bandwidthLimit, marked)
+            | fuel' + 1 =>
+              if peersRemaining == 0 then
+                (bandwidth, bandwidthLimit, marked)
+              else
+                let bandwidthLimit := bandwidth / peersRemaining.toUInt32
+                let (bandwidth', peersRemaining', marked') :=
+                  connected.foldl (init := (bandwidth, peersRemaining, marked)) fun acc p =>
+                    let (bw, remaining, markedIds) := acc
+                    if markedIds.contains p.peerId ∨
+                       (p.outgoingBandwidth > 0 ∧ p.outgoingBandwidth >= bandwidthLimit) then
+                      (bw, remaining, markedIds)
+                    else
+                      (bw - p.outgoingBandwidth, remaining - 1, markedIds.push p.peerId)
+                if marked'.size > marked.size then
+                  loop bandwidth' peersRemaining' bandwidthLimit marked' fuel'
+                else
+                  (bandwidth', bandwidthLimit, marked')
+          let (bandwidthLimit, marked) :=
+            if h.incomingBandwidth == 0 then
+              ((0 : UInt32), (#[] : Array UInt16))
+            else
+              let (bw, bl, markedIds) := loop h.incomingBandwidth connected.size 0 #[] (connected.size + 2)
+              (bl, markedIds)
+          let updatedPeers := updatedPeers.map fun p =>
             if p.state == .connected ∨ p.state == .disconnectLater then
-              -- ENet: bandwidthLimit = 0 when host incoming bandwidth is 0;
-              -- outgoing = host outgoing bandwidth.
-              let bandwidthLimit : UInt32 :=
-                if h.incomingBandwidth == 0 then 0
-                else h.incomingBandwidth / connectedPeers.size.toUInt32
               let (p, controlSeq) := p.nextControlSeq
+              let incoming : UInt32 :=
+                if marked.contains p.peerId then p.outgoingBandwidth else bandwidthLimit
               let cmd : Protocol.Command := {
                 channelId              := 0xFF
                 reliableSequenceNumber := controlSeq
                 acknowledge            := true
                 unsequenced            := false
-                body                   := .bandwidthLimit bandwidthLimit h.outgoingBandwidth
+                body                   := .bandwidthLimit incoming h.outgoingBandwidth
               }
+              let p := { p with incomingBandwidthThrottleEpoch := now }
               p.queueOutgoingCommand { command := cmd }
-            else p, false)
+            else p
+          (updatedPeers, false)
         else (updatedPeers, h.recalculateBandwidthLimits)
       { h with
         peers                       := updatedPeers

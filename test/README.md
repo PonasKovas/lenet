@@ -5,11 +5,11 @@ Verifies that Lenet interoperates with real [ENet](https://github.com/lsalzman/e
 
 Two parts:
 
-1. **Recorder** (`c/harness.c`) — runs two *real* ENet hosts (client + server)
-   inside one process on localhost, with all UDP traffic routed through an
-   in-process logging proxy. Records scripted scenarios into human-readable
-   trace files: application calls, ENet events, and the raw datagram bytes on
-   the wire.
+1. **Recorder** (`c/harness.c`) — runs *real* ENet hosts (up to two clients +
+   one server) inside one process, with all UDP traffic routed through
+   in-process logging proxy sockets. Records scripted scenarios into
+   human-readable trace files: application calls (with the acting peer for
+   sends/disconnects), ENet events, and the raw datagram bytes on the wire.
 2. **Replayer** (`Replay.lean`, built as the `replay` lake exe) — feeds
    each trace into the Lenet sans-I/O core (`Host.handleDatagram` /
    `Host.service`) per role, at the recorded timestamps, applying the recorded
@@ -61,6 +61,10 @@ and the replay is fully deterministic (no sockets, no real time).
 | `idle`         | keepalive: ping/ACK duty with no traffic                         |
 | `timeout`      | unacked reliable command → retransmit backoff → peer timeout     |
 | `checksum`     | CRC32 checksums enabled on both C hosts (`enet_crc32`): lenet must compute and verify checksums byte-compatibly (the replay drops datagrams whose checksum it cannot verify) |
+| `bandwidth`    | hosts created with nonzero in/out bandwidth (1MB/512KB): BANDWIDTH_LIMIT commands + ENet's iterative per-peer share algorithm, bandwidth-derived windowSize negotiation in CONNECT/VERIFY_CONNECT |
+| `unfrag`       | 8000-byte unreliable-fragmented packet (`ENET_PACKET_FLAG_UNRELIABLE_FRAGMENT`) split into SEND_UNRELIABLE_FRAGMENT commands |
+| `disclater`    | `enet_peer_disconnect_later` while reliable commands are in flight: deferred DISCONNECT once queues drain |
+| `multip`       | two clients → one server (second proxy), server broadcast + unicast to a specific peer; exercises the peer-address check in the receive path |
 
 ## What is compared
 
@@ -72,6 +76,10 @@ and the replay is fully deterministic (no sockets, no real time).
   right after connecting). Control-command order within one millisecond is a
   scheduling artifact and not compared; order-sensitive behavior is still
   verified by events and per-channel sequence numbers.
+- **Server commands in multi-peer scenarios** are compared per direction: the
+  server's expected stream is the union of its S2C and S2D datagrams, and
+  `SEND`/`DISCONNECT` lines record the acting peer index so the replay
+  targets the same peer.
 - **Checksums** (checksum scenario): datagrams recorded from ENet are only
   accepted by lenet if their CRC32 verifies against the peer's `connectID`,
   and lenet's own checksummed datagrams must decode (via the recorded peers'
