@@ -19,16 +19,17 @@ Manages an array of peer connection slots, connection negotiation,
 datagram packaging, and bandwidth limits.
 -/
 structure Host where
-  address           : Address := {}
-  peers             : Array Peer := #[]
-  channelLimit      : Nat := Constants.maximumChannelCount
-  incomingBandwidth : UInt32 := 0
-  outgoingBandwidth : UInt32 := 0
-  mtu               : UInt32 := Constants.minimumMtu.toUInt32
-  randomSeed        : UInt32 := 0x12345678
-  compressor        : Option Compressor := none
-  checksumEnabled   : Bool := false
-  maximumPacketSize : Nat := 32 * 1024 * 1024
+  address                : Address := {}
+  peers                  : Array Peer := #[]
+  channelLimit           : Nat := Constants.maximumChannelCount
+  incomingBandwidth      : UInt32 := 0
+  outgoingBandwidth      : UInt32 := 0
+  bandwidthThrottleEpoch : UInt32 := 0
+  mtu                    : UInt32 := Constants.minimumMtu.toUInt32
+  randomSeed             : UInt32 := 0x12345678
+  compressor             : Option Compressor := none
+  checksumEnabled        : Bool := false
+  maximumPacketSize      : Nat := 32 * 1024 * 1024
 deriving Inhabited
 
 namespace Host
@@ -399,6 +400,54 @@ def checkTimeoutsAndPings (h : Host) (now : UInt32) : Host × Array Event :=
         (peersAcc.push pAfterPing, evsAcc)
 
   ({ h with peers := updatedPeers }, events)
+
+/--
+Dynamically recalculates peer bandwidth allocations and packet throttle limits
+over each 1000ms epoch.
+-/
+def bandwidthThrottle (h : Host) (now : UInt32) : Host :=
+  let elapsed := Time.difference now h.bandwidthThrottleEpoch
+  if elapsed < Constants.bandwidthThrottleInterval then
+    h
+  else
+    let connectedPeers := h.peers.filter (fun p => p.state == .connected ∨ p.state == .disconnectLater)
+    if connectedPeers.isEmpty then
+      { h with bandwidthThrottleEpoch := now }
+    else
+      let updatedPeers := h.peers.map fun p =>
+        if p.state == .connected ∨ p.state == .disconnectLater then
+          let pThrottled :=
+            if h.outgoingBandwidth > 0 then
+              let totalData := p.reliableDataInTransit.toUInt32
+              let peerShare := h.outgoingBandwidth / connectedPeers.size.toUInt32
+              let throttle :=
+                if totalData ≤ peerShare then
+                  Constants.packetThrottleScale
+                else
+                  (peerShare * Constants.packetThrottleScale) / (if totalData == 0 then 1 else totalData)
+              { p with packetThrottleLimit := Nat.max 1 throttle.toNat |>.toUInt32 }
+            else
+              { p with packetThrottleLimit := Constants.packetThrottleScale }
+          pThrottled
+        else
+          p
+      { h with
+        peers                  := updatedPeers
+        bandwidthThrottleEpoch := now
+      }
+
+/--
+Master sans-I/O service step for the host:
+1. Recalculates bandwidth limits and throttling.
+2. Checks timeouts, retransmissions, and pings across all peers.
+3. Packages pending ACKs and outgoing commands into MTU-bounded datagrams.
+Returns the updated `Host`, outgoing datagrams to transmit, and any application `Event`s.
+-/
+def service (h : Host) (now : UInt32) : Host × Array (Address × ByteArray) × Array Event :=
+  let hThrottled := h.bandwidthThrottle now
+  let (hTimedOut, timeoutEvents) := hThrottled.checkTimeoutsAndPings now
+  let (hPolled, outgoingPackets) := hTimedOut.pollOutgoing now
+  (hPolled, outgoingPackets, timeoutEvents)
 
 end Host
 

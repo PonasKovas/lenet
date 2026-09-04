@@ -74,7 +74,8 @@ def defaultPacketThrottleInterval     : UInt32 := 5000
 def defaultPingInterval               : UInt32 := 500
 def defaultTimeoutLimit               : UInt32 := 32
 def defaultTimeoutMinimum             : UInt32 := 5000
-def defaultTimeoutMaximum             : UInt32 := 30000
-def windowSizeScale                   : UInt32 := 64 * 1024
+def defaultTimeoutMaximum           : UInt32 := 30000
+def windowSizeScale                 : UInt32 := 64 * 1024
+def bandwidthThrottleInterval       : UInt32 := 1000
 
 end Lenet.Constants
