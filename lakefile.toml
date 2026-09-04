@@ -7,4 +7,5 @@ name = "Lenet"
 
 [[lean_exe]]
 name = "replay"
-root = "Test.Replay"
+root = "Replay"
+srcDir = "test"

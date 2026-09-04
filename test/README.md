@@ -10,7 +10,7 @@ Two parts:
    in-process logging proxy. Records scripted scenarios into human-readable
    trace files: application calls, ENet events, and the raw datagram bytes on
    the wire.
-2. **Replayer** (`Test/Replay.lean`, built as the `replay` lake exe) — feeds
+2. **Replayer** (`Replay.lean`, built as the `replay` lake exe) — feeds
    each trace into the Lenet sans-I/O core (`Host.handleDatagram` /
    `Host.service`) per role, at the recorded timestamps, applying the recorded
    API calls. Compares Lenet's emitted event stream and outgoing commands
@@ -67,4 +67,4 @@ change — traces are committed and the replay is fully deterministic
 - `c/harness.c` — recorder (scripted scenarios, proxy, logging)
 - `Makefile`    — builds `c/harness` against `../enet` out-of-tree, `make traces` records all scenarios into `traces/`
 - `traces/*.trace` — committed golden corpus (`A` = API call, `E` = event, `N` = network datagram)
-- `../Test/Replay.lean` — the replayer (`lake build replay`)
+- `Replay.lean` — the replayer (`lake build replay`)
