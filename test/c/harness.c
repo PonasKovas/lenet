@@ -100,7 +100,7 @@ static void drain_events(ENetHost *host, const char *role, ENetPeer **peer_out) 
 
 static int proxy_fd = -1;    /* client1 <-> server */
 static int proxy2_fd = -1;   /* client2 <-> server */
-static struct sockaddr_in client_addr, client2_addr, server_addr;
+static struct sockaddr_in client_addr, client2_addr, server_addr, proxy_addr;
 
 static int make_udp(uint16_t port) {
     int fd = socket(AF_INET, SOCK_DGRAM, 0);
@@ -131,6 +131,8 @@ static void proxy_init(void) {
     client2_addr.sin_port = htons(CLIENT2_PORT);
     server_addr = client_addr;
     server_addr.sin_port = htons(SERVER_PORT);
+    proxy_addr = client_addr;
+    proxy_addr.sin_port = htons(PROXY_PORT);
 }
 
 /* Forward + log every pending datagram on one proxy socket. Direction by
@@ -155,7 +157,27 @@ static void proxy_pump_fd(int fd, const char *c2s, const char *s2c,
 }
 
 static void proxy_pump(void) {
-    proxy_pump_fd(proxy_fd, "C2S", "S2C", &client_addr);
+    static unsigned char buf[64 * 1024];
+    /* proxy 1 distinguishes three sources: the server (S2C), injected
+     * hostile datagrams (looped back from our own port; pre-logged as X2S
+     * by ACT_INJECT and forwarded silently), and the real client (C2S). */
+    for (;;) {
+        struct sockaddr_in from;
+        socklen_t fromlen = sizeof from;
+        ssize_t n = recvfrom(proxy_fd, buf, sizeof buf, 0,
+                             (struct sockaddr *)&from, &fromlen);
+        if (n < 0) break; /* EWOULDBLOCK */
+        uint16_t sport = ntohs(from.sin_port);
+        if (sport == SERVER_PORT) {
+            log_datagram("S2C", buf, n);
+            sendto(proxy_fd, buf, n, 0, (struct sockaddr *)&client_addr, sizeof client_addr);
+        } else if (sport == PROXY_PORT) {
+            sendto(proxy_fd, buf, n, 0, (struct sockaddr *)&server_addr, sizeof server_addr);
+        } else {
+            log_datagram("C2S", buf, n);
+            sendto(proxy_fd, buf, n, 0, (struct sockaddr *)&server_addr, sizeof server_addr);
+        }
+    }
     proxy_pump_fd(proxy2_fd, "D2S", "S2D", &client2_addr);
 }
 
@@ -168,7 +190,8 @@ typedef enum {
     ACT_DISCONNECT,   /* role disconnects its peer                */
     ACT_DISCONNECT_LATER, /* role defers disconnect until flushed */
     ACT_PEER_TIMEOUT, /* tighten peer timeout for fast recording  */
-    ACT_STOP_CLIENT   /* stop servicing the client host entirely  */
+    ACT_STOP_CLIENT,  /* stop servicing the client host entirely  */
+    ACT_INJECT        /* splice raw datagram bytes into the C2S proxy path */
 } ActionKind;
 
 typedef enum { ROLE_C, ROLE_S, ROLE_D } Role;
@@ -318,6 +341,79 @@ static const Action act_multip[] = {
     A_SEND(170, ROLE_S, 0, ENET_PACKET_FLAG_RELIABLE, payload_f, sizeof payload_f - 1),
 };
 
+/* ---------------- hostile datagrams (injected against the server) ----------------
+ *
+ * Hand-crafted probes pinning ENet's receive-path validation gates. Each is
+ * spliced into the C2S proxy path (appearing to come from the client), and
+ * ENet's response (or silence) is recorded like any other traffic; the replay
+ * then checks Lenet behaves identically. See test/README.md for the matrix. */
+
+/* valid header, zero commands: loop never runs, no response */
+static unsigned char inject_empty[] =
+    {0x80,0x00, 0x00,0x05};
+/* unknown command number (0x0D) as the FIRST command: break, nothing applied */
+static unsigned char inject_bad_first[] =
+    {0x80,0x00, 0x00,0x05, 0x0d,0xff,0x00,0x05};
+/* valid PING followed by an unknown command: prefix applied (ping ACKed),
+ * loop breaks at the malformed tail - the per-command-processing probe */
+static unsigned char inject_ping_unknown[] =
+    {0x80,0x00, 0x00,0x05, 0x85,0xff,0x00,0x05, 0x0d,0x00,0x00,0x00};
+/* CONNECT command header with a truncated body: break, nothing applied */
+static unsigned char inject_truncated[] =
+    {0x80,0x00, 0x00,0x05, 0x82,0xff,0x00,0x01};
+/* PING with a mismatched header session (peer 0 negotiated session 0):
+ * dropped by the peer-lookup session check */
+static unsigned char inject_sess_mismatch[] =
+    {0x90,0x00, 0x00,0x05, 0x85,0xff,0x00,0x05};
+/* compressed-flag datagram with no compressor configured: dropped */
+static unsigned char inject_compressed[] =
+    {0xc0,0x00, 0x00,0x05, 0x01,0x02,0x03,0x04};
+/* CONNECT (from peer 0xFFF) with channelCount = 0: rejected outright */
+static unsigned char inject_connect_ch0[] = {
+    0x8f,0xff, 0x00,0x05, 0x82,0xff, 0x00,0x01,
+    0x00,0x00, 0xff,0xff,
+    0x00,0x00,0x05,0x70,  /* mtu 1392 */
+    0x00,0x01,0x00,0x00,  /* windowSize 65536 */
+    0x00,0x00,0x00,0x00,  /* channelCount 0   <- hostile */
+    0x00,0x00,0x00,0x00, 0x00,0x00,0x00,0x00,
+    0x00,0x00,0x13,0x88, 0x00,0x00,0x00,0x02, 0x00,0x00,0x00,0x02,
+    0x11,0x22,0x33,0x44, 0x00,0x00,0x00,0x00
+};
+/* CONNECT with mtu = 0: accepted, MTU clamped to the 576 minimum in the
+ * advertised VERIFY_CONNECT (server peer slot 1) */
+static unsigned char inject_connect_mtu0[] = {
+    0x8f,0xff, 0x00,0x05, 0x82,0xff, 0x00,0x01,
+    0x00,0x00, 0xff,0xff,
+    0x00,0x00,0x00,0x00,  /* mtu 0            <- hostile */
+    0x00,0x01,0x00,0x00,
+    0x00,0x00,0x00,0x02,  /* channelCount 2 */
+    0x00,0x00,0x00,0x00, 0x00,0x00,0x00,0x00,
+    0x00,0x00,0x13,0x88, 0x00,0x00,0x00,0x02, 0x00,0x00,0x00,0x02,
+    0x55,0x66,0x77,0x88, 0x00,0x00,0x00,0x00
+};
+/* PING to the (by then zombie) peer 0: dropped by the peer-lookup state check */
+static unsigned char inject_zombie_ping[] =
+    {0x80,0x00, 0x00,0x05, 0x85,0xff,0x00,0x05};
+
+#define A_INJECT(MS, BUF) \
+    { .at_ms = (MS), .kind = ACT_INJECT, .data = (BUF), .data_len = sizeof (BUF) }
+
+static const Action act_inject[] = {
+    { .at_ms = 5,   .kind = ACT_CONNECT, .role = ROLE_C, .a = 2, .b = 0 },
+    /* validation-gate probes against the live, connected server */
+    A_INJECT(150, inject_empty),
+    A_INJECT(151, inject_bad_first),
+    A_INJECT(152, inject_ping_unknown),   /* partial apply: ping ACKed, tail dropped */
+    A_INJECT(153, inject_truncated),
+    A_INJECT(155, inject_sess_mismatch),
+    A_INJECT(156, inject_compressed),
+    A_INJECT(160, inject_connect_ch0),
+    A_INJECT(161, inject_connect_mtu0),
+    /* tear the connection down, then probe the zombie gate */
+    { .at_ms = 300, .kind = ACT_DISCONNECT, .role = ROLE_C, .a = 5 },
+    A_INJECT(380, inject_zombie_ping),
+};
+
 #define SC(NM, DUR, ACTS) \
     { .name = (NM), .duration_ms = (DUR), .actions = (ACTS), \
       .action_count = sizeof (ACTS) / sizeof ((ACTS)[0]), .with_checksum = 0, \
@@ -347,6 +443,7 @@ static const Scenario scenarios[] = {
     SC("unfrag",       800,  act_unfrag),
     SC("disclater",    800,  act_disclater),
     SC("multip",       800,  act_multip),
+    SC("inject",       800,  act_inject),
 };
 
 /* ---------------- runner ---------------- */
@@ -439,6 +536,17 @@ static void perform_action(const Action *act, ENetHost *client, ENetHost *server
         fprintf(trace_file, "A %llu C STOP\n", (unsigned long long)now_ms());
         return;
     }
+    case ACT_INJECT: {
+        /* Splice raw bytes into the client->server proxy path: log them as
+         * X2S (injected-into-server; never attributed to the client role),
+         * then loop them through the proxy so the server sees them from the
+         * proxy's address, exactly like real client traffic. */
+        log_datagram("X2S", act->data, act->data_len);
+        if (sendto(proxy_fd, act->data, act->data_len, 0,
+                   (struct sockaddr *)&proxy_addr, sizeof proxy_addr) < 0)
+          perror("inject sendto");
+        return;
+    }
     }
 }
 
@@ -498,7 +606,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "usage: harness record <scenario>\n"
                         "scenarios: connect send_c2s send_s2c frag "
                         "disc_client disc_server idle timeout checksum "
-                        "bandwidth unfrag disclater multip\n");
+                        "bandwidth unfrag disclater multip inject\n");
         return 1;
     }
     const char *want = argv[2];

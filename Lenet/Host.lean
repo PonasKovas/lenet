@@ -240,84 +240,97 @@ def handleDatagram (h : Host) (now : UInt32) (fromAddr : Address) (bytes : ByteA
       if let some cmd := datagram.commands[0]? then
         match cmd.body with
         | .connect params data =>
-          let freeIdx? := h.peers.findIdx? fun p => p.state == .disconnected
-          match freeIdx? with
-          | some idx =>
-            let p := h.peers[idx]?.getD default
-            let channels := Nat.min params.channelCount.toNat h.channelLimit
-            let peerChannels := Array.replicate channels Channel.init
-
-            -- ENet session negotiation (enet_protocol_handle_connect): each
-            -- side's `outgoing` session ID = (peer's `incoming` + 1) mod 4,
-            -- with 0xFF meaning "unset". Forwarding 0xFF verbatim would set
-            -- the header's compressed-flag bit in every later datagram.
-            let outSession :=
-              let base := if params.incomingSessionId == 0xFF then p.outgoingSessionId else params.incomingSessionId
-              let inc := (base + 1) &&& 3
-              if inc == p.outgoingSessionId then (inc + 1) &&& 3 else inc
-            let inSession :=
-              let base := if params.outgoingSessionId == 0xFF then p.incomingSessionId else params.outgoingSessionId
-              let inc := (base + 1) &&& 3
-              if inc == p.incomingSessionId then (inc + 1) &&& 3 else inc
-            -- ENet: the peer's receive window derives from the host's outgoing
-            -- bandwidth and the peer's offered incoming bandwidth
-            -- (enet_protocol_handle_connect).
-            let peerWindowSize := windowSizeFor h.outgoingBandwidth params.incomingBandwidth
-            -- ENet: the VERIFY_CONNECT advertises the server's incoming-
-            -- bandwidth-derived window, shrunk to the client's offer.
-            let hostInWindow : UInt32 :=
-              if h.incomingBandwidth == 0 then Constants.maximumWindowSize.toUInt32
-              else (h.incomingBandwidth.toNat / Constants.windowSizeScale.toNat * Constants.minimumWindowSize).toUInt32
-            let verifyWindow := Nat.min Constants.maximumWindowSize (Nat.max Constants.minimumWindowSize
-              (Nat.min hostInWindow.toNat params.windowSize.toNat)) |>.toUInt32
-            let verifyParams : Protocol.ConnectParams := {
-              outgoingPeerId             := p.peerId
-              incomingSessionId          := outSession
-              outgoingSessionId          := inSession
-              mtu                        := Nat.min h.mtu.toNat params.mtu.toNat |>.toUInt32
-              windowSize                 := verifyWindow
-              channelCount               := channels.toUInt32
-              incomingBandwidth          := h.incomingBandwidth
-              outgoingBandwidth          := h.outgoingBandwidth
-              packetThrottleInterval     := p.packetThrottleInterval
-              packetThrottleAcceleration := p.packetThrottleAcceleration
-              packetThrottleDeceleration := p.packetThrottleDeceleration
-              connectId                  := params.connectId
-            }
-
-            let verifyCmd : Protocol.Command := {
-              channelId              := 0xFF
-              reliableSequenceNumber := 1
-              acknowledge            := true
-              unsequenced            := false
-              body                   := .verifyConnect verifyParams
-            }
-
-            let outCmd : OutgoingCommand := { command := verifyCmd }
-            -- Control commands on channel 0xFF share a pre-incremented counter;
-            -- the VERIFY_CONNECT is the server's first control command (seq 1).
-            let (updatedPeer, controlSeq) := p.nextControlSeq
-            let verifyCmd := { verifyCmd with reliableSequenceNumber := controlSeq }
-            let outCmd := { outCmd with command := verifyCmd }
-            let updatedPeer := { updatedPeer with
-              address              := fromAddr
-              outgoingPeerId       := params.outgoingPeerId
-              connectId            := params.connectId
-              state                := .acknowledgingConnect
-              channels             := peerChannels
-              eventData            := data
-              mtu                  := verifyParams.mtu
-              windowSize           := peerWindowSize
-              incomingBandwidth    := params.incomingBandwidth
-              outgoingBandwidth    := params.outgoingBandwidth
-              incomingSessionId    := inSession
-              outgoingSessionId    := outSession
-            }.queueOutgoingCommand outCmd
-
-            let newPeers := if hIdx : idx < h.peers.size then h.peers.set idx updatedPeer hIdx else h.peers
-            ({ h with peers := newPeers }, #[])
-          | none =>
+          -- ENet (handle_connect) rejects channel counts outside [1, 255]
+          -- outright; anything else would corrupt the channel allocation.
+          if params.channelCount.toNat < Constants.minimumChannelCount ∨
+             params.channelCount.toNat > Constants.maximumChannelCount then
             (h, #[])
+          else
+            let freeIdx? := h.peers.findIdx? fun p => p.state == .disconnected
+            match freeIdx? with
+            | some idx =>
+              let p := h.peers[idx]?.getD default
+              let channels := Nat.min params.channelCount.toNat h.channelLimit
+              let peerChannels := Array.replicate channels Channel.init
+
+              -- ENet session negotiation (enet_protocol_handle_connect): each
+              -- side's `outgoing` session ID = (peer's `incoming` + 1) mod 4,
+              -- with 0xFF meaning "unset". Forwarding 0xFF verbatim would set
+              -- the header's compressed-flag bit in every later datagram.
+              let outSession :=
+                let base := if params.incomingSessionId == 0xFF then p.outgoingSessionId else params.incomingSessionId
+                let inc := (base + 1) &&& 3
+                if inc == p.outgoingSessionId then (inc + 1) &&& 3 else inc
+              let inSession :=
+                let base := if params.outgoingSessionId == 0xFF then p.incomingSessionId else params.outgoingSessionId
+                let inc := (base + 1) &&& 3
+                if inc == p.incomingSessionId then (inc + 1) &&& 3 else inc
+              -- ENet: the peer's receive window derives from the host's outgoing
+              -- bandwidth and the peer's offered incoming bandwidth
+              -- (enet_protocol_handle_connect).
+              let peerWindowSize := windowSizeFor h.outgoingBandwidth params.incomingBandwidth
+              -- ENet: the VERIFY_CONNECT advertises the server's incoming-
+              -- bandwidth-derived window, shrunk to the client's offer.
+              let hostInWindow : UInt32 :=
+                if h.incomingBandwidth == 0 then Constants.maximumWindowSize.toUInt32
+                else (h.incomingBandwidth.toNat / Constants.windowSizeScale.toNat * Constants.minimumWindowSize).toUInt32
+              let verifyWindow := Nat.min Constants.maximumWindowSize (Nat.max Constants.minimumWindowSize
+                (Nat.min hostInWindow.toNat params.windowSize.toNat)) |>.toUInt32
+              -- ENet (handle_connect): the offered MTU is clamped to
+              -- [minimumMtu, maximumMtu] *before* the min with the host's MTU;
+              -- a hostile mtu=0 must not collapse the peer's MTU.
+              let peerMtu :=
+                Nat.min h.mtu.toNat
+                  (Nat.min Constants.maximumMtu
+                    (Nat.max Constants.minimumMtu params.mtu.toNat))
+              let verifyParams : Protocol.ConnectParams := {
+                outgoingPeerId             := p.peerId
+                incomingSessionId          := outSession
+                outgoingSessionId          := inSession
+                mtu                        := peerMtu.toUInt32
+                windowSize                 := verifyWindow
+                channelCount               := channels.toUInt32
+                incomingBandwidth          := h.incomingBandwidth
+                outgoingBandwidth          := h.outgoingBandwidth
+                packetThrottleInterval     := p.packetThrottleInterval
+                packetThrottleAcceleration := p.packetThrottleAcceleration
+                packetThrottleDeceleration := p.packetThrottleDeceleration
+                connectId                  := params.connectId
+              }
+
+              let verifyCmd : Protocol.Command := {
+                channelId              := 0xFF
+                reliableSequenceNumber := 1
+                acknowledge            := true
+                unsequenced            := false
+                body                   := .verifyConnect verifyParams
+              }
+
+              let outCmd : OutgoingCommand := { command := verifyCmd }
+              -- Control commands on channel 0xFF share a pre-incremented counter;
+              -- the VERIFY_CONNECT is the server's first control command (seq 1).
+              let (updatedPeer, controlSeq) := p.nextControlSeq
+              let verifyCmd := { verifyCmd with reliableSequenceNumber := controlSeq }
+              let outCmd := { outCmd with command := verifyCmd }
+              let updatedPeer := { updatedPeer with
+                address              := fromAddr
+                outgoingPeerId       := params.outgoingPeerId
+                connectId            := params.connectId
+                state                := .acknowledgingConnect
+                channels             := peerChannels
+                eventData            := data
+                mtu                  := peerMtu.toUInt32
+                windowSize           := peerWindowSize
+                incomingBandwidth    := params.incomingBandwidth
+                outgoingBandwidth    := params.outgoingBandwidth
+                incomingSessionId    := inSession
+                outgoingSessionId    := outSession
+              }.queueOutgoingCommand outCmd
+
+              let newPeers := if hIdx : idx < h.peers.size then h.peers.set idx updatedPeer hIdx else h.peers
+              ({ h with peers := newPeers }, #[])
+            | none =>
+              (h, #[])
         | _ =>
           (h, #[])
       else
@@ -334,6 +347,10 @@ def handleDatagram (h : Host) (now : UInt32) (fromAddr : Address) (bytes : ByteA
         if p.outgoingPeerId < Constants.maximumPeerId ∧
            (!(p.address == {}) && p.address.host != Address.broadcast &&
               fromAddr != p.address) then
+          (h, #[])
+        -- ENet (protocol.c peer lookup): datagrams for disconnected or zombie
+        -- peers are dropped outright - no ACKs, no state changes.
+        else if p.state == .disconnected ∨ p.state == .zombie then
           (h, #[])
         else
           -- ENet drops datagrams whose header session doesn't match the peer's

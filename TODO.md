@@ -23,20 +23,10 @@ compatibility testing works), then come back here.
 
 ## Current state
 
-- 13 golden-trace scenarios, all roles PASS (connect, send_c2s, send_s2c,
+- 14 golden-trace scenarios, all roles PASS (connect, send_c2s, send_s2c,
   frag, disc_client, disc_server, idle, timeout, checksum, bandwidth, unfrag,
-  disclater, multip).
+  disclater, multip, inject).
 - Live interop: 7/7 PASS. C API distribution builds and self-checks.
-- Known divergences found during development, to be fixed in Phase 0 Pass A
-  (all "ENet is right" lenet bugs):
-  1. **Per-command processing**: ENet applies commands sequentially and keeps
-     everything before a malformed command; Lenet parses the whole datagram
-     up front, so one bad command drops the entire datagram.
-  2. **CONNECT parameter validation**: ENet rejects `channelCount` outside
-     [1, 255] and clamps MTU to [576, 4096] (protocol.c handle_connect);
-     Lenet clamps channelCount silently and accepts `mtu=0`.
-  3. **Invalid-state datagrams**: ENet drops datagrams addressed to
-     disconnected/zombie peers at the peer lookup; Lenet still processes them.
 
 ## Roadmap
 
@@ -44,18 +34,16 @@ Phases in order; each one gates the next. Exit criteria per phase listed.
 
 ### Phase 0 — ENet compatibility (current task)
 
-**Pass A (next up):**
-1. Fix the three known divergences above.
-2. Harness `INJECT` action + `inject` scenario: hand-picked hostile datagrams
-   (session mismatch, unknown command number, channelCount=0 / mtu=0 CONNECT,
-   truncated tail, wrong-address peerId, zombie-targeted, empty payload,
-   compressed-flag-without-compressor) are fed to *real ENet* at record time
-   and its response (events + emitted datagrams) is recorded as ordinary trace
-   lines; the replay then diffs Lenet's behavior against it. This pins the
-   drop/accept boundary with ENet as the oracle.
-   No fuzzing executable: the interesting input space (the receive-path
-   validation matrix in protocol.c) is small and enumerable; formal proofs
-   (Phase 2) subsume no-panic fuzzing.
+**Pass A (done):**
+1. ~~Fix the three known divergences~~ — done: per-command processing
+   (`Datagram.parseCommands`: sequential parse, apply prefix, stop at the
+   first malformed command), CONNECT validation (reject channelCount
+   ∉ [1,255], clamp MTU to [576,4096] before the host-MTU min), and
+   disconnected/zombie datagrams dropped at the peer lookup.
+2. ~~Harness `INJECT` action + `inject` scenario~~ — done: 9 hand-picked
+   hostile datagrams pinning ENet's receive-path validation gates (see the
+   matrix in test/README.md). Recorded ENet responses confirmed all three
+   fixes on the wire.
 
 **Pass B:**
 3. Scenarios: `multichannel` (8 channels), `dup` (DUP action re-sending a

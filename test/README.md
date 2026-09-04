@@ -65,6 +65,31 @@ and the replay is fully deterministic (no sockets, no real time).
 | `unfrag`       | 8000-byte unreliable-fragmented packet (`ENET_PACKET_FLAG_UNRELIABLE_FRAGMENT`) split into SEND_UNRELIABLE_FRAGMENT commands |
 | `disclater`    | `enet_peer_disconnect_later` while reliable commands are in flight: deferred DISCONNECT once queues drain |
 | `multip`       | two clients → one server (second proxy), server broadcast + unicast to a specific peer; exercises the peer-address check in the receive path |
+| `inject`       | hand-crafted hostile datagrams spliced into the C2S path (INJECT action) against the live server: pins ENet's receive-path validation gates (see below) |
+
+## Hostile-input probes (`inject` scenario)
+
+The `INJECT` action splices raw datagram bytes into the client→server proxy
+path (logged as direction `X2S`: they target the server only and are never
+attributed to the client role). Each probe pins one gate of ENet's receive
+path (protocol.c); the replay verifies lenet behaves identically:
+
+| probe                          | pins                                                          |
+|--------------------------------|---------------------------------------------------------------|
+| valid header, zero commands    | empty command loop is legal, no response                       |
+| unknown command number first   | malformed first command → nothing applied, no response         |
+| valid PING + unknown command   | **per-command processing**: prefix applied (ping ACKed), malformed tail dropped |
+| truncated command body         | break, nothing applied                                         |
+| PING with wrong header session | dropped by the peer-lookup session check                       |
+| compressed flag, no compressor | dropped                                                        |
+| CONNECT `channelCount = 0`     | rejected outright (must be in [1, 255])                        |
+| CONNECT `mtu = 0`              | accepted, MTU clamped to 576 in the advertised VERIFY_CONNECT  |
+| PING to a zombie peer          | dropped by the peer-lookup state check                         |
+
+These are differential scenarios (ENet is the record-time oracle), not
+fuzzing: the interesting input space — the validation matrix — is small and
+enumerable from protocol.c, and anything beyond it is covered by the planned
+formal proofs (see TODO.md, "No fuzzing executable").
 
 ## What is compared
 

@@ -34,12 +34,15 @@ def Role.label : Role → String
   | .client2 => "client2"
   | .server => "server"
 
-/-- Wire direction: client→server or server→client. -/
+/-- Wire direction: client→server, server→client, or script-injected
+hostile datagrams (`x2s`: spliced into the C2S path by the harness's INJECT
+action; they target the server only and are never attributed to a role). -/
 inductive Dir where
   | c2s
   | s2c
   | d2s
   | s2d
+  | x2s
   deriving BEq, Inhabited
 
 /-- Does a datagram travelling in `d` arrive at `r`? -/
@@ -48,6 +51,7 @@ def Dir.targets : Dir → Role → Bool
   | .s2c, .client => true
   | .d2s, .server => true
   | .s2d, .client2 => true
+  | .x2s, .server => true
   | _, _ => false
 
 /-- `Dir` of datagrams emitted by role `r`. -/
@@ -124,6 +128,7 @@ private def parseDir (s : String) : Option Dir :=
   else if s == "S2C" then some .s2c
   else if s == "D2S" then some .d2s
   else if s == "S2D" then some .s2d
+  else if s == "X2S" then some .x2s
   else none
 
 private def parseApiCall (kind : String) (ts : Array String) : Option ApiCall :=
@@ -356,12 +361,13 @@ private def applyApi (st : ReplayState) (ms : UInt32) : ApiCall → ReplayState
   | .stop => { st with stoppedFlag := true }
 
 /-- The proxy address a datagram in `dir` travels through (the `from`
-address the receiver sees). -/
+address the receiver sees). Injected datagrams travel the C2S path. -/
 def fromAddrOf : Dir → Address
   | .c2s => proxyAddr
   | .s2c => proxyAddr
   | .d2s => proxy2Addr
   | .s2d => proxy2Addr
+  | .x2s => proxyAddr
 
 private def step (role : Role) (st : ReplayState) (line : Line) : ReplayState :=
   if st.errors.size ≥ 3 then st -- stop accumulating after a blow-up
@@ -531,7 +537,8 @@ private def replayAndReport (scenario : String) (lines : Array Line) : IO Bool :
 
 def scenarioNames : Array String :=
   #["connect", "send_c2s", "send_s2c", "frag", "disc_client", "disc_server",
-    "idle", "timeout", "checksum", "bandwidth", "unfrag", "disclater", "multip"]
+    "idle", "timeout", "checksum", "bandwidth", "unfrag", "disclater",
+    "multip", "inject"]
 
 end Replay
 

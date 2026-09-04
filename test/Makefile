@@ -19,7 +19,7 @@ CFLAGS := -O1 -g -Wall -DHAS_FCNTL=1 -DHAS_POLL=1 -DHAS_GETADDRINFO=1 \
           -DHAS_GETNAMEINFO=1 -DHAS_INET_PTON=1 -DHAS_INET_NTOP=1 \
           -DHAS_SOCKLEN_T=1 -DHAS_MSGHDR_FLAGS=1 -I$(ENET_DIR)/include
 
-SCENARIOS := connect send_c2s send_s2c frag disc_client disc_server idle timeout checksum bandwidth unfrag disclater multip
+SCENARIOS := connect send_c2s send_s2c frag disc_client disc_server idle timeout checksum bandwidth unfrag disclater multip inject
 INTEROP_SCENARIOS := connect connect_r send frag disconnect disconnect_r timeout
 
 # Lean toolchain (for the interop harness linking liblenet_Lenet.a)

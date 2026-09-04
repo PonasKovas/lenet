@@ -42,6 +42,38 @@ def computeChecksum (pre : ByteArray) (post : ByteArray) (connectId : UInt32 := 
   let placeholder := WriterM.run (writeUInt32BE connectId) 4
   Checksum.crc32Buffers #[pre, placeholder, post]
 
+/-- Sequentially decodes commands until the first malformed one (ENet's
+receive loop `break`s there; everything before it was already applied).
+Every valid command consumes at least 4 wire bytes, so `fuel = payload
+size` always suffices. -/
+def parseCommands (bytes : ByteArray) : Array Command :=
+  go bytes.size bytes #[]
+where
+  /-- Total wire size of a decoded command: 4-byte header + body. -/
+  commandSize (cmd : Command) : Nat :=
+    4 + match cmd.body with
+      | .acknowledge ..             => 4
+      | .connect ..                 => 44
+      | .verifyConnect ..           => 40
+      | .disconnect ..              => 4
+      | .ping                       => 0
+      | .sendReliable d             => 2 + d.size
+      | .sendUnreliable _ d         => 4 + d.size
+      | .sendFragment p             => 20 + p.data.size
+      | .sendUnsequenced _ d        => 4 + d.size
+      | .bandwidthLimit ..          => 8
+      | .throttleConfigure ..       => 12
+      | .sendUnreliableFragment p   => 20 + p.data.size
+  go : Nat → ByteArray → Array Command → Array Command
+    | 0, _, acc => acc
+    | fuel' + 1, rest, acc =>
+      if rest.size == 0 then
+        acc
+      else
+        match ReaderM.run Command.decode rest with
+        | .ok cmd => go fuel' (rest.extract (commandSize cmd) rest.size) (acc.push cmd)
+        | .error _ => acc
+
 /--
 Decodes a datagram from a reader, optionally decompressing the commands payload
 if `header.compressed` is set and a `Compressor` is provided.
@@ -92,18 +124,12 @@ def decodeWith (hasChecksum : Bool := false) (connectIdOf : Option (UInt16 → U
   else
     pure ()
 
-  -- Parse commands from the (decompressed) payload:
-  let commands ← match ReaderM.run (do
-    let mut cmds : Array Command := #[]
-    while (← hasRemaining) do
-      let cmd ← Command.decode
-      cmds := cmds.push cmd
-    if cmds.isEmpty then
-      throw (CodecError.custom "Datagram must contain at least one command")
-    pure cmds
-  ) commandBytes with
-  | .ok cmds => pure cmds
-  | .error err => throw err
+  -- Parse commands from the (decompressed) payload, sequentially, ENet-style
+  -- (protocol.c receive loop): apply the prefix of well-formed commands and
+  -- stop at the first malformed one (unknown command number, truncated body).
+  -- ENet does not discard earlier commands when a later one is malformed, and
+  -- accepts a payload with zero commands (the loop simply never runs).
+  let commands := parseCommands commandBytes
 
   return { header, checksum, commands }
 
