@@ -1,4 +1,5 @@
 import Lenet.Constants
+import Lenet.Packet
 
 namespace Lenet
 
@@ -6,6 +7,7 @@ namespace Lenet
 Per-channel sequencing and sliding window state.
 Each peer connection in ENet maintains an array of independent channels.
 -/
+
 structure Channel where
   /-- Next sequence number to assign to an outgoing reliable command on this channel. -/
   outgoingReliableSequenceNumber   : UInt16 := 0
@@ -17,6 +19,8 @@ structure Channel where
   incomingUnreliableSequenceNumber : UInt16 := 0
   /-- Array of in-flight unacknowledged reliable command counts for each of the 16 windows. -/
   reliableWindows                  : Array UInt16 := Array.replicate Constants.reliableWindows 0
+  /-- Staged out-of-order reliable packets waiting for gaps in sequence numbers to be filled. -/
+  stagedReliable                   : Array (UInt16 × Packet) := #[]
 deriving BEq, Inhabited
 
 namespace Channel
@@ -114,6 +118,67 @@ def canSendReliable (c : Channel) (seq : UInt16) : Bool :=
       false
     else
       !c.isWindowRangeInUse relWin (freeWins + 2)
+
+/--
+Recursively drains contiguous staged reliable packets starting from `curSeq + 1`.
+Bounded by `fuel` (initial value: `staged.size`) to guarantee structural termination.
+-/
+def drainContiguousLoop (curSeq : UInt16) (staged : Array (UInt16 × Packet)) (delivered : Array Packet) (fuel : Nat) : UInt16 × Array Packet × Array (UInt16 × Packet) :=
+  match fuel with
+  | 0 => (curSeq, delivered, staged)
+  | fuel' + 1 =>
+    let targetSeq := curSeq + 1
+    match staged.findIdx? (fun (s, _) => s == targetSeq) with
+    | some idx =>
+      if h : idx < staged.size then
+        let pkt := staged[idx].2
+        let remaining := staged.eraseIdx idx h
+        drainContiguousLoop targetSeq remaining (delivered.push pkt) fuel'
+      else
+        (curSeq, delivered, staged)
+    | none =>
+      (curSeq, delivered, staged)
+
+/--
+Drains contiguous staged reliable packets starting from `curSeq + 1`.
+Returns the advanced sequence number, the drained packets in order, and the remaining staged packets.
+-/
+def drainContiguous (curSeq : UInt16) (staged : Array (UInt16 × Packet)) : UInt16 × Array Packet × Array (UInt16 × Packet) :=
+  drainContiguousLoop curSeq staged #[] staged.size
+
+/--
+Processes an incoming reliable packet with sequence number `seq`.
+- If duplicate / already delivered (`seq ≤ incomingReliableSequenceNumber`), drops it.
+- If in-order (`seq == incomingReliableSequenceNumber + 1`), delivers it and drains any contiguous staged packets.
+- If gap (`seq > incomingReliableSequenceNumber + 1`), stages it until preceding packets arrive.
+-/
+def receiveReliable (c : Channel) (seq : UInt16) (packet : Packet) : Channel × Array Packet :=
+  if seq ≤ c.incomingReliableSequenceNumber then
+    (c, #[])
+  else if seq == c.incomingReliableSequenceNumber + 1 then
+    let (newSeq, drained, remainingStaged) := drainContiguous seq c.stagedReliable
+    let updatedChannel := { c with
+      incomingReliableSequenceNumber   := newSeq
+      incomingUnreliableSequenceNumber := 0
+      stagedReliable                   := remainingStaged
+    }
+    (updatedChannel, #[packet] ++ drained)
+  else
+    -- Out-of-order: store in staged list (avoiding duplicate sequence insertions)
+    let alreadyStaged := c.stagedReliable.any (fun (s, _) => s == seq)
+    let newStaged := if alreadyStaged then c.stagedReliable else c.stagedReliable.push (seq, packet)
+    ({ c with stagedReliable := newStaged }, #[])
+
+/--
+Processes an incoming unreliable packet on this channel.
+- If newer than `incomingUnreliableSequenceNumber`, advances sequence number and accepts.
+- If older / out-of-order, discards as stale.
+-/
+def receiveUnreliable (c : Channel) (seq : UInt16) (packet : Packet) : Channel × Option Packet :=
+  if seq > c.incomingUnreliableSequenceNumber then
+    ({ c with incomingUnreliableSequenceNumber := seq }, some packet)
+  else
+    (c, none)
 
 end Channel
 

@@ -3,8 +3,10 @@ import Lenet.Time
 import Lenet.Address
 import Lenet.Channel
 import Lenet.Unsequenced
+import Lenet.Reassembly
 import Lenet.Packet
 import Lenet.OutgoingCommand
+import Lenet.Event
 
 namespace Lenet
 
@@ -68,6 +70,7 @@ structure Peer where
   outgoingCommands               : Array OutgoingCommand := #[]
   sentReliableCommands           : Array OutgoingCommand := #[]
   acknowledgements               : Array (UInt8 × UInt16 × UInt16) := #[]
+  fragmentAssemblers             : Array FragmentAssembler := #[]
 deriving BEq, Inhabited
 
 namespace Peer
@@ -109,6 +112,7 @@ def reset (p : Peer) : Peer :=
     outgoingCommands             := #[]
     sentReliableCommands         := #[]
     acknowledgements             := #[]
+    fragmentAssemblers           := #[]
   }
 
 /-- Queues an outgoing command for transmission. -/
@@ -359,6 +363,179 @@ def isTimedOut (p : Peer) (now : UInt32) (sendAttempts : Nat) : Bool :=
     let elapsed := Time.difference now p.earliestTimeout
     let attemptThreshold := (1 : UInt32) <<< (if sendAttempts == 0 then 0 else (sendAttempts - 1).toUInt32)
     elapsed ≥ p.timeoutMaximum ∨ (attemptThreshold ≥ p.timeoutLimit ∧ elapsed ≥ p.timeoutMinimum)
+
+/--
+Processes a single incoming protocol command received from this peer.
+- Automatically queues an ACK if the command requested acknowledgment.
+- Updates RTT, sliding window state, and fragment assembly.
+- Returns the updated `Peer` and any high-level `Event`s produced.
+-/
+def handleCommand (p : Peer) (now : UInt32) (cmd : Protocol.Command) (sentTime : Option UInt16) : Peer × Array Event :=
+  -- 1. Queue ACK if required:
+  let pAck :=
+    if cmd.acknowledge then
+      if let some st := sentTime then
+        p.queueAck cmd.channelId cmd.reliableSequenceNumber st
+      else
+        p
+    else
+      p
+
+  -- 2. Process command body:
+  match cmd.body with
+  | .acknowledge recvSeq recvTime =>
+    let sampleRtt := Time.difference now recvTime.toUInt32
+    let pRtt := pAck.updateRtt now sampleRtt
+    let (pRemoved, removedCmd?) := pRtt.removeSentReliableCommand cmd.channelId recvSeq
+
+    match pRemoved.state, removedCmd? with
+    | .acknowledgingConnect, some removedCmd =>
+      if removedCmd.body.commandNumber == Constants.commandVerifyConnect then
+        ({ pRemoved with state := .connected }, #[Event.connect pRemoved.peerId pRemoved.eventData])
+      else
+        (pRemoved, #[])
+    | .disconnecting, some removedCmd =>
+      if removedCmd.body.commandNumber == Constants.commandDisconnect then
+        ({ pRemoved with state := .zombie }, #[Event.disconnect pRemoved.peerId pRemoved.eventData])
+      else
+        (pRemoved, #[])
+    | .disconnectLater, _ =>
+      if pRemoved.outgoingCommands.isEmpty ∧ pRemoved.sentReliableCommands.isEmpty then
+        ({ pRemoved with state := .disconnecting }, #[])
+      else
+        (pRemoved, #[])
+    | _, _ =>
+      (pRemoved, #[])
+
+  | .ping =>
+    (pAck, #[])
+
+  | .sendReliable data =>
+    if pAck.state ≠ .connected ∧ pAck.state ≠ .disconnectLater then
+      (pAck, #[])
+    else
+      let chIdx := cmd.channelId.toNat
+      if h : chIdx < pAck.channels.size then
+        let ch := pAck.channels[chIdx]
+        let (ch', delivered) := ch.receiveReliable cmd.reliableSequenceNumber (Packet.reliable data)
+        let newChannels := pAck.channels.set chIdx ch' h
+        let events := delivered.map (fun pkt => Event.receive pAck.peerId cmd.channelId pkt)
+        ({ pAck with channels := newChannels }, events)
+      else
+        (pAck, #[])
+
+  | .sendUnreliable unseq data =>
+    if pAck.state ≠ .connected ∧ pAck.state ≠ .disconnectLater then
+      (pAck, #[])
+    else
+      let chIdx := cmd.channelId.toNat
+      if h : chIdx < pAck.channels.size then
+        let ch := pAck.channels[chIdx]
+        let (ch', deliveredOpt) := ch.receiveUnreliable unseq (Packet.unreliable data)
+        let newChannels := pAck.channels.set chIdx ch' h
+        let events := match deliveredOpt with
+          | some pkt => #[Event.receive pAck.peerId cmd.channelId pkt]
+          | none     => #[]
+        ({ pAck with channels := newChannels }, events)
+      else
+        (pAck, #[])
+
+  | .sendUnsequenced group data =>
+    if pAck.state ≠ .connected ∧ pAck.state ≠ .disconnectLater then
+      (pAck, #[])
+    else
+      match pAck.unsequencedWindow.checkAndAdd group with
+      | some newWin =>
+        let updatedPeer := { pAck with unsequencedWindow := newWin }
+        (updatedPeer, #[Event.receive pAck.peerId cmd.channelId (Packet.unsequenced data)])
+      | none =>
+        (pAck, #[])
+
+  | .sendFragment params =>
+    if pAck.state ≠ .connected ∧ pAck.state ≠ .disconnectLater then
+      (pAck, #[])
+    else
+      let startSeq := params.startSequenceNumber
+      let existingIdx? := pAck.fragmentAssemblers.findIdx? fun a => a.startSequenceNumber == startSeq
+
+      let (assemblers, assembler) := match existingIdx? with
+        | some idx =>
+          (pAck.fragmentAssemblers, pAck.fragmentAssemblers[idx]?.getD default)
+        | none =>
+          match FragmentAssembler.init startSeq params.totalLength.toNat params.fragmentCount.toNat with
+          | .ok newAsm => (pAck.fragmentAssemblers.push newAsm, newAsm)
+          | .error _   => (pAck.fragmentAssemblers, default)
+
+      match assembler.addFragment params.fragmentNumber.toNat params.fragmentOffset.toNat params.data with
+      | .ok (updatedAsm, some fullData) =>
+        let cleanAssemblers := assemblers.filter (fun a => a.startSequenceNumber ≠ startSeq)
+        let pClean := { pAck with fragmentAssemblers := cleanAssemblers }
+        let chIdx := cmd.channelId.toNat
+        if h : chIdx < pClean.channels.size then
+          let ch := pClean.channels[chIdx]
+          let (ch', delivered) := ch.receiveReliable startSeq (Packet.reliable fullData)
+          let newChannels := pClean.channels.set chIdx ch' h
+          let events := delivered.map (fun pkt => Event.receive pClean.peerId cmd.channelId pkt)
+          ({ pClean with channels := newChannels }, events)
+        else
+          (pClean, #[])
+      | .ok (updatedAsm, none) =>
+        let updatedList := assemblers.map (fun a => if a.startSequenceNumber == startSeq then updatedAsm else a)
+        ({ pAck with fragmentAssemblers := updatedList }, #[])
+      | .error _ =>
+        (pAck, #[])
+
+  | .sendUnreliableFragment params =>
+    if pAck.state ≠ .connected ∧ pAck.state ≠ .disconnectLater then
+      (pAck, #[])
+    else
+      let startSeq := params.startSequenceNumber
+      let existingIdx? := pAck.fragmentAssemblers.findIdx? fun a => a.startSequenceNumber == startSeq
+
+      let (assemblers, assembler) := match existingIdx? with
+        | some idx =>
+          (pAck.fragmentAssemblers, pAck.fragmentAssemblers[idx]?.getD default)
+        | none =>
+          match FragmentAssembler.init startSeq params.totalLength.toNat params.fragmentCount.toNat with
+          | .ok newAsm => (pAck.fragmentAssemblers.push newAsm, newAsm)
+          | .error _   => (pAck.fragmentAssemblers, default)
+
+      match assembler.addFragment params.fragmentNumber.toNat params.fragmentOffset.toNat params.data with
+      | .ok (updatedAsm, some fullData) =>
+        let cleanAssemblers := assemblers.filter (fun a => a.startSequenceNumber ≠ startSeq)
+        let pClean := { pAck with fragmentAssemblers := cleanAssemblers }
+        let chIdx := cmd.channelId.toNat
+        if h : chIdx < pClean.channels.size then
+          let ch := pClean.channels[chIdx]
+          let (ch', deliveredOpt) := ch.receiveUnreliable startSeq (Packet.unreliableFragment fullData)
+          let newChannels := pClean.channels.set chIdx ch' h
+          let events := match deliveredOpt with
+            | some pkt => #[Event.receive pClean.peerId cmd.channelId pkt]
+            | none     => #[]
+          ({ pClean with channels := newChannels }, events)
+        else
+          (pClean, #[])
+      | .ok (updatedAsm, none) =>
+        let updatedList := assemblers.map (fun a => if a.startSequenceNumber == startSeq then updatedAsm else a)
+        ({ pAck with fragmentAssemblers := updatedList }, #[])
+      | .error _ =>
+        (pAck, #[])
+
+  | .disconnect data =>
+    ({ pAck with state := .zombie, eventData := data }, #[Event.disconnect pAck.peerId data])
+
+  | .bandwidthLimit inBw outBw =>
+    ({ pAck with incomingBandwidth := inBw, outgoingBandwidth := outBw }, #[])
+
+  | .throttleConfigure interval accel decel =>
+    ({ pAck with
+       packetThrottleInterval     := interval
+       packetThrottleAcceleration := accel
+       packetThrottleDeceleration := decel
+    }, #[])
+
+  | .connect .. | .verifyConnect .. =>
+    (pAck, #[])
 
 end Peer
 
