@@ -5,10 +5,52 @@ on:
   pull_request:
   workflow_dispatch:
 
+# The compatibility tests depend on the real ENet C library, which lives
+# outside this repo. CI clones it at a pinned revision (the checkout the
+# golden traces were recorded against) instead of using a submodule.
+
+env:
+  ENET_REPO: https://github.com/lsalzman/enet.git
+  ENET_SHA:  5a9c537fd464b3c6d3c55e1d3bd47588faf71b42 # v1.3.18-17-g5a9c537
+
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v5
       - uses: leanprover/lean-action@v1
+
+  # Tier 1: no ENet needed - golden traces are committed and the replay
+  # is fully deterministic.
+  replay:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: leanprover/lean-action@v1
+      - run: lake build replay
+      - run: ./.lake/build/bin/replay test/traces
+
+  # Tier 1: the C API distribution builds and works from a pure C program
+  # that sees only include/lenet.h.
+  c-api:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: leanprover/lean-action@v1
+      - run: lake build Lenet:static
+      - run: make -C csrc check
+
+  # Tier 2: live interop - Lenet (Lean FFI) vs a real ENet host over real
+  # UDP sockets. ENet is cloned at the pinned revision into the sibling
+  # path the test Makefile expects (../enet relative to the repo root).
+  interop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: leanprover/lean-action@v1
+      - name: Clone ENet at pinned revision
+        run: |
+          git clone "$ENET_REPO" "$GITHUB_WORKSPACE/../enet"
+          git -C "$GITHUB_WORKSPACE/../enet" checkout "$ENET_SHA"
+      - run: make -C test ENET_DIR="$GITHUB_WORKSPACE/../enet" c/interop
+      - run: make -C test interop
