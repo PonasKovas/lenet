@@ -17,8 +17,9 @@ structure Channel where
   incomingReliableSequenceNumber   : UInt16 := 0
   /-- Highest unreliable sequence number received in the current reliable window. -/
   incomingUnreliableSequenceNumber : UInt16 := 0
-  /-- Array of in-flight unacknowledged reliable command counts for each of the 16 windows. -/
-  reliableWindows                  : Array UInt16 := Array.replicate Constants.reliableWindows 0
+  /-- In-flight unacknowledged reliable command counts for each of the
+  `Constants.reliableWindows` windows. Fixed-size by construction. -/
+  reliableWindows                  : Vector UInt16 Constants.reliableWindows := Vector.replicate Constants.reliableWindows 0
   /-- Staged out-of-order reliable packets waiting for gaps in sequence numbers to be filled. -/
   stagedReliable                   : Array (UInt16 × Packet) := #[]
 deriving BEq, Inhabited
@@ -28,10 +29,19 @@ namespace Channel
 /-- Creates an initialized, reset channel. -/
 def init : Channel := {}
 
+/-- Any index reduced mod the window count is a valid window slot. -/
+theorem modWindowIndex_lt (i : Nat) :
+    i % Constants.reliableWindows < Constants.reliableWindows :=
+  Nat.mod_lt _ (by decide)
+
 /-- Computes the window slot index (0..15) for a 16-bit sequence number. -/
 @[inline]
 def windowIndex (seq : UInt16) : Nat :=
   (seq.toNat / Constants.reliableWindowSize) % Constants.reliableWindows
+
+/-- `windowIndex` is always a valid window slot. -/
+theorem windowIndex_lt (seq : UInt16) : windowIndex seq < Constants.reliableWindows :=
+  modWindowIndex_lt _
 
 /--
 Increments and returns the next outgoing reliable sequence number.
@@ -67,30 +77,19 @@ Records that a reliable command has been sent in the sequence window of `seq`.
 -/
 def acquireReliableWindow (c : Channel) (seq : UInt16) : Channel :=
   let winIdx := windowIndex seq
-  let count := c.reliableWindows[winIdx]?.getD 0 + 1
-  let newWindows :=
-    if h : winIdx < c.reliableWindows.size then
-      c.reliableWindows.set winIdx count h
-    else
-      c.reliableWindows
-  { c with reliableWindows := newWindows }
+  let count := c.reliableWindows[winIdx]'(windowIndex_lt seq) + 1
+  { c with reliableWindows := c.reliableWindows.set winIdx count (windowIndex_lt seq) }
 
 /--
 Releases a reliable command from its window upon receiving an acknowledgment.
 -/
 def releaseReliableWindow (c : Channel) (seq : UInt16) : Channel :=
   let winIdx := windowIndex seq
-  let count := c.reliableWindows[winIdx]?.getD 0
+  let count := c.reliableWindows[winIdx]'(windowIndex_lt seq)
   if count == 0 then
     c
   else
-    let newCount := count - 1
-    let newWindows :=
-      if h : winIdx < c.reliableWindows.size then
-        c.reliableWindows.set winIdx newCount h
-      else
-        c.reliableWindows
-    { c with reliableWindows := newWindows }
+    { c with reliableWindows := c.reliableWindows.set winIdx (count - 1) (windowIndex_lt seq) }
 
 /--
 Checks whether any window slot in the circular range `[startWin, startWin + length)` has in-flight commands.
@@ -98,7 +97,7 @@ Checks whether any window slot in the circular range `[startWin, startWin + leng
 def isWindowRangeInUse (c : Channel) (startWin : Nat) (length : Nat) : Bool :=
   (List.range length).any fun offset =>
     let idx := (startWin + offset) % Constants.reliableWindows
-    c.reliableWindows[idx]?.getD 0 > 0
+    c.reliableWindows[idx]'(modWindowIndex_lt (startWin + offset)) > 0
 
 /--
 Checks whether an outgoing reliable command with sequence number `seq` can be sent
@@ -113,7 +112,7 @@ def canSendReliable (c : Channel) (seq : UInt16) : Bool :=
     true
   else
     let prevWinIdx := (relWin + numWins - 1) % numWins
-    let prevCount  := c.reliableWindows[prevWinIdx]?.getD 0
+    let prevCount  := c.reliableWindows[prevWinIdx]'(modWindowIndex_lt (relWin + numWins - 1))
     if prevCount.toNat ≥ winSize then
       false
     else

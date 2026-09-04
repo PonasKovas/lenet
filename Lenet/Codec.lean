@@ -13,7 +13,7 @@ instance : ToString CodecError where
     | .unexpectedEndOfInput exp got => s!"Unexpected EOF: expected {exp} bytes, found {got}"
     | .invalidEnumValue ty val      => s!"Invalid enum value for {ty}: {val}"
     | .trailingGarbage rem          => s!"Trailing unparsed bytes remaining: {rem}"
-    | .custom msg                   => msg -- stuff that wont be matched over anyway
+    | .custom msg                   => msg -- misc failures that carry their own message
 
 --------------------------------------------------------------------------------
 -- ByteReader (Binary Parser Monad)

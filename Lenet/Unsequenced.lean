@@ -19,7 +19,9 @@ Continuous sliding window for unsequenced packet deduplication using a circular 
 structure UnsequencedWindow where
   highestGroup : UInt16 := 0
   hasReceived  : Bool := false
-  window       : Array Bool := Array.replicate Constants.unsequencedWindowSize false
+  /-- Received-group ring of `Constants.unsequencedWindowSize` slots.
+  Fixed-size by construction. -/
+  window       : Vector Bool Constants.unsequencedWindowSize := Vector.replicate Constants.unsequencedWindowSize false
 deriving BEq, Inhabited
 
 namespace UnsequencedWindow
@@ -27,11 +29,17 @@ namespace UnsequencedWindow
 /-- Creates an initialized unsequenced window. -/
 def init : UnsequencedWindow := {}
 
+/-- Any index reduced mod the window size is a valid ring slot. -/
+theorem modSlot_lt (i : Nat) :
+    i % Constants.unsequencedWindowSize < Constants.unsequencedWindowSize :=
+  Nat.mod_lt _ (by decide)
+
 /-- Clears a range of skipped slots in the circular buffer `(fromGroup, toGroup)`. -/
-def clearRange (win : Array Bool) (fromGroup : UInt16) (count : Nat) : Array Bool :=
+def clearRange (win : Vector Bool Constants.unsequencedWindowSize) (fromGroup : UInt16) (count : Nat) :
+    Vector Bool Constants.unsequencedWindowSize :=
   (List.range count).foldl (init := win) fun w step =>
     let slot := (fromGroup.toNat + 1 + step) % Constants.unsequencedWindowSize
-    if h : slot < w.size then w.set slot false h else w
+    w.set slot false (modSlot_lt (fromGroup.toNat + 1 + step))
 
 /--
 Deduplicates incoming unsequenced packets.
@@ -44,8 +52,8 @@ def checkAndAdd (w : UnsequencedWindow) (group : UInt16) : Option UnsequencedWin
 
   if !w.hasReceived then
     -- First unsequenced packet ever received:
-    let newWin := if h : slot < w.window.size then w.window.set slot true h else w.window
-    some { highestGroup := group, hasReceived := true, window := newWin }
+    some { highestGroup := group, hasReceived := true,
+           window := w.window.set slot true (modSlot_lt group.toNat) }
   else
     let diff := sequenceDistance group w.highestGroup
     if diff > 0 then
@@ -53,21 +61,23 @@ def checkAndAdd (w : UnsequencedWindow) (group : UInt16) : Option UnsequencedWin
       let gap := diff.toNat
       let clearedWin :=
         if gap ≥ winSize then
-          Array.replicate winSize false
+          Vector.replicate winSize false
         else
           -- Clear only the skipped slots (for gap = 1, clears 0 slots)
           clearRange w.window w.highestGroup (gap - 1)
-
-      let newWin := if h : slot < clearedWin.size then clearedWin.set slot true h else clearedWin
-      some { highestGroup := group, hasReceived := true, window := newWin }
+      some { highestGroup := group, hasReceived := true,
+             window := clearedWin.set slot true (modSlot_lt group.toNat) }
     else
       -- 2. Older packet: check if within the 1024-packet history
       let offset := (-diff).toNat
       if offset < winSize then
-        if w.window[slot]?.getD false then
+        if w.window[slot]'(modSlot_lt group.toNat) then
           none -- Duplicate
         else
-          let newWin := if h : slot < w.window.size then w.window.set slot true h else w.window
-          some { w with window := newWin }
+          some { w with window := w.window.set slot true (modSlot_lt group.toNat) }
       else
         none -- Stale / too old
+
+end UnsequencedWindow
+
+end Lenet

@@ -49,21 +49,6 @@ size` always suffices. -/
 def parseCommands (bytes : ByteArray) : Array Command :=
   go bytes.size bytes #[]
 where
-  /-- Total wire size of a decoded command: 4-byte header + body. -/
-  commandSize (cmd : Command) : Nat :=
-    4 + match cmd.body with
-      | .acknowledge ..             => 4
-      | .connect ..                 => 44
-      | .verifyConnect ..           => 40
-      | .disconnect ..              => 4
-      | .ping                       => 0
-      | .sendReliable d             => 2 + d.size
-      | .sendUnreliable _ d         => 4 + d.size
-      | .sendFragment p             => 20 + p.data.size
-      | .sendUnsequenced _ d        => 4 + d.size
-      | .bandwidthLimit ..          => 8
-      | .throttleConfigure ..       => 12
-      | .sendUnreliableFragment p   => 20 + p.data.size
   go : Nat → ByteArray → Array Command → Array Command
     | 0, _, acc => acc
     | fuel' + 1, rest, acc =>
@@ -71,7 +56,7 @@ where
         acc
       else
         match ReaderM.run Command.decode rest with
-        | .ok cmd => go fuel' (rest.extract (commandSize cmd) rest.size) (acc.push cmd)
+        | .ok cmd => go fuel' (rest.extract (cmd.wireSize) rest.size) (acc.push cmd)
         | .error _ => acc
 
 /--

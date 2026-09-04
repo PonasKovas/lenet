@@ -45,6 +45,45 @@ Lenet's primary objective is always **correctness and robustness**. Compatibilit
 - **NO PANICS** anywhere in the library: no panicking constructs (`get!`-style indexing without proofs, `unsafe`, partial pattern matches, unguarded arithmetic). Any possible error is an exception returned to the caller. This gate is a precondition for the no-panics formal proof and is checked in the code-quality phase.
 - The core is total by construction: every function terminates on every input.
 
+### 1.7 Code Style Conventions (Phase 1 gate)
+
+Binding conventions for everything under `Lenet/`:
+
+- **No panicking constructs.** No `getElem!` (`xs[i]!`), `Array.get!`, `unsafe`,
+  `partial`, `sorry`, or partial pattern matches. Array access is either
+  proof-guarded (`if h : i < xs.size then xs[i]`) or a `?`-match whose `none`
+  branch is an explicit error or a commented unreachable case.
+- **No `getD` defaults that fabricate state.** A `?.getD d` is allowed only
+  when `d` is the semantically correct answer for "absent" (e.g. an `Option`
+  event defaulting to `#[]`, an empty ring-buffer slot reading as `0`/`false`).
+  Where absence would mean an internal invariant broke (a default `Peer`,
+  default `Channel`, default assembler), the case is handled explicitly:
+  typed error, drop, or commented-unreachable - never a silently fabricated
+  object that lets execution continue as if nothing happened.
+- **Fixed-size state carries its bounds in its type.** Ring windows that are
+  constant-sized by construction (`Channel.reliableWindows`,
+  `UnsequencedWindow.window`) are `Vector _ N`; the index bounds are
+  discharged once by the `*_lt` lemmas next to the index definition, not by
+  runtime guards.
+- **Typed errors at the API boundary.** Public fallible operations return
+  `Except LenetError _` (one constructor per failure mode, with a `ToString`
+  rendering); stringly-typed errors are not used. Wire-decode failures use
+  `CodecError`.
+- **Total by construction.** Every function terminates on every input:
+  recursion is structural or fuel-bounded (the fuel bound and its initial
+  value are documented at the loop). No `partial`.
+- **No imperative leftovers.** Pure state threading uses `foldl`/`map` over
+  ranges, not `let mut` accumulators in `for` loops. `IO` appears only in
+  `Lenet.FFI`.
+- **Wrap-aware arithmetic is intentional and documented.** `UInt*`
+  add/subtract/shift wrap, matching ENet's fixed-width arithmetic (timers,
+  sequence numbers) - that is parity, not a bug. `Nat` subtraction must never
+  be relied on to saturate where the value matters.
+- **Single source of truth for wire sizes.** Command sizes live in
+  `Protocol.CommandBody.fixedWireSize` / `payloadSize`; the encoder, the
+  datagram parser's advance logic, and the packer's MTU budget all derive
+  from them.
+
 ---
 
 ## 2. Project Roadmap

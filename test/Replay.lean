@@ -112,7 +112,7 @@ private def hexVal (c : Char) : Nat :=
   if c.isDigit then n - 48 else if n ≥ 97 then n - 87 else n - 55
 
 private def parseHex (s : String) : ByteArray :=
-  let cs := s.data
+  let cs := s.toList
   let n := cs.length / 2
   (List.range n).foldl (init := ByteArray.empty) fun acc i =>
     acc.push (UInt8.ofNat (hexVal cs[2*i]! * 16 + hexVal cs[2*i+1]!))
@@ -218,7 +218,7 @@ def parseTrace (text : String) : Array Line :=
 /-! ## Masked command comparison -/
 
 private def hexOf (b : ByteArray) : String :=
-  let digits := "0123456789abcdef".data
+  let digits := "0123456789abcdef".toList
   let nib (v : Nat) : Char := digits.getD (v &&& 15) 'x'
   b.foldl (init := "") fun acc x =>
     acc.push (nib (x.toNat >>> 4)) |>.push (nib x.toNat)

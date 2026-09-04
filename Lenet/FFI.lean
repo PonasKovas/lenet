@@ -114,12 +114,9 @@ def ffi_host_service (ctxRef : IO.Ref HostContext) (nowMs : UInt32) : IO Int32 :
 @[export lenet_ffi_host_poll_event]
 def ffi_host_poll_event (ctxRef : IO.Ref HostContext) : IO (Option (UInt32 × UInt16 × UInt8 × UInt32 × ByteArray)) := do
   let ctx ← ctxRef.get
-  if ctx.pendingEvents.isEmpty then
-    return none
-  else
-    let ev := ctx.pendingEvents[0]!
-    let remainingEvents := if h : 0 < ctx.pendingEvents.size then ctx.pendingEvents.eraseIdx 0 h else #[]
-    ctxRef.set { ctx with pendingEvents := remainingEvents }
+  if h : 0 < ctx.pendingEvents.size then
+    let ev := ctx.pendingEvents[0]
+    ctxRef.set { ctx with pendingEvents := ctx.pendingEvents.eraseIdx 0 h }
     match ev with
     | .connect peerId data =>
       return some (1, peerId, 0, data, ByteArray.empty)
@@ -127,16 +124,17 @@ def ffi_host_poll_event (ctxRef : IO.Ref HostContext) : IO (Option (UInt32 × UI
       return some (2, peerId, 0, data, ByteArray.empty)
     | .receive peerId channelId packet =>
       return some (3, peerId, channelId, 0, packet.data)
+  else
+    return none
 
 @[export lenet_ffi_host_poll_outgoing]
 def ffi_host_poll_outgoing (ctxRef : IO.Ref HostContext) : IO (Option (UInt32 × UInt16 × ByteArray)) := do
   let ctx ← ctxRef.get
-  if ctx.pendingPackets.isEmpty then
-    return none
-  else
-    let (addr, bytes) := ctx.pendingPackets[0]!
-    let remainingPackets := if h : 0 < ctx.pendingPackets.size then ctx.pendingPackets.eraseIdx 0 h else #[]
-    ctxRef.set { ctx with pendingPackets := remainingPackets }
+  if h : 0 < ctx.pendingPackets.size then
+    let (addr, bytes) := ctx.pendingPackets[0]
+    ctxRef.set { ctx with pendingPackets := ctx.pendingPackets.eraseIdx 0 h }
     return some (addr.host, addr.port, bytes)
+  else
+    return none
 
 end Lenet.FFI

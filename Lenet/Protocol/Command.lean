@@ -147,6 +147,33 @@ def commandNumber : CommandBody → UInt8
   | .throttleConfigure ..      => Constants.commandThrottleConfigure
   | .sendUnreliableFragment .. => Constants.commandSendUnreliableFragment
 
+/-- Wire size of the body's fixed part, excluding the 4-byte command header
+and any packet payload bytes. Single source of truth shared by the encoder,
+the datagram parser's advance logic, and the packer's MTU budget. -/
+def fixedWireSize : CommandBody → Nat
+  | .acknowledge ..             => 4
+  | .connect ..                 => 44
+  | .verifyConnect ..           => 40
+  | .disconnect ..              => 4
+  | .ping                       => 0
+  | .sendReliable _             => 2
+  | .sendUnreliable _ _         => 4
+  | .sendFragment _             => 20
+  | .sendUnsequenced _ _        => 4
+  | .bandwidthLimit ..          => 8
+  | .throttleConfigure ..       => 12
+  | .sendUnreliableFragment _   => 20
+
+/-- Wire size of the body's trailing payload bytes (zero for commands
+without one). -/
+def payloadSize : CommandBody → Nat
+  | .sendReliable d             => d.size
+  | .sendUnreliable _ d         => d.size
+  | .sendUnsequenced _ d        => d.size
+  | .sendFragment p             => p.data.size
+  | .sendUnreliableFragment p   => p.data.size
+  | _                           => 0
+
 def encode (body : CommandBody) : WriterM Unit := do
   match body with
   | .acknowledge receivedSeq receivedTime =>
@@ -198,6 +225,11 @@ structure Command where
 deriving BEq, Inhabited
 
 namespace Command
+
+/-- Total wire size of a serialized command: 4-byte command header + body
+(+ trailing payload bytes when `includePayload`). -/
+def wireSize (cmd : Command) (includePayload : Bool := true) : Nat :=
+  4 + cmd.body.fixedWireSize + (if includePayload then cmd.body.payloadSize else 0)
 
 def decode : ReaderM Command := do
   let rawCommand ← readUInt8

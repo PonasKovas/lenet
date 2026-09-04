@@ -66,28 +66,29 @@ def addFragment (a : FragmentAssembler) (fragmentNumber : Nat) (offset : Nat) (d
     throw (CodecError.custom "Fragment data extends beyond total packet length")
 
   -- If this fragment was already received, ignore duplicate chunk:
-  if a.received[fragmentNumber]?.getD false then
+  match a.received[fragmentNumber]? with
+  | none =>
+    -- Unreachable: `fragmentNumber < a.fragmentCount` was checked above and
+    -- `received` is allocated with `fragmentCount` slots in `init`.
+    throw (CodecError.custom s!"received-bitset out of sync with fragment count {a.fragmentCount}")
+  | some true =>
     return (a, none)
+  | some false =>
+    let newReceived := a.received.setIfInBounds fragmentNumber true
 
-  let newReceived :=
-    if h : fragmentNumber < a.received.size then
-      a.received.set fragmentNumber true h
+    let newBuffer := copyBytes a.buffer offset data
+    let remaining := a.fragmentsRemaining - 1
+
+    let updated := { a with
+      received           := newReceived
+      buffer             := newBuffer
+      fragmentsRemaining := remaining
+    }
+
+    if remaining == 0 then
+      return (updated, some updated.buffer)
     else
-      a.received
-
-  let newBuffer := copyBytes a.buffer offset data
-  let remaining := a.fragmentsRemaining - 1
-
-  let updated := { a with
-    received           := newReceived
-    buffer             := newBuffer
-    fragmentsRemaining := remaining
-  }
-
-  if remaining == 0 then
-    return (updated, some updated.buffer)
-  else
-    return (updated, none)
+      return (updated, none)
 
 end FragmentAssembler
 

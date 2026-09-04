@@ -5,6 +5,7 @@ import Lenet.Codec
 import Lenet.Time
 import Lenet.Checksum
 import Lenet.Address
+import Lenet.Error
 import Lenet.Packet
 import Lenet.Channel
 import Lenet.Unsequenced
@@ -13,7 +14,6 @@ import Lenet.OutgoingCommand
 import Lenet.Event
 import Lenet.Peer
 import Lenet.Host
-import Lenet.Compress
 import Lenet.FFI
 import Lenet.Protocol.Header
 import Lenet.Protocol.Command

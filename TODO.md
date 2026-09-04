@@ -34,6 +34,8 @@ compatibility testing works), then come back here.
   disclater, multip, inject, multichannel, dup, reconnect, retimeout, mtu576,
   throttleconf).
 - Live interop: 12/12 PASS. C API distribution builds and self-checks.
+- Phase 1 (code quality) is done: typed errors, `Vector`-backed fixed-size
+  windows, no panicking constructs, conventions in DESIGN.md 1.7.
 
 ## Roadmap
 
@@ -70,14 +72,46 @@ Phases in order; each one gates the next. Exit criteria per phase listed.
 **Exit criteria (met):** 20 scenarios all PASS; interop 12/12; DESIGN.md
 constraints recorded; divergence triage documented.
 
-### Phase 1 — Code quality
+### Phase 1 — Code quality (done)
 
 Idiomatic Lean pass over `Lenet/`: eliminate imperative leftovers from the C
-rewrite (mutable-accumulator patterns, `getD`-defaults masking logic, `Except
-String` -> typed errors), total-by-construction patterns.
-**Exit criteria:** zero warnings; zero panicking constructs (`get!`, `unsafe`,
-partial matches, unguarded arithmetic) anywhere in `Lenet/` — this is the
-hard gate; style conventions written down.
+rewrite (mutable-accumulator patterns, `getD`-defaults masking logic,
+`Except String` -> typed errors), total-by-construction patterns.
+
+Done in the pass:
+1. Typed errors: `LenetError` (new `Lenet/Error.lean`) replaces `Except
+   String` on `Host.connect` / `Host.send` / `Peer.send`.
+2. Total-by-construction fixed-size state: `Channel.reliableWindows` and
+   `UnsequencedWindow.window` are `Vector _ N` with `*_lt` index lemmas;
+   `FragmentAssembler.addFragment` handles the impossible-bitset case with an
+   explicit `CodecError` instead of a `getD false` that could have masked a
+   desync (decrement-without-record).
+3. No fabricated defaults: the default-`Peer`/default-`Channel`/default
+   assembler `getD` fallbacks are gone (`Host.connect`,
+   `Host.handleDatagram`'s connect path, `Peer.removeSentReliableCommand` now
+   `find?`+`erase`-based, `Peer.handleFragment` extracted - the two duplicated
+   fragment branches collapsed into one helper).
+4. Checksum table lookup is provably in-bounds (UInt8 index +
+   `crcTable_size`), no `getD 0` that would silently corrupt a CRC.
+5. `Peer.send` fragment loop de-mutated (`let mut` + `for` -> `map`/`foldl`
+   over the fragment range); channel access is bounds-guarded with a typed
+   error, not a default channel.
+6. FFI event/outgoing polling no longer uses `getElem!` (`[0]!`) - guarded
+   access instead.
+7. Wire-size tables unified: `CommandBody.fixedWireSize` / `payloadSize` /
+   `Command.wireSize` are the single source of truth for both the datagram
+   parser's advance logic and the packer's MTU budget.
+8. Dead `Lenet/Compress.lean` removed: it contained a non-roundtripping fake
+   range coder and a decompress that returned its input unchanged -
+   misleading and dangerous if ever wired in (compression remains descoped;
+   the `Compressor` hook in `Codec.lean` stays).
+9. Style conventions written down: DESIGN.md 1.7.
+
+**Exit criteria (met):** zero warnings (lib + replay); zero panicking
+constructs (`getElem!`, `unsafe`, `partial`, unguarded array indexing) in
+`Lenet/` - the one remaining `getD` is an `Option` default (`no event ->
+#[]`), the semantically-correct-for-absent idiom; corpus 20/20 PASS and
+interop 12/12 PASS unchanged (refactors are behavior-preserving).
 
 ### Phase 2 — Formal proofs
 
