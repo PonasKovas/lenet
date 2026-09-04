@@ -9,6 +9,7 @@ import Lenet.Packet
 import Lenet.Channel
 import Lenet.Unsequenced
 import Lenet.Reassembly
+import Lenet.OutgoingCommand
 import Lenet.Event
 import Lenet.Peer
 import Lenet.Protocol.Header

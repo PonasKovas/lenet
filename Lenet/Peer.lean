@@ -4,6 +4,7 @@ import Lenet.Address
 import Lenet.Channel
 import Lenet.Unsequenced
 import Lenet.Packet
+import Lenet.OutgoingCommand
 
 namespace Lenet
 
@@ -21,7 +22,7 @@ inductive PeerState where
   | disconnecting
   | acknowledgingDisconnect
   | zombie
-deriving Repr, BEq, Inhabited
+deriving Repr, BEq, DecidableEq, Inhabited
 
 /--
 A peer endpoint representing a remote connected host.
@@ -64,6 +65,9 @@ structure Peer where
   packetThrottleInterval         : UInt32 := Constants.defaultPacketThrottleInterval
   eventData                      : UInt32 := 0
   reliableDataInTransit          : Nat := 0
+  outgoingCommands               : Array OutgoingCommand := #[]
+  sentReliableCommands           : Array OutgoingCommand := #[]
+  acknowledgements               : Array (UInt8 × UInt16 × UInt16) := #[]
 deriving BEq, Inhabited
 
 namespace Peer
@@ -102,7 +106,185 @@ def reset (p : Peer) : Peer :=
     packetThrottleEpoch          := 0
     reliableDataInTransit        := 0
     eventData                    := 0
+    outgoingCommands             := #[]
+    sentReliableCommands         := #[]
+    acknowledgements             := #[]
   }
+
+/-- Queues an outgoing command for transmission. -/
+def queueOutgoingCommand (p : Peer) (cmd : OutgoingCommand) : Peer :=
+  { p with outgoingCommands := p.outgoingCommands.push cmd }
+
+/-- Queues an acknowledgment (channelId, reliableSequenceNumber, sentTime) to be sent to this peer. -/
+def queueAck (p : Peer) (channelId : UInt8) (seq : UInt16) (sentTime : UInt16) : Peer :=
+  { p with acknowledgements := p.acknowledgements.push (channelId, seq, sentTime) }
+
+/--
+Removes an in-flight reliable command upon receiving its acknowledgment.
+Releases the channel's sliding window slot and decrements `reliableDataInTransit`.
+-/
+def removeSentReliableCommand (p : Peer) (channelId : UInt8) (seq : UInt16) : Peer × Option Protocol.Command :=
+  let idx? := p.sentReliableCommands.findIdx? fun outCmd =>
+    outCmd.command.channelId == channelId && outCmd.command.reliableSequenceNumber == seq
+
+  match idx? with
+  | some idx =>
+    let outCmd := p.sentReliableCommands[idx]?.getD default
+    let remainingCommands :=
+      if h : idx < p.sentReliableCommands.size then
+        p.sentReliableCommands.eraseIdx idx
+      else
+        p.sentReliableCommands
+
+    -- Release window slot on the channel:
+    let chIdx := channelId.toNat
+    let newChannels :=
+      if h : chIdx < p.channels.size then
+        let ch := p.channels[chIdx]
+        p.channels.set chIdx (ch.releaseReliableWindow seq) h
+      else
+        p.channels
+
+    let inTransit :=
+      if p.reliableDataInTransit ≥ outCmd.fragmentLength then
+        p.reliableDataInTransit - outCmd.fragmentLength
+      else
+        0
+
+    let updatedPeer := { p with
+      sentReliableCommands  := remainingCommands
+      channels              := newChannels
+      reliableDataInTransit := inTransit
+    }
+    (updatedPeer, some outCmd.command)
+  | none =>
+    (p, none)
+
+/--
+Queues a user packet to be sent on the specified channel of this peer.
+Automatically fragments packets exceeding the channel MTU into individual fragment commands.
+-/
+def send (p : Peer) (channelId : UInt8) (packet : Packet) (hasChecksum : Bool := false) : Except String Peer := do
+  if p.state ≠ .connected then
+    throw "Cannot send packet: peer is not connected"
+  if channelId.toNat ≥ p.channels.size then
+    throw s!"Invalid channel ID {channelId} (peer has {p.channels.size} channels)"
+
+  let channel := p.channels[channelId.toNat]?.getD Channel.init
+  let headerOverhead : Nat := 4 + (if hasChecksum then 4 else 0)
+  let fragmentOverhead : Nat := headerOverhead + 28
+  let maxPayload : Nat := if p.mtu.toNat > fragmentOverhead then p.mtu.toNat - fragmentOverhead else 500
+
+  if packet.data.size > maxPayload then
+    -- Fragmented packet send
+    let fragmentLength := maxPayload
+    let fragmentCount := (packet.data.size + fragmentLength - 1) / fragmentLength
+
+    if fragmentCount > Constants.maximumFragmentCount then
+      throw "Packet exceeds maximum allowable fragment count"
+
+    let isUnreliableFrag := packet.delivery == .unreliableFragment
+    let (ch', startSeq) :=
+      if isUnreliableFrag then
+        channel.nextUnreliableSequenceNumber
+      else
+        channel.nextReliableSequenceNumber
+
+    let newChannels :=
+      if h : channelId.toNat < p.channels.size then
+        p.channels.set channelId.toNat ch' h
+      else
+        p.channels
+
+    let mut updatedPeer := { p with channels := newChannels }
+
+    for i in [0:fragmentCount] do
+      let offset := i * fragmentLength
+      let len := Nat.min fragmentLength (packet.data.size - offset)
+      let chunk := packet.data.extract offset (offset + len)
+
+      let fragParams : Protocol.FragmentParams := {
+        startSequenceNumber := startSeq
+        fragmentCount       := fragmentCount.toUInt32
+        fragmentNumber      := i.toUInt32
+        totalLength         := packet.data.size.toUInt32
+        fragmentOffset      := offset.toUInt32
+        data                := chunk
+      }
+
+      let cmdBody : Protocol.CommandBody :=
+        if isUnreliableFrag then
+          .sendUnreliableFragment fragParams
+        else
+          .sendFragment fragParams
+
+      let cmd : Protocol.Command := {
+        channelId
+        reliableSequenceNumber := if isUnreliableFrag then 0 else startSeq
+        acknowledge            := !isUnreliableFrag
+        unsequenced            := false
+        body                   := cmdBody
+      }
+
+      let outCmd : OutgoingCommand := {
+        command        := cmd
+        fragmentOffset := offset
+        fragmentLength := len
+      }
+      updatedPeer := updatedPeer.queueOutgoingCommand outCmd
+
+    return updatedPeer
+  else
+    -- Unfragmented single command send
+    let (ch', cmd) := match packet.delivery with
+      | .reliable =>
+        let (ch, seq) := channel.nextReliableSequenceNumber
+        (ch, {
+          channelId
+          reliableSequenceNumber := seq
+          acknowledge            := true
+          unsequenced            := false
+          body                   := .sendReliable packet.data
+        })
+      | .unreliable =>
+        let (ch, unseq) := channel.nextUnreliableSequenceNumber
+        (ch, {
+          channelId
+          reliableSequenceNumber := ch.outgoingReliableSequenceNumber
+          acknowledge            := false
+          unsequenced            := false
+          body                   := .sendUnreliable unseq packet.data
+        })
+      | .unsequenced =>
+        (channel, {
+          channelId
+          reliableSequenceNumber := 0
+          acknowledge            := false
+          unsequenced            := true
+          body                   := .sendUnsequenced 0 packet.data
+        })
+      | .unreliableFragment =>
+        let (ch, unseq) := channel.nextUnreliableSequenceNumber
+        (ch, {
+          channelId
+          reliableSequenceNumber := ch.outgoingReliableSequenceNumber
+          acknowledge            := false
+          unsequenced            := false
+          body                   := .sendUnreliable unseq packet.data
+        })
+
+    let newChannels :=
+      if h : channelId.toNat < p.channels.size then
+        p.channels.set channelId.toNat ch' h
+      else
+        p.channels
+
+    let outCmd : OutgoingCommand := {
+      command        := cmd
+      fragmentOffset := 0
+      fragmentLength := packet.data.size
+    }
+    return ({ p with channels := newChannels }).queueOutgoingCommand outCmd
 
 /--
 Dynamically updates the packet throttle based on current round trip time.
