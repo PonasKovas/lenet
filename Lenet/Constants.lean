@@ -62,4 +62,19 @@ def packetFlagNoAllocate         : UInt32 := (1 : UInt32) <<< 2
 def packetFlagUnreliableFragment : UInt32 := (1 : UInt32) <<< 3
 def packetFlagSent               : UInt32 := (1 : UInt32) <<< 8
 
+/-! ### Peer Defaults & Throttle Constants -/
+
+def defaultRoundTripTime              : UInt32 := 500
+def defaultPacketThrottle             : UInt32 := 32
+def packetThrottleScale               : UInt32 := 32
+def packetThrottleCounter             : UInt32 := 7
+def defaultPacketThrottleAcceleration : UInt32 := 2
+def defaultPacketThrottleDeceleration : UInt32 := 2
+def defaultPacketThrottleInterval     : UInt32 := 5000
+def defaultPingInterval               : UInt32 := 500
+def defaultTimeoutLimit               : UInt32 := 32
+def defaultTimeoutMinimum             : UInt32 := 5000
+def defaultTimeoutMaximum             : UInt32 := 30000
+def windowSizeScale                   : UInt32 := 64 * 1024
+
 end Lenet.Constants
