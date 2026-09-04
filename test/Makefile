@@ -26,7 +26,6 @@ INTEROP_SCENARIOS := connect connect_r send frag disconnect disconnect_r timeout
 TOOLCHAIN := $(patsubst %/bin/leanc,%,$(abspath $(shell ls ~/.elan/toolchains/*/bin/leanc | head -1)))
 LEAN_INC  := $(TOOLCHAIN)/include
 LEANLIB   := $(TOOLCHAIN)/lib/lean
-LENET_STATIC := ../.lake/build/lib/liblenet_Lenet.a
 
 .PHONY: all traces record interop clean
 
@@ -44,8 +43,6 @@ $(ENET_LIB): $(ENET_OBJS)
 $(HARNESS): $(HARNESS_SRC) $(ENET_LIB)
 	$(CC) $(CFLAGS) $(HARNESS_SRC) $(ENET_LIB) -o $@ -lm
 
-$(LENET_STATIC):
-	lake build Lenet:static
 
 c/interop: c/interop.c ../csrc/build/liblenet.a
 	$(CC) $(CFLAGS) -I../include c/interop.c $(ENET_LIB) ../csrc/build/liblenet.a \

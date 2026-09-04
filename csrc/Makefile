@@ -10,8 +10,8 @@
 # because libleanrt.a is built without -fPIC (TLS relocations).
 
 TOOLCHAIN := $(patsubst %/bin/leanc,%,$(shell ls $(HOME)/.elan/toolchains/*/bin/leanc | head -1))
+LEAN_INC  := $(TOOLCHAIN)/include
 LEANLIB   := $(TOOLCHAIN)/lib/lean
-LEANC     := $(TOOLCHAIN)/bin/leanc
 
 LEAN_STATIC := $(abspath ../.lake/build/lib/liblenet_Lenet.a)
 
@@ -20,13 +20,13 @@ LEAN_STATIC := $(abspath ../.lake/build/lib/liblenet_Lenet.a)
 all: build/liblenet.a
 
 $(LEAN_STATIC):
-	lake build Lenet:static
+	lake -d .. build Lenet:static
 
 build:
 	mkdir -p build
 
 build/lenet_capi.o: lenet_capi.c ../include/lenet.h | build
-	$(LEANC) -O2 -I../include -c lenet_capi.c -o $@
+	$(CC) -O2 -I../include -I$(LEAN_INC) -c lenet_capi.c -o $@
 
 # Merge everything into one archive: the Lean-compiled library, this shim,
 # the Lean runtime (libInit, leanrt), bundled GMP, and the bundled libc++
