@@ -2,3 +2,4 @@
 test/.build/
 test/c/harness
 test/c/interop
+csrc/build/

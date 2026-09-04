@@ -47,9 +47,12 @@ $(HARNESS): $(HARNESS_SRC) $(ENET_LIB)
 $(LENET_STATIC):
 	lake build Lenet:static
 
-c/interop: c/interop.c $(ENET_LIB) $(LENET_STATIC)
-	$(TOOLCHAIN)/bin/leanc $(CFLAGS) -I$(LEAN_INC) c/interop.c $(ENET_LIB) $(LENET_STATIC) \
-	    $(LEANLIB)/libInit.a $(LEANLIB)/libleanrt.a -o $@ -lm -lpthread -ldl
+c/interop: c/interop.c ../csrc/build/liblenet.a
+	$(CC) $(CFLAGS) -I../include c/interop.c $(ENET_LIB) ../csrc/build/liblenet.a \
+	    -o $@ -lpthread -ldl -lm
+
+../csrc/build/liblenet.a:
+	$(MAKE) -C ../csrc
 
 traces: $(HARNESS)
 	@mkdir -p traces
