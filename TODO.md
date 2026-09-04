@@ -1,10 +1,137 @@
-# Remaining goals
+# Roadmap & Working Notes
 
-State at end of session: M1 golden-trace replay 16/16 PASS, M2 live interop
-7/7 PASS, C API distribution builds and self-checks, CI wired up
-(`.github/workflows/lean_action_ci.yml`). All on `master`.
+Lenet is a sans-I/O reimplementation of the ENet protocol in Lean 4, with a
+plain C API distribution. This file is the living plan: what is done, what is
+next, and the decisions that are not up for relitigating. New to the project?
+Read `DESIGN.md` (architecture + principles) and `test/README.md` (how the
+compatibility testing works), then come back here.
 
-## CI notes
+## How the pieces fit
+
+- `Lenet/` — the sans-I/O core. Pure state machine: datagrams in, events +
+  outgoing datagrams out, time supplied by the caller.
+- `csrc/` + `include/lenet.h` — the C distribution (`liblenet.a`), built from
+  the compiled Lean core. Static-only by design.
+- `test/` — the compatibility corpus (see `test/README.md` for the full
+  picture):
+  - `c/harness.c` records golden traces from *real* ENet (pinned revision)
+  - `test/Replay.lean` (`lake build replay`) replays them through Lenet and
+    diffs events + outgoing commands against ENet's
+  - `c/interop.c` runs Lenet (via FFI) against real ENet over live UDP
+- CI (`.github/workflows/lean_action_ci.yml`) runs: build, replay (Tier 1),
+  C API check (Tier 1), live interop (Tier 2, clones ENet at the pin).
+
+## Current state
+
+- 13 golden-trace scenarios, all roles PASS (connect, send_c2s, send_s2c,
+  frag, disc_client, disc_server, idle, timeout, checksum, bandwidth, unfrag,
+  disclater, multip).
+- Live interop: 7/7 PASS. C API distribution builds and self-checks.
+- Known divergences found during development, to be fixed in Phase 0 Pass A
+  (all "ENet is right" lenet bugs):
+  1. **Per-command processing**: ENet applies commands sequentially and keeps
+     everything before a malformed command; Lenet parses the whole datagram
+     up front, so one bad command drops the entire datagram.
+  2. **CONNECT parameter validation**: ENet rejects `channelCount` outside
+     [1, 255] and clamps MTU to [576, 4096] (protocol.c handle_connect);
+     Lenet clamps channelCount silently and accepts `mtu=0`.
+  3. **Invalid-state datagrams**: ENet drops datagrams addressed to
+     disconnected/zombie peers at the peer lookup; Lenet still processes them.
+
+## Roadmap
+
+Phases in order; each one gates the next. Exit criteria per phase listed.
+
+### Phase 0 — ENet compatibility (current task)
+
+**Pass A (next up):**
+1. Fix the three known divergences above.
+2. Harness `INJECT` action + `inject` scenario: hand-picked hostile datagrams
+   (session mismatch, unknown command number, channelCount=0 / mtu=0 CONNECT,
+   truncated tail, wrong-address peerId, zombie-targeted, empty payload,
+   compressed-flag-without-compressor) are fed to *real ENet* at record time
+   and its response (events + emitted datagrams) is recorded as ordinary trace
+   lines; the replay then diffs Lenet's behavior against it. This pins the
+   drop/accept boundary with ENet as the oracle.
+   No fuzzing executable: the interesting input space (the receive-path
+   validation matrix in protocol.c) is small and enumerable; formal proofs
+   (Phase 2) subsume no-panic fuzzing.
+
+**Pass B:**
+3. Scenarios: `multichannel` (8 channels), `dup` (DUP action re-sending a
+   captured datagram: duplicate reliable/ACK idempotency), `reconnect`
+   (disconnect -> reconnect, slot reuse, state reset), `retimeout`
+   (client-side timeout), `mtu576` (needs an MTU parameter on `Host.create`,
+   clamped to [576, 4096]), `throttleconf` (`enet_peer_throttle_configure`).
+4. Interop extensions: FFI/C API additions (`lenet_host_enable_checksum`,
+   `lenet_host_disconnect_later`, MTU on create) + interop scenarios
+   `checksum`, `bandwidth`, `disclater`, `multip`, `unfrag`.
+
+**Exit criteria:** ~19 scenarios all PASS; interop ~12/12; DESIGN.md
+constraints recorded; divergence triage documented.
+
+### Phase 1 — Code quality
+
+Idiomatic Lean pass over `Lenet/`: eliminate imperative leftovers from the C
+rewrite (mutable-accumulator patterns, `getD`-defaults masking logic, `Except
+String` -> typed errors), total-by-construction patterns.
+**Exit criteria:** zero warnings; zero panicking constructs (`get!`, `unsafe`,
+partial matches, unguarded arithmetic) anywhere in `Lenet/` — this is the
+hard gate; style conventions written down.
+
+### Phase 2 — Formal proofs
+
+Prove what the corpus showed matters: codec roundtrip; decode totality on
+arbitrary input; fragment reassembly bounds safety; reliable in-order
+delivery; no-panics across `Host.handleDatagram` / `Host.service`.
+**Exit criteria:** proofs compile and are maintained in CI; corpus still
+passes (proofs must not break the tested behavior).
+
+### Phase 3 — Performance
+
+Benchmark executable (throughput per delivery mode, CPU cost per service
+tick), then easy wins only (buffer reuse vs `extract`, fold/array churn,
+encode paths). **Exit criteria:** recorded baseline numbers; proofs + corpus
+stay green.
+
+### Phase 4 — lenet-rs (async Rust bindings)
+
+Separate repository: `-sys` crate over the (by then extended) C API with
+hand-written externs and `build.rs` linking `liblenet.a`; sans-I/O API maps
+to a tokio driver (one task owns the host: socket + `lenet_host_service(now)`
++ poll loops); builder-style API, event stream. Threading contract: one host,
+one thread (or external serialization).
+**Exit criteria:** async interop test vs real ENet from Rust.
+
+## Explicitly out of scope
+
+- **Compression** (ENet's optional PPM range coder): descoped — see
+  DESIGN.md 1.4. Compressed datagrams are rejected.
+- **Sequence-wrap golden traces** (~65k commands per channel needed; the
+  wrap logic is exercised by proofs instead).
+- **Packet loss / reordering chaos scenarios** (recording is
+  non-deterministic; the replay needs determinism).
+- **Resource-exhaustion parity** (e.g. fragment-assembler growth on rejected
+  fragments): documented, not tested; ENet has similar pressure points.
+
+## Decided constraints (do not relitigate)
+
+- **Correctness over compatibility** (DESIGN.md 1.5, in stone): an ENet bug
+  is fixed in Lenet, never mirrored. First applications are the Phase 0
+  Pass A divergence fixes.
+- Golden traces are pinned to ENet `5a9c537` (v1.3.18-17); bumping enet
+  requires re-recording traces (`make -C test traces`) and a diff review.
+- Shared library is impossible with a stock Lean toolchain (leanrt built
+  without -fPIC); the C distribution is static-only by design.
+- Test philosophy: Lenet must interop, not bit-clone ENet. Divergences are
+  triaged per DESIGN.md 1.5 (lenet bug / enet bug -> fix, don't mirror /
+  don't-care mask with rationale in `test/README.md`).
+- No fuzzing executable: hostile-input coverage comes from hand-picked INJECT
+  scenarios (ENet as the record-time oracle) plus formal proofs; seeded fuzz
+  adds sampling cost without finding what proofs won't already cover.
+- Compression is descoped (DESIGN.md 1.4).
+
+## Operational notes (CI, recording)
 
 - ENet is cloned in CI at the pinned revision the golden traces were
   recorded against: upstream `lsalzman/enet` @ `5a9c537fd464b3c6d3c55e1d3bd47588faf71b42`
@@ -15,55 +142,3 @@ State at end of session: M1 golden-trace replay 16/16 PASS, M2 live interop
 - Watch the first CI run for runner-specific issues; locally-verified
   fixes were: shim compiles with plain `$(CC)` (leanc's bundled clang
   lacks system headers), lake must run with `-d ..` from `csrc/`.
-
-## Test completeness (base behavior is covered; gaps below, cheap first)
-
-1. ~~Tighten M1 replay: unmask session IDs in `maskCmd`~~ — done: session IDs
-   are byte-verified (negotiation is deterministic); only `connectId` stays
-   masked (ENet randomness at record time).
-2. ~~Session-ID validation on receive~~ — done: `Host.handleDatagram` drops
-   datagrams whose header session ≠ the peer's `incomingSessionId` once the
-   peer's outgoing ID is negotiated (protocol.c peer lookup parity).
-3. ~~Checksum~~ — done: CRC32 compute/verify wired into
-   `Datagram.encodeWith`/`decodeWith` (connectID-substitution quirk: ENet
-   passes `connectID` through the body without byte-order conversion, so the
-   substitution is the BE serialization). New `checksum` scenario recorded
-   with `enet_crc32` on both C hosts; replay verifies recorded checksums and
-   18/18 PASS.
-4. ~~Feature-completion scenarios~~ — done: `bandwidth` (nonzero bandwidth
-   configs: ENet's iterative BANDWIDTH_LIMIT share algorithm, bandwidth-
-   derived windowSize negotiation on connect/verify/bandwidthLimit receive,
-   window congestion check in the packer), `unfrag` (unreliable-fragment
-   delivery), `disclater` (`Host.disconnectLater` + drain transition),
-   `multip` (two clients + broadcast; new peer-address check on receive,
-   peer-indexed SEND in the trace format). 13 scenarios, all PASS.
-5. Robustness fuzz: seeded random/truncated datagrams into
-   `Host.handleDatagram`, assert no panics (design rule). Goes in its own
-   executable — the replay exe stays replay-specific.
-6. Compression: `Compress.compressBytes`/`decompressBytes` are stubs.
-   Implement the real order-2 PPM range coder, then add a compression
-   interop scenario (`enet_host_compress_with_range_coder` on both sides).
-   Largest remaining feature chunk.
-7. Optional M3 twin differential: parallel C-server vs lenet-server fed
-   identical inputs, byte-diff outputs with masks.
-
-## Next major goals (the original reason for all this)
-
-- **Async-Rust wrapper**: `-sys` crate over `include/lenet.h` (bindgen or
-  hand-written externs), `build.rs` linking `csrc/build/liblenet.a`;
-  sans-I/O API maps directly to a tokio driver (one task owns the host:
-  socket + `lenet_host_service(now)` + poll loops). Threading contract:
-  one host driven from one thread (or serialize externally).
-- **Formal proofs in Lean**: codec roundtrip, reassembly bounds safety,
-  no-panics invariant, reliable in-order delivery. The compatibility test
-  corpus tells which invariants matter for real interop.
-
-## Decided constraints (do not relitigate)
-
-- Golden traces are pinned to ENet `5a9c537` (v1.3.18-17); bumping enet
-  requires re-recording traces (`make -C test traces`) and a diff review.
-- Shared library is impossible with a stock Lean toolchain (leanrt built
-  without -fPIC); the C distribution is static-only by design.
-- Test philosophy: lenet must interop, not bit-clone ENet. Divergences are
-  triaged as lenet bug / enet bug (whitelist w/ reason) / don't-care (mask
-  w/ rationale in `test/README.md`).

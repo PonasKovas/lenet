@@ -10,6 +10,12 @@ protocol (1.3.x wire-compatible), with a plain C API.
   runtimes (e.g. Rust/Tokio).
 - **Clean C distribution** — builds to a single self-contained
   `liblenet.a`; nothing Lean is visible to consumers.
+- **Correctness over compatibility** — where ENet is buggy, lenet implements
+  the correct behavior instead of mirroring the bug (see `DESIGN.md`).
+- **Not implemented**: ENet's optional compression (order-2 PPM range coder)
+  is explicitly descoped; compressed datagrams are rejected. See `DESIGN.md`
+  and `TODO.md` for the roadmap (code quality, formal proofs, performance,
+  and async Rust bindings are the planned next phases).
 
 ## Building the C library
 
