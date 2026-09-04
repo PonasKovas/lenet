@@ -56,6 +56,6 @@ The living roadmap (phases, exit criteria, task state) is maintained in `TODO.md
 ## 3. Repository Layout
 
 - `Lenet/` - the sans-I/O protocol core (pure Lean)
-- `csrc/` + `include/lenet.h` - the C API distribution (static-only; Lean runtime archive is not built with `-fPIC`)
+- `csrc/` - the C API distribution incl. `include/lenet.h` (static-only; Lean runtime archive is not built with `-fPIC`)
 - `test/` - ENet compatibility harness: golden-trace recorder (`c/harness.c`), replay diff (`test/Replay.lean`), live interop (`c/interop.c`); see `test/README.md`
 - `TODO.md` - roadmap and decided constraints

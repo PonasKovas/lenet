@@ -10,13 +10,19 @@ compatibility testing works), then come back here.
 
 - `Lenet/` — the sans-I/O core. Pure state machine: datagrams in, events +
   outgoing datagrams out, time supplied by the caller.
-- `csrc/` + `include/lenet.h` — the C distribution (`liblenet.a`), built from
-  the compiled Lean core. Static-only by design.
+- `csrc/` — the C distribution: `include/lenet.h` (public API),
+  `lenet_capi.c` (shim over the Lean FFI), and the built `liblenet.a`.
+  Static-only by design.
 - `test/` — the compatibility corpus (see `test/README.md` for the full
   picture):
   - `c/harness.c` records golden traces from *real* ENet (pinned revision)
   - `test/Replay.lean` (`lake build replay`) replays them through Lenet and
-    diffs events + outgoing commands against ENet's
+    diffs events + outgoing commands against ENet's. Ticking is
+    deadline-driven: the replay services Lenet at the host's own timer
+    boundaries (`Host.nextDeadline`) between trace lines, so retransmit /
+    timeout / ping / throttle timing is insensitive to where recorded
+    datagram lines happen to fall (pump jitter between ENet's internal
+    serviceTime and the logged timestamps is ~1ms)
   - `c/interop.c` runs Lenet (via FFI) against real ENet over live UDP
 - CI (`.github/workflows/lean_action_ci.yml`) runs: build, replay (Tier 1),
   C API check (Tier 1), live interop (Tier 2, clones ENet at the pin).
@@ -93,7 +99,9 @@ stay green.
 Separate repository: `-sys` crate over the (by then extended) C API with
 hand-written externs and `build.rs` linking `liblenet.a`; sans-I/O API maps
 to a tokio driver (one task owns the host: socket + `lenet_host_service(now)`
-+ poll loops); builder-style API, event stream. Threading contract: one host,
++ poll loops, scheduling ticks via the host's timer deadlines — the same
+primitive the replay uses, exposed to the driver as `Host.nextDeadline`);
+builder-style API, event stream. Threading contract: one host,
 one thread (or external serialization).
 **Exit criteria:** async interop test vs real ENet from Rust.
 

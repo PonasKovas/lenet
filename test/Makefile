@@ -45,7 +45,7 @@ $(HARNESS): $(HARNESS_SRC) $(ENET_LIB)
 
 
 c/interop: c/interop.c $(ENET_LIB) ../csrc/build/liblenet.a
-	$(CC) $(CFLAGS) -I../include c/interop.c $(ENET_LIB) ../csrc/build/liblenet.a \
+	$(CC) $(CFLAGS) -I../csrc/include c/interop.c $(ENET_LIB) ../csrc/build/liblenet.a \
 	    -o $@ -lpthread -ldl -lm
 
 ../csrc/build/liblenet.a:

@@ -2,7 +2,7 @@
  * Live interop harness: a real C ENet host and a Lenet host talk to each
  * other over actual UDP sockets in one process.
  *
- * This program uses ONLY the public C API declared in ../../include/lenet.h
+ * This program uses ONLY the public C API declared in ../../csrc/include/lenet.h
  * and links only against libcsrc/build/liblenet.a — no Lean headers, no
  * Lean symbols. If this compiles and passes, the C API is clean.
  *
@@ -28,7 +28,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 
-#include "../../include/lenet.h"
+#include "../../csrc/include/lenet.h"
 
 #define LENET_PORT 40010
 #define ENET_PORT  40011

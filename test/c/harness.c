@@ -457,12 +457,12 @@ static const Action act_reconnect[] = {
 
 static const Action act_retimeout[] = {
     { .at_ms = 5,   .kind = ACT_CONNECT,      .role = ROLE_C, .a = 2, .b = 0 },
-    /* client: fail fast: limit=4 attempts, min=200ms, max=1000ms
-     * (max must tolerate the 1ms pump jitter between ENet's internal
-     * serviceTime and the logged trace timestamps, so a retransmit that
-     * ENet emits at t and lenet at t+290ms still lands in the same
-     * multiset; the timeout event itself is timestamp-insensitive) */
-    { .at_ms = 100, .kind = ACT_PEER_TIMEOUT, .role = ROLE_C, .a = 4, .b = 200, .c = 1000 },
+    /* client: fail fast: limit=4 attempts, min=200ms, max=600ms
+     * (ENet-faithful parameters; the replay fires timers deadline-driven,
+     * so the ~1ms pump jitter between ENet's internal serviceTime and the
+     * logged timestamps does not shift lenet's retransmit/timeout
+     * boundaries past trace lines) */
+    { .at_ms = 100, .kind = ACT_PEER_TIMEOUT, .role = ROLE_C, .a = 4, .b = 200, .c = 600 },
     { .at_ms = 200, .kind = ACT_STOP_SERVER },
     A_SEND(210, ROLE_C, 0, ENET_PACKET_FLAG_RELIABLE, payload_a, sizeof payload_a - 1),
 };

@@ -40,7 +40,7 @@ Smoke-check the build (compiles a public-header-only program and runs it):
 make -C csrc check
 ```
 
-See `include/lenet.h` for the API and `csrc/check.c` for a minimal example.
+See `csrc/include/lenet.h` for the API and `csrc/check.c` for a minimal example.
 A shared library is not currently possible: Lean's runtime archive is built
 without `-fPIC`.
 

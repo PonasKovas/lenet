@@ -777,6 +777,48 @@ def service (h : Host) (now : UInt32) : Host × Array (Address × ByteArray) × 
   let (hPolled, outgoingPackets, dispatchEvents) := hTimedOut.pollOutgoing now
   (hPolled, outgoingPackets, timeoutEvents ++ dispatchEvents)
 
+/--
+The next wall-clock deadline at which this host's state can change, or `none`
+if nothing is scheduled. Drivers use this to schedule their next service tick
+without busy-pumping: between datagram arrivals, calling `service` exactly at
+the returned deadline is sufficient.
+
+Included timers (each fires a state change, so the value monotonically
+advances):
+- retransmit/timeout boundary of every in-flight reliable command
+  (`sentTime + roundTripTimeout`)
+- keepalive ping boundary of every connected, fully drained peer
+  (`lastReceiveTime + pingInterval`)
+- bandwidth-throttle epoch boundary (`epoch + interval`)
+
+The returned value is a lower bound semantics-wise: servicing *at or after*
+the deadline triggers the pending work. Timestamps are UInt32 milliseconds
+and may wrap; drivers comparing deadlines must use the same wrap-aware
+arithmetic as `Lenet.Time`.
+-/
+def nextDeadline (h : Host) : Option UInt32 :=
+  let peerDeadline := h.peers.foldl (init := none) fun (acc : Option UInt32) p =>
+    -- retransmit boundaries of in-flight reliable commands
+    let inFlight := p.sentReliableCommands.foldl (init := acc) fun a outCmd =>
+      some (match a with
+        | some v => min v (outCmd.sentTime + outCmd.roundTripTimeout)
+        | none => outCmd.sentTime + outCmd.roundTripTimeout)
+    -- keepalive boundary: only peers that could actually ping right now
+    let inFlight :=
+      if p.state == .connected ∧ p.outgoingCommands.isEmpty ∧ p.sentReliableCommands.isEmpty then
+        some (match inFlight with
+          | some v => min v (p.lastReceiveTime + p.pingInterval)
+          | none => p.lastReceiveTime + p.pingInterval)
+      else
+        inFlight
+    inFlight
+  let epochDeadline : Option UInt32 :=
+    some (h.bandwidthThrottleEpoch + Constants.bandwidthThrottleInterval)
+  match peerDeadline, epochDeadline with
+  | some d, some e => some (min d e)
+  | some d, none => some d
+  | none, e => e
+
 end Host
 
 end Lenet

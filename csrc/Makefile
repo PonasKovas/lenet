@@ -1,5 +1,5 @@
 # Builds the Lenet C distribution: one self-contained static archive plus
-# the public header ../include/lenet.h. The Lean runtime is baked into the
+# the public header include/lenet.h. The Lean runtime is baked into the
 # archive; nothing Lean is visible to users of the API.
 #
 #   make           -> build/liblenet.a (merged: lenet + shim + Lean runtime)
@@ -25,8 +25,8 @@ $(LEAN_STATIC):
 build:
 	mkdir -p build
 
-build/lenet_capi.o: lenet_capi.c ../include/lenet.h | build
-	$(CC) -O2 -I../include -I$(LEAN_INC) -c lenet_capi.c -o $@
+build/lenet_capi.o: lenet_capi.c include/lenet.h | build
+	$(CC) -O2 -Iinclude -I$(LEAN_INC) -c lenet_capi.c -o $@
 
 # Merge everything into one archive: the Lean-compiled library, this shim,
 # the Lean runtime (libInit, leanrt), bundled GMP, and the bundled libc++
@@ -42,7 +42,7 @@ build/liblenet.a: $(LEAN_STATIC) build/lenet_capi.o merge-ar.sh
 
 # Smoke check: a program that includes only the public header links and runs.
 check: build/liblenet.a
-	$(CC) -O1 -I../include check.c -Lbuild -llenet \
+	$(CC) -O1 -Iinclude check.c -Lbuild -llenet \
 	    -lpthread -ldl -lm -o build/check
 	./build/check
 

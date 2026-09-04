@@ -302,6 +302,8 @@ structure ReplayState where
   emitted : Array ByteArray := #[]
   errors : Array String := #[]
   stoppedFlag : Bool := false
+  /-- The replay's own clock (the last serviced timestamp). -/
+  now : UInt32 := 0
   /-- Parse checksummed datagrams (checksum scenarios). -/
   decodeChecksummed : Bool := false
   /-- The recorded client connectID. Lenet generates its own connectID from
@@ -338,7 +340,30 @@ private def service (st : ReplayState) (now : UInt32) : ReplayState :=
   if st.stoppedFlag then st
   else
     let (h, outs, evs) := st.host.service now
-    collectOutgoing { st with host := h, events := st.events ++ evs } outs
+    collectOutgoing { st with host := h, now := max st.now now, events := st.events ++ evs } outs
+
+/-- Deadline-driven ticking: services the host at every timer deadline it
+has scheduled strictly before `ms`, in order. This is what makes the replay
+insensitive to trace-line placement - lenet's retransmit/timeout/ping/epoch
+boundaries fire where *its own clock* says, exactly as ENet's fired between
+the harness's pump iterations. -/
+private def tickDeadlines (st : ReplayState) (ms : UInt32) : ReplayState :=
+  -- each tick advances the clock by at least 1ms (progress guard for stale
+  -- deadlines), so fuel bounds the tick count
+  let fuel := (ms - st.now).toNat + 2
+  let rec loop (st : ReplayState) : Nat → ReplayState
+    | 0 => st
+    | fuel' + 1 =>
+      if st.stoppedFlag ∨ st.now ≥ ms then st
+      else
+        match st.host.nextDeadline with
+        | none => st
+        | some d =>
+          if d ≥ ms then st
+          else
+            let t := max d (st.now + 1)
+            loop (service st t) fuel'
+  loop st fuel
 
 private def applyApi (st : ReplayState) (ms : UInt32) : ApiCall → ReplayState
   | .connect channels data =>
@@ -390,22 +415,26 @@ private def step (role : Role) (st : ReplayState) (line : Line) : ReplayState :=
   else
     match line with
     | .api ms r call =>
-      if r == role then applyApi st ms call else service st ms
+      let st' := tickDeadlines st ms
+      if r == role then applyApi st' ms call else service st' ms
     | .ev ms _ _ =>
       -- expected events are checked at the end; just keep the clock moving
-      service st ms
+      service (tickDeadlines st ms) ms
     | .dat ms dir bytes =>
       if dir.targets role then
         -- ENet's service order: bandwidth throttle → receive → send. The
-        -- replay mirrors this by servicing the clock tick first (which runs
-        -- the throttle), then feeding the datagram, then draining output.
-        let st2 := service st ms
-        if st2.stoppedFlag then st2
+        -- replay mirrors this by ticking pending deadlines, then servicing
+        -- the clock tick, feeding the datagram, and draining output.
+        let st' := tickDeadlines st ms
+        if st'.stoppedFlag then st'
         else
-          let (h, evs) := st2.host.handleDatagram ms (fromAddrOf dir) bytes
-          service { st2 with host := h, events := st2.events ++ evs } ms
+          let st2 := service st' ms
+          if st2.stoppedFlag then st2
+          else
+            let (h, evs) := st2.host.handleDatagram ms (fromAddrOf dir) bytes
+            service { st2 with host := h, events := st2.events ++ evs } ms
       else
-        service st ms
+        service (tickDeadlines st ms) ms
     | .end _ => st -- handled by tailService after the fold
 
 def initialHost (scenario : String) (role : Role) : Host :=
@@ -435,23 +464,19 @@ def traceConnectId (hasChecksum : Bool) (role : Role) (lines : Array Line) : Opt
   | none => none
 
 /-- Tail service: the recording ran until the `T` end marker, but the replay
-only ticks at trace-line timestamps. Pending timers (retransmit backoff,
-peer timeouts, pings) between the last line and the recording end are flushed
-here in 10ms steps, mirroring the harness's continuous pump. ENet was silent
-in that window by definition (otherwise lines would exist), so any event or
-command lenet emits there is compared against... ENet's recorded behavior,
-which is exactly what the diff is for. -/
-private def tailService (st : ReplayState) (fromMs : UInt32) (toMs : UInt32) : ReplayState :=
-  -- fuel bounds the tick count (10ms steps across the tail window)
-  let fuel := ((toMs - fromMs).toNat + 10) / 10 + 1
-  let rec loop (st : ReplayState) (t : UInt32) : Nat → ReplayState
-    | 0 => st
-    | fuel' + 1 =>
-      if t ≥ toMs ∨ st.stoppedFlag then st
-      else
-        let t' := t + 10
-        loop (service st t') t' fuel'
-  loop st fromMs fuel
+only handles trace-line timestamps. Pending timers between the last line and
+the recording end fire here via deadline ticks, mirroring the harness's
+continuous pump. ENet was silent in that window by definition (otherwise
+lines would exist), so any event or command lenet emits there is compared
+against ENet's recorded behavior - which is exactly what the diff is for.
+
+The window is half-open `[.., T)`: the harness's pump loop runs while
+`t < duration`, so a deadline landing exactly at `T` was never observed and
+must not fire (this is visible in `reconnect`, whose throttle epoch lands
+exactly on `T`). -/
+private def tailService (st : ReplayState) (endMs : UInt32) : ReplayState :=
+  if endMs ≤ st.now ∨ st.stoppedFlag then st
+  else tickDeadlines st endMs
 
 def replayRole (scenario : String) (role : Role) (lines : Array Line) : ReplayResult :=
   let hasChecksum := scenarioChecksum scenario
@@ -462,12 +487,9 @@ def replayRole (scenario : String) (role : Role) (lines : Array Line) : ReplayRe
     connectAddr := (roleAddrs role).1
   }
   -- Flush pending timers between the last trace line and the recording end.
-  let lastMs : UInt32 := lines.foldl (init := 0) fun acc l =>
-    match l with
-    | .api ms _ _ | .ev ms _ _ | .dat ms _ _ | .end ms => max acc ms
   let endMs := (lines.find? fun l => match l with | .end _ => true | _ => false)
   let st := match endMs with
-    | some (.end t) => tailService st0 lastMs t
+    | some (.end t) => tailService st0 t
     | _ => st0
   let expEvents := lines.filterMap fun
     | .ev _ r e => if r == role then some e else none

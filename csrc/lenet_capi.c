@@ -3,7 +3,7 @@
  *
  * This file is the ONLY place in the library where the Lean runtime is
  * visible. It wraps the raw Lean FFI exports (Lenet/FFI.lean, symbols
- * lenet_ffi_*) into the plain C API declared in ../include/lenet.h:
+ * lenet_ffi_*) into the plain C API declared in include/lenet.h:
  *
  *   - lazy, idempotent Lean runtime bootstrap (pthread_once),
  *   - Lean reference-counting discipline (exported Lean functions take
@@ -13,7 +13,7 @@
  *   - ByteArray <-> (ptr, len) marshalling.
  *
  * Everything above this file — C or Rust — links against the built
- * library and sees only ../include/lenet.h.
+ * library and sees only include/lenet.h.
  */
 #include <pthread.h>
 #include <stdlib.h>
@@ -23,7 +23,7 @@
 
 #include <lean/lean.h>
 
-#include "../include/lenet.h"
+#include "include/lenet.h"
 
 /* ---- raw Lean FFI exports (implemented in Lenet/FFI.lean) ---- */
 
