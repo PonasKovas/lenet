@@ -1,6 +1,10 @@
 name = "lenet"
 version = "0.1.0"
-defaultTargets = ["Lenet:static"]
+defaultTargets = ["Lenet"]
 
 [[lean_lib]]
 name = "Lenet"
+
+[[lean_exe]]
+name = "replay"
+root = "Test.Replay"
