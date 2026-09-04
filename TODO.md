@@ -18,22 +18,25 @@ State at end of session: M1 golden-trace replay 16/16 PASS, M2 live interop
 
 ## Test completeness (base behavior is covered; gaps below, cheap first)
 
-1. Tighten M1 replay: unmask session IDs in `maskCmd` — negotiation is now
-   implemented, values are deterministic (client sends 0xFF/0xFF, server
-   negotiates via `(x+1) & 3`), so byte-verify them.
-2. Session-ID validation on receive: ENet drops datagrams whose header
-   session != `peer->incomingSessionID` (protocol.c peer lookup); lenet
-   accepts anything. Add the check + a hostile-input scenario.
-3. Checksum: crc32 exists (`Lenet/Checksum.lean`) but is not wired into
-   `Datagram.encodeWith`/`decodeWith`. Wire compute/verify, then re-record
-   one scenario with checksum enabled on both C hosts.
+1. ~~Tighten M1 replay: unmask session IDs in `maskCmd`~~ — done: session IDs
+   are byte-verified (negotiation is deterministic); only `connectId` stays
+   masked (ENet randomness at record time).
+2. ~~Session-ID validation on receive~~ — done: `Host.handleDatagram` drops
+   datagrams whose header session ≠ the peer's `incomingSessionId` once the
+   peer's outgoing ID is negotiated (protocol.c peer lookup parity).
+3. ~~Checksum~~ — done: CRC32 compute/verify wired into
+   `Datagram.encodeWith`/`decodeWith` (connectID-substitution quirk: ENet
+   passes `connectID` through the body without byte-order conversion, so the
+   substitution is the BE serialization). New `checksum` scenario recorded
+   with `enet_crc32` on both C hosts; replay verifies recorded checksums and
+   18/18 PASS.
 4. Feature-completion scenarios (mostly test-side): nonzero bandwidth
    configs + `windowSize` negotiation (lenet currently ignores windowSize
    on BANDWIDTH_LIMIT receive - C recomputes it), multi-peer + broadcast,
    unreliable-fragment delivery, `disconnectLater`.
 5. Robustness fuzz: seeded random/truncated datagrams into
-   `Host.handleDatagram`, assert no panics (design rule). Goes in the
-   replay exe, no new deps.
+   `Host.handleDatagram`, assert no panics (design rule). Goes in its own
+   executable — the replay exe stays replay-specific.
 6. Compression: `Compress.compressBytes`/`decompressBytes` are stubs.
    Implement the real order-2 PPM range coder, then add a compression
    interop scenario (`enet_host_compress_with_range_coder` on both sides).

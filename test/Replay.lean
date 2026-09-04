@@ -173,7 +173,10 @@ private def cmpBytes (b : ByteArray) : String :=
 
 /-- Canonical, mask-aware representation of a protocol command.
 Masked fields (inherently non-deterministic, documented in TESTING.md):
-  - connect/verifyConnect: `connectId`, session IDs
+  - connect/verifyConnect: `connectId` (drawn from real-clock-seeded ENet
+    randomness at record time)
+Session IDs are NOT masked: negotiation is deterministic (client sends
+0xFF/0xFF, server computes `(x+1) & 3`), so they are byte-verified.
 Everything else must match exactly. -/
 def maskCmd (c : Protocol.Command) : String :=
   let fl := (if c.acknowledge then "A" else "-") ++ (if c.unsequenced then "U" else "-")
@@ -181,13 +184,15 @@ def maskCmd (c : Protocol.Command) : String :=
     match c.body with
     | .acknowledge rseq rtime => s!"ack(rseq={rseq},rtime={rtime})"
     | .connect p _ =>
-      s!"connect(outPid={p.outgoingPeerId},mtu={p.mtu},win={p.windowSize},ch={p.channelCount}," ++
+      s!"connect(outPid={p.outgoingPeerId},inSess={p.incomingSessionId},outSess={p.outgoingSessionId}," ++
+      s!"mtu={p.mtu},win={p.windowSize},ch={p.channelCount}," ++
       s!"inBw={p.incomingBandwidth},outBw={p.outgoingBandwidth},pti={p.packetThrottleInterval}," ++
-      s!"acc={p.packetThrottleAcceleration},dec={p.packetThrottleDeceleration})" -- connectId+sessions masked
+      s!"acc={p.packetThrottleAcceleration},dec={p.packetThrottleDeceleration})" -- connectId masked
     | .verifyConnect p =>
-      s!"verifyConnect(outPid={p.outgoingPeerId},mtu={p.mtu},win={p.windowSize},ch={p.channelCount}," ++
+      s!"verifyConnect(outPid={p.outgoingPeerId},inSess={p.incomingSessionId},outSess={p.outgoingSessionId}," ++
+      s!"mtu={p.mtu},win={p.windowSize},ch={p.channelCount}," ++
       s!"inBw={p.incomingBandwidth},outBw={p.outgoingBandwidth},pti={p.packetThrottleInterval}," ++
-      s!"acc={p.packetThrottleAcceleration},dec={p.packetThrottleDeceleration})" -- connectId+sessions masked
+      s!"acc={p.packetThrottleAcceleration},dec={p.packetThrottleDeceleration})" -- connectId masked
     | .disconnect d => s!"disconnect(d={d})"
     | .ping => "ping"
     | .sendReliable d => s!"sendReliable({cmpBytes d})"
@@ -203,9 +208,16 @@ def maskCmd (c : Protocol.Command) : String :=
       s!"tot={fp.totalLength},off={fp.fragmentOffset},len={fp.data.size})"
   s!"[{fl} ch={c.channelId} seq={c.reliableSequenceNumber}] {body}"
 
-/-- Decode a datagram byte string into its command list. -/
-def decodeDatagram (bytes : ByteArray) : Except CodecError (Array Protocol.Command) :=
-  (ReaderM.run (Protocol.Datagram.decodeWith false none) bytes).map (·.commands)
+/-- Decode a datagram byte string into its command list. `hasChecksum`
+must match the recording host's checksum setting so the 4-byte checksum
+field is skipped; the field is consumed without verification (verification
+happens inside `Host.handleDatagram` during the actual replay). -/
+def decodeDatagram (hasChecksum : Bool) (bytes : ByteArray) : Except CodecError (Array Protocol.Command) :=
+  (ReaderM.run (Protocol.Datagram.decodeWith hasChecksum none none) bytes).map (·.commands)
+
+/-- Scenarios whose recording hosts had checksums enabled (`host->checksum =
+enet_crc32` on both sides). -/
+def scenarioChecksum (scenario : String) : Bool := scenario == "checksum"
 
 /-! ## Replay -/
 
@@ -216,6 +228,13 @@ structure ReplayState where
   emitted : Array ByteArray := #[]
   errors : Array String := #[]
   stoppedFlag : Bool := false
+  /-- Parse checksummed datagrams (checksum scenarios). -/
+  decodeChecksummed : Bool := false
+  /-- The recorded client connectID. Lenet generates its own connectID from
+  its PRNG, but the checksum key on every datagram after the handshake is the
+  connectID the *recorded* client used, so the replay pins it to the trace
+  value right after connecting (mirrors what really happened). -/
+  connectIdOverride : Option UInt32 := none
 
 structure ReplayResult where
   role : Role
@@ -234,7 +253,7 @@ def serverAddr : Address := Address.ipv4 127 0 0 1 40002
 
 private def collectOutgoing (st : ReplayState) (outs : Array (Address × ByteArray)) : ReplayState :=
   outs.foldl (init := st) fun s (_, bytes) =>
-    match decodeDatagram bytes with
+    match decodeDatagram s.decodeChecksummed bytes with
     | .ok cmds => { s with outCmds := s.outCmds ++ cmds, emitted := s.emitted.push bytes }
     | .error e => { s with errors := s.errors.push s!"emitted datagram failed to decode: {e}" }
 
@@ -247,7 +266,17 @@ private def service (st : ReplayState) (now : UInt32) : ReplayState :=
 private def applyApi (st : ReplayState) (ms : UInt32) : ApiCall → ReplayState
   | .connect channels data =>
     match st.host.connect proxyAddr channels data with
-    | .ok (h, _) => service { st with host := h } ms
+    | .ok (h, pid) =>
+      -- Pin the peer's connectID to the recorded value (checksum key parity).
+      let h := match st.connectIdOverride with
+        | some cid =>
+          let idx := pid.toNat
+          if hIdx : idx < h.peers.size then
+            let p := h.peers[idx]'hIdx
+            { h with peers := h.peers.set idx { p with connectId := cid } hIdx }
+          else h
+        | none => h
+      service { st with host := h } ms
     | .error e => service { st with errors := st.errors.push s!"connect failed: {e}" } ms
   | .send ch flags payload =>
     match st.host.send 0 ch { data := payload, delivery := DeliveryMode.fromFlags flags } with
@@ -286,13 +315,36 @@ private def step (role : Role) (st : ReplayState) (line : Line) : ReplayState :=
       else
         service st ms
 
-def initialHost (role : Role) : Host :=
-  match role with
-  | .client => Host.create clientAddr 1 2 0 0 0x12345678
-  | .server => Host.create serverAddr 16 2 0 0 0x12345678
+def initialHost (scenario : String) (role : Role) : Host :=
+  let h := match role with
+    | .client => Host.create clientAddr 1 2 0 0 0x12345678
+    | .server => Host.create serverAddr 16 2 0 0 0x12345678
+  { h with checksumEnabled := scenarioChecksum scenario }
 
-def replayRole (role : Role) (lines : Array Line) : ReplayResult :=
-  let st := lines.foldl (step role) { host := initialHost role }
+/-- The connectID the recorded client used, taken from the first C2S CONNECT
+datagram in the trace (needed as the checksum key on checksum scenarios). -/
+def traceConnectId (hasChecksum : Bool) (lines : Array Line) : Option UInt32 :=
+  let connectIdOf := lines.filterMap fun
+    | .dat _ d bytes =>
+      if d == .c2s then
+        match decodeDatagram hasChecksum bytes with
+        | .ok cmds => cmds.find? fun c => match c.body with | .connect _ _ => true | _ => false
+        | .error _ => none
+      else none
+    | _ => none
+  match connectIdOf[0]? with
+  | some cmd => match cmd.body with
+    | .connect params _ => some params.connectId
+    | _ => none
+  | none => none
+
+def replayRole (scenario : String) (role : Role) (lines : Array Line) : ReplayResult :=
+  let hasChecksum := scenarioChecksum scenario
+  let st := lines.foldl (step role) {
+    host := initialHost scenario role
+    decodeChecksummed := hasChecksum
+    connectIdOverride := if role == .client then traceConnectId hasChecksum lines else none
+  }
   let expEvents := lines.filterMap fun
     | .ev _ r e => if r == role then some e else none
     | _ => none
@@ -300,7 +352,7 @@ def replayRole (role : Role) (lines : Array Line) : ReplayResult :=
     | .dat _ d bytes => if d == role.outDir then some bytes else none
     | _ => none
   let (expCmds, expDecodeErrors) := expDatagrams.foldl (init := (#[], #[])) fun (cs, es) b =>
-    match decodeDatagram b with
+    match decodeDatagram hasChecksum b with
     | .ok cmds => (cs ++ cmds, es)
     | .error e => (cs, es.push e)
   { role
@@ -370,7 +422,7 @@ private def cmdDiffOf (exp act : Array Protocol.Command) : Option (Nat × String
     | none, none => none
 
 private def replayAndReport (scenario : String) (lines : Array Line) : IO Bool := do
-  let results := [Role.client, Role.server].map (fun r => replayRole r lines)
+  let results := [Role.client, Role.server].map (fun r => replayRole scenario r lines)
   let mut allOk := true
   for res in results do
     let label := s!"{scenario}/{res.role.label}"
@@ -404,7 +456,8 @@ private def replayAndReport (scenario : String) (lines : Array Line) : IO Bool :
   pure allOk
 
 def scenarioNames : Array String :=
-  #["connect", "send_c2s", "send_s2c", "frag", "disc_client", "disc_server", "idle", "timeout"]
+  #["connect", "send_c2s", "send_s2c", "frag", "disc_client", "disc_server",
+    "idle", "timeout", "checksum"]
 
 end Replay
 

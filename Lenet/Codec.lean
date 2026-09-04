@@ -131,6 +131,12 @@ def writeUInt16BE (v : UInt16) : WriterM Unit := do
   writeUInt8 (v >>> 8).toUInt8
   writeUInt8 v.toUInt8
 
+def writeUInt32LE (v : UInt32) : WriterM Unit := do
+  writeUInt8 v.toUInt8
+  writeUInt8 (v >>> 8).toUInt8
+  writeUInt8 (v >>> 16).toUInt8
+  writeUInt8 (v >>> 24).toUInt8
+
 def writeUInt32BE (v : UInt32) : WriterM Unit := do
   writeUInt8 (v >>> 24).toUInt8
   writeUInt8 (v >>> 16).toUInt8

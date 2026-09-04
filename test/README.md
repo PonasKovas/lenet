@@ -60,16 +60,25 @@ and the replay is fully deterministic (no sockets, no real time).
 | `disc_server`  | server-initiated graceful disconnect                             |
 | `idle`         | keepalive: ping/ACK duty with no traffic                         |
 | `timeout`      | unacked reliable command → retransmit backoff → peer timeout     |
+| `checksum`     | CRC32 checksums enabled on both C hosts (`enet_crc32`): lenet must compute and verify checksums byte-compatibly (the replay drops datagrams whose checksum it cannot verify) |
 
 ## What is compared
 
 - **Events** (CONNECT / RECEIVE / DISCONNECT, payload bytes): must match exactly.
 - **Outgoing commands** — Lenet's emitted datagrams are decoded and the merged
   command stream is compared against ENet's, as multisets of masked commands.
-  Masked (non-deterministic): `connectId`, session IDs. Control-command order
-  within one millisecond is a scheduling artifact and not compared; order-
-  sensitive behavior is still verified by events and per-channel sequence
-  numbers.
+  Masked (non-deterministic): `connectId` (drawn from ENet randomness at
+  record time; the replay pins the peer's checksum key to the recorded value
+  right after connecting). Control-command order within one millisecond is a
+  scheduling artifact and not compared; order-sensitive behavior is still
+  verified by events and per-channel sequence numbers.
+- **Checksums** (checksum scenario): datagrams recorded from ENet are only
+  accepted by lenet if their CRC32 verifies against the peer's `connectID`,
+  and lenet's own checksummed datagrams must decode (via the recorded peers'
+  behavior) — an incorrect CRC32 computation drops datagrams and fails the
+  scenario. Note ENet's quirk: `connectID` is the one command field passed
+  through the body without byte-order conversion, which is why the checksum
+  substitution uses the connectID's big-endian serialization.
 - **Sanity**: every datagram Lenet emits must decode with Lenet's own decoder
   and be ≤ 4096 bytes (ENet's receive buffer).
 

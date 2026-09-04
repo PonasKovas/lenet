@@ -26,11 +26,35 @@ deriving BEq, Inhabited
 namespace Datagram
 
 /--
+Computes the CRC32 checksum as ENet expects: over the bytes before the
+checksum field, the 4-byte field temporarily holding `connectId`, and the
+bytes after it.
+
+ENet substitutes the field with a plain `memcpy` of the native
+`peer->connectID` and the wire field is `enet_crc32`'s `ENET_HOST_TO_NET_32
+(~crc)` result, so the transmitted field is the raw `~crc` big-endian.
+Because `connectID` is the one command field ENet passes through the body
+*without* byte-order conversion (host.c enet_host_connect, protocol.c
+handle_connect), the substitution byte pattern equals the big-endian
+serialization of the connectID as parsed from the wire — hence `BE` here.
+-/
+def computeChecksum (pre : ByteArray) (post : ByteArray) (connectId : UInt32 := 0) : UInt32 :=
+  let placeholder := WriterM.run (writeUInt32BE connectId) 4
+  Checksum.crc32Buffers #[pre, placeholder, post]
+
+/--
 Decodes a datagram from a reader, optionally decompressing the commands payload
 if `header.compressed` is set and a `Compressor` is provided.
+
+`connectIdOf` resolves the checksum key for a datagram's header peer ID when
+the host has checksums enabled (ENet: the receiving host substitutes the
+peer's `connectID`, or 0 for the broadcast peer `0xFFF`, before verifying).
+Passing `none` consumes the checksum field without verifying it.
 -/
-def decodeWith (hasChecksum : Bool := false) (compressor : Option Compressor := none) : ReaderM Datagram := do
+def decodeWith (hasChecksum : Bool := false) (connectIdOf : Option (UInt16 → UInt32) := none)
+    (compressor : Option Compressor := none) : ReaderM Datagram := do
   let header ← Header.decode
+  let fieldStart := (← get).offset
   let checksum ← if hasChecksum then
     let cs ← readUInt32BE
     pure (some cs)
@@ -50,6 +74,24 @@ def decodeWith (hasChecksum : Bool := false) (compressor : Option Compressor := 
   else
     pure payloadBytes
 
+  -- Verify the checksum (ENet enet_protocol_receive): the CRC32 is computed
+  -- over header + checksum field (substituted with the peer's connectID) +
+  -- the *decompressed* commands payload, and compared against the field as
+  -- transmitted. Failures drop the datagram before any command is parsed.
+  let verify : ReaderM Unit :=
+    match connectIdOf, checksum with
+    | some cidOf, some stored => do
+      let raw := (← get).bytes
+      let pre := raw.extract 0 fieldStart
+      let expected := computeChecksum pre commandBytes (cidOf header.peerId)
+      if expected != stored then
+        throw (CodecError.custom s!"Checksum mismatch: expected {expected}, got {stored}")
+    | _, _ => pure ()
+  if hasChecksum then
+    verify
+  else
+    pure ()
+
   -- Parse commands from the (decompressed) payload:
   let commands ← match ReaderM.run (do
     let mut cmds : Array Command := #[]
@@ -67,13 +109,20 @@ def decodeWith (hasChecksum : Bool := false) (compressor : Option Compressor := 
 
 /-- Decodes an uncompressed datagram from a `ReaderM` stream. -/
 def decode (hasChecksum : Bool := false) : ReaderM Datagram :=
-  decodeWith hasChecksum none
+  decodeWith hasChecksum none none
 
 /--
 Serializes a datagram into a `ByteArray`, optionally compressing the commands payload
 if a `Compressor` is provided and results in a smaller byte size.
+
+When the datagram carries a checksum, `connectId` is the checksum key (ENet:
+`peer->connectID`, or 0 while the peer's outgoing ID is still unset). ENet
+computes the CRC32 over header + checksum field (holding `connectID` in host
+byte order, i.e. little-endian on the hosts we interop with) + the
+*uncompressed* commands payload, then stores the CRC32 big-endian in the field
+(`enet_crc32` returns `ENET_HOST_TO_NET_32 (~crc)`).
 -/
-def encodeWith (compressor : Option Compressor := none) : Datagram → ByteArray
+def encodeWith (compressor : Option Compressor := none) (connectId : UInt32 := 0) : Datagram → ByteArray
   | { header, checksum, commands } =>
     let rawCommandBytes := WriterM.run (for cmd in commands do cmd.encode)
     let (isCompressed, payloadBytes) := match compressor with
@@ -87,11 +136,17 @@ def encodeWith (compressor : Option Compressor := none) : Datagram → ByteArray
         (false, rawCommandBytes)
 
     let finalHeader := { header with compressed := isCompressed }
-    WriterM.run do
-      finalHeader.encode
-      if let some cs := checksum then
-        writeUInt32BE cs
-      writeBytes payloadBytes
+    match checksum with
+    | none =>
+      WriterM.run do
+        finalHeader.encode
+        writeBytes payloadBytes
+    | some _ =>
+      let crc := computeChecksum (WriterM.run finalHeader.encode) rawCommandBytes connectId
+      WriterM.run do
+        finalHeader.encode
+        writeUInt32BE crc
+        writeBytes payloadBytes
 
 /-- Serializes a datagram into a `WriterM` stream without payload compression. -/
 def encode (d : Datagram) : WriterM Unit := do
@@ -100,26 +155,6 @@ def encode (d : Datagram) : WriterM Unit := do
     writeUInt32BE cs
   for cmd in d.commands do
     cmd.encode
-
-/--
-Computes the CRC32 checksum for a datagram byte buffer as expected by ENet.
-`checksumOffset` is the offset in `rawBytes` where the 4-byte checksum field is located.
-Temporarily substitutes the checksum field with `connectId` during calculation.
--/
-def computeChecksum (rawBytes : ByteArray) (checksumOffset : Nat) (connectId : UInt32 := 0) : UInt32 :=
-  if checksumOffset + 4 > rawBytes.size then
-    0
-  else
-    let pre := rawBytes.extract 0 checksumOffset
-    let placeholder := WriterM.run (writeUInt32BE connectId) 4
-    let suffix := rawBytes.extract (checksumOffset + 4) rawBytes.size
-    Checksum.crc32Buffers #[pre, placeholder, suffix]
-
-/--
-Verifies that the CRC32 checksum of a received datagram matches the expected checksum.
--/
-def verifyChecksum (rawBytes : ByteArray) (checksumOffset : Nat) (expectedChecksum : UInt32) (connectId : UInt32 := 0) : Bool :=
-  computeChecksum rawBytes checksumOffset connectId == expectedChecksum
 
 end Datagram
 

@@ -171,6 +171,7 @@ typedef struct {
     uint32_t duration_ms;
     const Action *actions;
     size_t action_count;
+    int with_checksum; /* both hosts set host->checksum = enet_crc32 */
 } Scenario;
 
 static const char *role_name(Role r) { return r == ROLE_C ? "C" : "S"; }
@@ -250,9 +251,20 @@ static const Action act_timeout[] = {
     { .at_ms = 200, .kind = ACT_STOP_CLIENT,  .role = ROLE_C },
 };
 
+static const Action act_checksum[] = {
+    { .at_ms = 5,  .kind = ACT_CONNECT, .role = ROLE_C, .a = 2, .b = 0 },
+    A_SEND(150, ROLE_C, 0, ENET_PACKET_FLAG_RELIABLE, payload_a, sizeof payload_a - 1),
+    A_SEND(150, ROLE_C, 0, 0, payload_b, sizeof payload_b - 1),
+    A_SEND(160, ROLE_S, 0, ENET_PACKET_FLAG_RELIABLE, payload_d, sizeof payload_d - 1),
+};
+
 #define SC(NM, DUR, ACTS) \
     { .name = (NM), .duration_ms = (DUR), .actions = (ACTS), \
-      .action_count = sizeof (ACTS) / sizeof ((ACTS)[0]) }
+      .action_count = sizeof (ACTS) / sizeof ((ACTS)[0]), .with_checksum = 0 }
+
+#define SC_CS(NM, DUR, ACTS) \
+    { .name = (NM), .duration_ms = (DUR), .actions = (ACTS), \
+      .action_count = sizeof (ACTS) / sizeof ((ACTS)[0]), .with_checksum = 1 }
 
 static const Scenario scenarios[] = {
     SC("connect",      400,  act_connect),
@@ -263,6 +275,7 @@ static const Scenario scenarios[] = {
     SC("disc_server",  800,  act_disc_server),
     SC("idle",        2600,  act_idle),
     SC("timeout",     2200,  act_timeout),
+    SC_CS("checksum",  700,  act_checksum),
 };
 
 /* ---------------- runner ---------------- */
@@ -335,6 +348,10 @@ static void run_scenario(const Scenario *sc) {
     ENetHost *client = enet_host_create(&client_addr_en, 1, 2, 0, 0);
     ENetHost *server = enet_host_create(&server_addr_en, 16, 2, 0, 0);
     if (!client || !server) { fprintf(stderr, "host create failed\n"); exit(1); }
+    if (sc->with_checksum) {
+        client->checksum = enet_crc32;
+        server->checksum = enet_crc32;
+    }
 
     ENetPeer *client_peer = NULL, *server_peer = NULL;
     char done[64] = {0};
@@ -373,7 +390,7 @@ int main(int argc, char **argv) {
     if (argc != 3 || strcmp(argv[1], "record") != 0) {
         fprintf(stderr, "usage: harness record <scenario>\n"
                         "scenarios: connect send_c2s send_s2c frag "
-                        "disc_client disc_server idle timeout\n");
+                        "disc_client disc_server idle timeout checksum\n");
         return 1;
     }
     const char *want = argv[2];

@@ -168,8 +168,16 @@ Consumes an incoming raw UDP datagram received from `fromAddr`.
 Updates host/peer states, processes commands, and emits high-level `Event`s.
 -/
 def handleDatagram (h : Host) (now : UInt32) (fromAddr : Address) (bytes : ByteArray) : Host × Array Event :=
-  -- 1. Decode datagram:
-  let decodeResult := ReaderM.run (Protocol.Datagram.decodeWith h.checksumEnabled h.compressor) bytes
+  -- 1. Decode datagram. When checksums are enabled, the verification key is
+  -- the target peer's connectID (ENet enet_protocol_receive): 0 for the
+  -- broadcast peer 0xFFF, the slot's stored connectID otherwise.
+  let connectIdOf : UInt16 → UInt32 := fun peerId =>
+    if peerId == Constants.maximumPeerId then 0
+    else match h.peers[peerId.toNat]? with
+      | some p => p.connectId
+      | none => 0
+  let decodeResult :=
+    ReaderM.run (Protocol.Datagram.decodeWith h.checksumEnabled (some connectIdOf) h.compressor) bytes
   match decodeResult with
   | .error _ =>
     (h, #[])
@@ -255,16 +263,24 @@ def handleDatagram (h : Host) (now : UInt32) (fromAddr : Address) (bytes : ByteA
       let idx := peerId.toNat
       if hIdx : idx < h.peers.size then
         let p := h.peers[idx]
-        let (curPeer, events) := datagram.commands.foldl (init := (p, #[])) fun (cur, evs) cmd =>
-          let (nextPeer, newEvs) := cur.handleCommand now cmd datagram.header.sentTime
-          (nextPeer, evs ++ newEvs)
-        let newPeers := h.peers.set idx curPeer hIdx
-        -- ENet: connect/disconnect notifications flag a bandwidth recalculation.
-        let recalc := events.any fun
-          | .connect _ _ => true
-          | .disconnect _ _ => true
-          | .receive _ _ _ => false
-        ({ h with peers := newPeers, recalculateBandwidthLimits := h.recalculateBandwidthLimits || recalc }, events)
+        -- ENet drops datagrams whose header session doesn't match the peer's
+        -- negotiated incoming session ID (protocol.c peer lookup). The check
+        -- only applies once the remote peer ID is known (post-negotiation);
+        -- while `outgoingPeerId` is unset (0xFFF) any session is tolerated.
+        if p.outgoingPeerId < Constants.maximumPeerId ∧
+           datagram.header.session ≠ p.incomingSessionId then
+          (h, #[])
+        else
+          let (curPeer, events) := datagram.commands.foldl (init := (p, #[])) fun (cur, evs) cmd =>
+            let (nextPeer, newEvs) := cur.handleCommand now cmd datagram.header.sentTime
+            (nextPeer, evs ++ newEvs)
+          let newPeers := h.peers.set idx curPeer hIdx
+          -- ENet: connect/disconnect notifications flag a bandwidth recalculation.
+          let recalc := events.any fun
+            | .connect _ _ => true
+            | .disconnect _ _ => true
+            | .receive _ _ _ => false
+          ({ h with peers := newPeers, recalculateBandwidthLimits := h.recalculateBandwidthLimits || recalc }, events)
       else
         (h, #[])
 
@@ -404,7 +420,15 @@ def pollPeer (p : Peer) (now : UInt32) (checksumEnabled : Bool) (compressor : Op
             checksum := if checksumEnabled then some 0 else none
             commands := commandsToPack
           }
-          let datagramBytes := datagram.encodeWith compressor
+          -- ENet: the checksum field holds the peer's connectID during
+          -- computation, 0 while the peer's outgoing ID is still unset
+          -- (pre-negotiation, e.g. the client's CONNECT).
+          let connectId :=
+            if updatedPeer.outgoingPeerId < Constants.maximumPeerId then
+              updatedPeer.connectId
+            else
+              0
+          let datagramBytes := datagram.encodeWith compressor connectId
           loop updatedPeer fuel' (acc.push (updatedPeer.address, datagramBytes))
     -- fuel bounds the number of datagrams per poll (one per queued command is
     -- more than enough)
