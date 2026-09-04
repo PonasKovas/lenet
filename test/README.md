@@ -121,6 +121,43 @@ formal proofs (see TODO.md, "No fuzzing executable").
 - **Sanity**: every datagram Lenet emits must decode with Lenet's own decoder
   and be ≤ 4096 bytes (ENet's receive buffer).
 
+## Divergence triage
+
+Observed or analysis-found behavioral differences, with their DESIGN.md 1.5
+classification.
+
+- **Receive window gate on reliable commands (lenet bug — fixed).** ENet
+  discards reliable commands outside the cyclic receive window
+  (`peer.c:877-883`, `enet_peer_queue_incoming_command`) before any
+  staleness/ordering logic. Lenet had ported the window test
+  (`Channel.isIncomingReliableInWindow`) but never applied it, and used a
+  wrap-naive staleness test (`seq <= incoming`) instead. Two consequences,
+  both invisible to the golden corpus (which would need ~65k commands per
+  channel to reach): (a) at `incomingReliableSequenceNumber = 0xFFFF` the
+  legitimately next command `0x0000` was dropped forever — the channel
+  deadlocks at the 16-bit wrap, where ENet delivers (the window test is
+  cyclic and `incoming + 1` wraps to `0x0000`); (b) far-future sequence
+  numbers were staged without bound, where ENet discards beyond
+  `currentWindow + FREE_RELIABLE_WINDOWS - 1` windows. Fixed in
+  `Channel.receiveReliable`: out-of-window commands are discarded, the
+  frontier duplicate (`seq == incoming`) is dropped, and delivery/staging
+  happen exactly as before for in-window traffic. The wrap boundary is now
+  pinned by proofs (`Lenet/Proofs/Channel.lean`), which is where the TODO
+  routes wrap coverage (golden traces are descoped there).
+- **Receive window gate on unreliable commands (documented, not mirrored).**
+  ENet applies the same cyclic window gate to unreliable and
+  unreliable-fragment commands (anything but SEND_UNSEQUENCED,
+  `peer.c:869-883`). Lenet's `Channel.receiveUnreliable` accepts an
+  unreliable command whenever its unreliable sequence number beats the
+  channel's counter, ignoring the command's reliable sequence number.
+  Classification: hostile-input hardening only — legitimate senders emit
+  unreliable commands at (or within a window of) their current reliable
+  sequence number, so the gate never fires for them; the structural
+  difference (ENet queues out-of-order unreliable commands and dispatches
+  them when the reliable frontier advances, Lenet delivers by unreliable
+  sequence number alone) is interop-invisible in all recorded scenarios.
+  Not fixed; revisit only if hostile-input coverage demands it.
+
 ## Live interop scenarios
 
 | name           | direction            | exercises                                            |

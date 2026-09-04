@@ -147,13 +147,22 @@ def drainContiguous (curSeq : UInt16) (staged : Array (UInt16 × Packet)) : UInt
 
 /--
 Processes an incoming reliable packet with sequence number `seq`.
-- If duplicate / already delivered (`seq ≤ incomingReliableSequenceNumber`), drops it.
+- If outside the sliding receive window (ENet peer.c queue_incoming_command:
+  discard), drops it. The window test is cyclic - "behind" counts as one full
+  cycle "ahead" - which is what keeps plain UInt16 wrap-around delivery safe:
+  at `incomingReliableSequenceNumber = 0xFFFF` the legitimately next command
+  `0x0000` is still accepted. Without this gate a wrap-naive staleness test
+  (`seq <= incoming`) would deadlock the channel after 65536 deliveries, and
+  far-future sequence numbers would stage without bound.
+- If duplicate of the dispatch frontier (`seq == incomingReliableSequenceNumber`), drops it.
 - If in-order (`seq == incomingReliableSequenceNumber + 1`), delivers it and drains any contiguous staged packets.
-- If gap (`seq > incomingReliableSequenceNumber + 1`), stages it until preceding packets arrive.
+- If ahead within the window, stages it until preceding packets arrive.
 -/
 def receiveReliable (c : Channel) (seq : UInt16) (packet : Packet) : Channel × Array Packet :=
-  if seq ≤ c.incomingReliableSequenceNumber then
+  if !c.isIncomingReliableInWindow seq then
     (c, #[])
+  else if seq == c.incomingReliableSequenceNumber then
+    (c, #[]) -- duplicate of the dispatch frontier
   else if seq == c.incomingReliableSequenceNumber + 1 then
     let (newSeq, drained, remainingStaged) := drainContiguous seq c.stagedReliable
     let updatedChannel := { c with
