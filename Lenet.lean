@@ -14,6 +14,7 @@ import Lenet.Event
 import Lenet.Peer
 import Lenet.Host
 import Lenet.Compress
+import Lenet.FFI
 import Lenet.Protocol.Header
 import Lenet.Protocol.Command
 import Lenet.Protocol.Datagram

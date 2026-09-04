@@ -1,6 +1,6 @@
 name = "lenet"
 version = "0.1.0"
-defaultTargets = ["Lenet"]
+defaultTargets = ["Lenet:static"]
 
 [[lean_lib]]
 name = "Lenet"
