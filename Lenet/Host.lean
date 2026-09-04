@@ -328,6 +328,78 @@ def pollOutgoing (h : Host) (now : UInt32) : Host × Array (Address × ByteArray
     (nextPeers, nextPkts)
   ({ h with peers := updatedPeers }, packets)
 
+structure TimeoutCheckResult where
+  stillInFlight : Array OutgoingCommand := #[]
+  retransmits   : Array OutgoingCommand := #[]
+  isTimedOut    : Bool := false
+
+/-- Evaluates in-flight reliable commands for timeouts and retransmissions. -/
+def checkPeerTimeouts (p : Peer) (now : UInt32) : Peer × Option Event :=
+  let initial : TimeoutCheckResult := {}
+  let result := p.sentReliableCommands.foldl (init := initial) fun acc outCmd =>
+    if acc.isTimedOut then
+      acc
+    else
+      let elapsed := Time.difference now outCmd.sentTime
+      if elapsed ≥ outCmd.roundTripTimeout then
+        if p.isTimedOut now outCmd.sendAttempts then
+          { acc with isTimedOut := true }
+        else
+          let retryCmd := { outCmd with
+            roundTripTimeout := if outCmd.roundTripTimeout == 0 then p.roundTripTime * 2 else outCmd.roundTripTimeout * 2
+          }
+          { acc with retransmits := acc.retransmits.push retryCmd }
+      else
+        { acc with stillInFlight := acc.stillInFlight.push outCmd }
+
+  if result.isTimedOut then
+    let deadPeer := { p with state := .zombie }
+    (deadPeer, some (Event.disconnect p.peerId p.eventData))
+  else
+    let newOutgoing := result.retransmits ++ p.outgoingCommands
+    let pUpdated := { p with
+      sentReliableCommands := result.stillInFlight
+      outgoingCommands     := newOutgoing
+    }
+    (pUpdated, none)
+
+/-- Sends a ping if the peer is connected and has been idle longer than `pingInterval`. -/
+def checkPeerPing (p : Peer) (now : UInt32) : Peer :=
+  if p.state == .connected ∧
+     p.sentReliableCommands.isEmpty ∧
+     p.outgoingCommands.isEmpty ∧
+     (Time.difference now p.lastReceiveTime ≥ p.pingInterval) then
+    let pingCmd : Protocol.Command := {
+      channelId              := 0xFF
+      reliableSequenceNumber := 0
+      acknowledge            := true
+      unsequenced            := false
+      body                   := .ping
+    }
+    p.queueOutgoingCommand { command := pingCmd }
+  else
+    p
+
+/--
+Sweeps all active peers to check for timeouts on in-flight reliable commands,
+retransmissions, and periodic ping keepalives.
+Returns the updated `Host` and any disconnect `Event`s triggered by timeouts.
+-/
+def checkTimeoutsAndPings (h : Host) (now : UInt32) : Host × Array Event :=
+  let (updatedPeers, events) := h.peers.foldl (init := (#[], #[])) fun (peersAcc, evsAcc) p =>
+    if p.state == .disconnected ∨ p.state == .zombie then
+      (peersAcc.push p, evsAcc)
+    else
+      let (pAfterTimeout, timeoutEvOpt) := checkPeerTimeouts p now
+      match timeoutEvOpt with
+      | some ev =>
+        (peersAcc.push pAfterTimeout, evsAcc.push ev)
+      | none =>
+        let pAfterPing := checkPeerPing pAfterTimeout now
+        (peersAcc.push pAfterPing, evsAcc)
+
+  ({ h with peers := updatedPeers }, events)
+
 end Host
 
 end Lenet
