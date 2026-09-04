@@ -13,6 +13,7 @@ import Lenet.OutgoingCommand
 import Lenet.Event
 import Lenet.Peer
 import Lenet.Host
+import Lenet.Compress
 import Lenet.Protocol.Header
 import Lenet.Protocol.Command
 import Lenet.Protocol.Datagram
