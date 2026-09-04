@@ -15,6 +15,11 @@ Two parts:
    `Host.service`) per role, at the recorded timestamps, applying the recorded
    API calls. Compares Lenet's emitted event stream and outgoing commands
    against ENet's.
+3. **Live interop** (`c/interop.c`) — a real ENet host and a Lenet host
+   (via the Lean FFI) talk over actual UDP sockets in one process, in both
+   directions, across every delivery mode. This is the strongest check:
+   ENet's decoder is the strictest validator of Lenet's encoder, and vice
+   versa.
 
 Real ENet sources are built out-of-tree; the ENet checkout is never modified.
 
@@ -30,12 +35,18 @@ lake build replay
 
 # single scenario, with a full command-stream diff on failure
 LENET_DEBUG=1 ./.lake/build/bin/replay test/traces frag
+
+# live interop: Lenet (Lean FFI) <-> real ENet over real UDP
+lake build Lenet:static
+make -C test c/interop
+make -C test interop        # runs all 7 scenarios
+./test/c/interop connect    # single scenario
 ```
 
-Output is one PASS/FAIL line per scenario/role (client + server per scenario);
-exit code 0 iff all pass. The recording step is only needed when scenarios
-change — traces are committed and the replay is fully deterministic
-(no sockets, no real time).
+Output is one PASS/FAIL line per scenario/role (client + server per scenario
+for replay; one line per scenario for interop); exit code 0 iff all pass.
+The recording step is only needed when scenarios change — traces are committed
+and the replay is fully deterministic (no sockets, no real time).
 
 ## Scenarios
 
@@ -62,9 +73,25 @@ change — traces are committed and the replay is fully deterministic
 - **Sanity**: every datagram Lenet emits must decode with Lenet's own decoder
   and be ≤ 4096 bytes (ENet's receive buffer).
 
+## Live interop scenarios
+
+| name           | direction            | exercises                                            |
+|----------------|----------------------|------------------------------------------------------|
+| `connect`      | lenet → C            | handshake (with user data), one reliable packet each way |
+| `connect_r`    | C → lenet            | reverse handshake, session ID negotiation            |
+| `send`         | both                 | reliable / unreliable / unsequenced, byte-exact      |
+| `frag`         | both                 | 40000-byte reliable fragmented send, byte-exact      |
+| `disconnect`   | lenet initiates      | graceful disconnect + ack dance, data passthrough    |
+| `disconnect_r` | C initiates          | reverse graceful disconnect                          |
+| `timeout`      | —                    | lenet goes silent → ENet retransmit backoff → timeout |
+
+These exercise the FFI boundary too: `include/lenet.h` is implemented by
+`c/interop.c` as a shim over the raw `lenet_ffi_*` Lean exports.
+
 ## Layout
 
-- `c/harness.c` — recorder (scripted scenarios, proxy, logging)
-- `Makefile`    — builds `c/harness` against `../enet` out-of-tree, `make traces` records all scenarios into `traces/`
+- `c/harness.c` — recorder (scripted scenarios, proxy, wire logging)
+- `c/interop.c` — live interop runner (Lenet FFI vs real ENet over UDP)
+- `Makefile`    — builds both binaries against `../../enet` out-of-tree; `make traces` records traces, `make interop` runs all 7 scenarios
 - `traces/*.trace` — committed golden corpus (`A` = API call, `E` = event, `N` = network datagram)
 - `Replay.lean` — the replayer (`lake build replay`)

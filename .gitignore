@@ -1,3 +1,4 @@
 /.lake
 test/.build/
 test/c/harness
+test/c/interop

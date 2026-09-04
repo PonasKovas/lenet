@@ -112,7 +112,7 @@ def connect (h : Host) (remoteAddress : Address) (channelCount : Nat := 2) (data
       state     := .connecting
       connectId := connectId
       channels  := peerChannels
-      mtu       := hRand.mtu
+      eventData := data
     }.queueOutgoingCommand outCmd
 
     let newPeers :=
@@ -188,10 +188,22 @@ def handleDatagram (h : Host) (now : UInt32) (fromAddr : Address) (bytes : ByteA
             let channels := Nat.min params.channelCount.toNat h.channelLimit
             let peerChannels := Array.replicate channels Channel.init
 
+            -- ENet session negotiation (enet_protocol_handle_connect): each
+            -- side's `outgoing` session ID = (peer's `incoming` + 1) mod 4,
+            -- with 0xFF meaning "unset". Forwarding 0xFF verbatim would set
+            -- the header's compressed-flag bit in every later datagram.
+            let outSession :=
+              let base := if params.incomingSessionId == 0xFF then p.outgoingSessionId else params.incomingSessionId
+              let inc := (base + 1) &&& 3
+              if inc == p.outgoingSessionId then (inc + 1) &&& 3 else inc
+            let inSession :=
+              let base := if params.outgoingSessionId == 0xFF then p.incomingSessionId else params.outgoingSessionId
+              let inc := (base + 1) &&& 3
+              if inc == p.incomingSessionId then (inc + 1) &&& 3 else inc
             let verifyParams : Protocol.ConnectParams := {
               outgoingPeerId             := p.peerId
-              incomingSessionId          := params.outgoingSessionId
-              outgoingSessionId          := params.incomingSessionId
+              incomingSessionId          := outSession
+              outgoingSessionId          := inSession
               mtu                        := Nat.min h.mtu.toNat params.mtu.toNat |>.toUInt32
               windowSize                 := Constants.maximumWindowSize.toUInt32
               channelCount               := channels.toUInt32
@@ -218,13 +230,15 @@ def handleDatagram (h : Host) (now : UInt32) (fromAddr : Address) (bytes : ByteA
             let verifyCmd := { verifyCmd with reliableSequenceNumber := controlSeq }
             let outCmd := { outCmd with command := verifyCmd }
             let updatedPeer := { updatedPeer with
-              address        := fromAddr
-              outgoingPeerId := params.outgoingPeerId
-              connectId      := params.connectId
-              state          := .acknowledgingConnect
-              channels       := peerChannels
-              eventData      := data
-              mtu            := verifyParams.mtu
+              address              := fromAddr
+              outgoingPeerId       := params.outgoingPeerId
+              connectId            := params.connectId
+              state                := .acknowledgingConnect
+              channels             := peerChannels
+              eventData            := data
+              mtu                  := verifyParams.mtu
+              incomingSessionId    := inSession
+              outgoingSessionId    := outSession
             }.queueOutgoingCommand outCmd
 
             let newPeers := if hIdx : idx < h.peers.size then h.peers.set idx updatedPeer hIdx else h.peers

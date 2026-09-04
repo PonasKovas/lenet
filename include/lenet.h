@@ -106,6 +106,10 @@ void lenet_host_broadcast(
 /** Disconnects a peer. */
 void lenet_host_disconnect(LeNetHost* host, uint16_t peer_id, uint32_t data);
 
+/** Sets per-peer timeout parameters (like enet_peer_timeout). */
+void lenet_peer_set_timeout(LeNetHost* host, uint16_t peer_id,
+                            uint32_t limit, uint32_t minimum, uint32_t maximum);
+
 /* --- Sans-I/O Ingest & Service --- */
 
 /**
