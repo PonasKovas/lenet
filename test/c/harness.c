@@ -101,6 +101,8 @@ static void drain_events(ENetHost *host, const char *role, ENetPeer **peer_out) 
 static int proxy_fd = -1;    /* client1 <-> server */
 static int proxy2_fd = -1;   /* client2 <-> server */
 static struct sockaddr_in client_addr, client2_addr, server_addr, proxy_addr;
+static unsigned char dup_buf[64 * 1024]; /* last captured C2S datagram (for ACT_DUP) */
+static ssize_t dup_len = 0;
 
 static int make_udp(uint16_t port) {
     int fd = socket(AF_INET, SOCK_DGRAM, 0);
@@ -161,8 +163,7 @@ static void proxy_pump(void) {
     /* proxy 1 distinguishes three sources: the server (S2C), injected
      * hostile datagrams (looped back from our own port; pre-logged as X2S
      * by ACT_INJECT and forwarded silently), and the real client (C2S). */
-    for (;;) {
-        struct sockaddr_in from;
+    for (;;) {        struct sockaddr_in from;
         socklen_t fromlen = sizeof from;
         ssize_t n = recvfrom(proxy_fd, buf, sizeof buf, 0,
                              (struct sockaddr *)&from, &fromlen);
@@ -175,6 +176,11 @@ static void proxy_pump(void) {
             sendto(proxy_fd, buf, n, 0, (struct sockaddr *)&server_addr, sizeof server_addr);
         } else {
             log_datagram("C2S", buf, n);
+            /* capture for ACT_DUP (last C2S datagram) */
+            if ((size_t)n <= sizeof dup_buf) {
+                memcpy(dup_buf, buf, n);
+                dup_len = n;
+            }
             sendto(proxy_fd, buf, n, 0, (struct sockaddr *)&server_addr, sizeof server_addr);
         }
     }
@@ -190,7 +196,10 @@ typedef enum {
     ACT_DISCONNECT,   /* role disconnects its peer                */
     ACT_DISCONNECT_LATER, /* role defers disconnect until flushed */
     ACT_PEER_TIMEOUT, /* tighten peer timeout for fast recording  */
+    ACT_THROTTLECONF, /* peer throttle configure (interval/accel/decel) */
+    ACT_DUP,          /* re-send the last captured C2S datagram   */
     ACT_STOP_CLIENT,  /* stop servicing the client host entirely  */
+    ACT_STOP_SERVER,  /* stop servicing the server host entirely  */
     ACT_INJECT        /* splice raw datagram bytes into the C2S proxy path */
 } ActionKind;
 
@@ -215,6 +224,8 @@ typedef struct {
     int with_checksum; /* both hosts set host->checksum = enet_crc32 */
     uint32_t in_bw;    /* both hosts' incoming bandwidth (0 = unlimited) */
     uint32_t out_bw;   /* both hosts' outgoing bandwidth (0 = unlimited) */
+    uint32_t channel_limit; /* both hosts' channel limit (0 = default 2) */
+    uint32_t mtu;      /* both hosts' MTU (0 = default 1392) */
 } Scenario;
 
 static const char *role_name(Role r) {
@@ -414,20 +425,81 @@ static const Action act_inject[] = {
     A_INJECT(380, inject_zombie_ping),
 };
 
+static const Action act_multichannel[] = {
+    { .at_ms = 5, .kind = ACT_CONNECT, .role = ROLE_C, .a = 8, .b = 0 },
+    A_SEND(150, ROLE_C, 0, ENET_PACKET_FLAG_RELIABLE, payload_a, sizeof payload_a - 1),
+    A_SEND(150, ROLE_C, 3, ENET_PACKET_FLAG_RELIABLE, payload_b, sizeof payload_b - 1),
+    A_SEND(150, ROLE_C, 7, ENET_PACKET_FLAG_RELIABLE, payload_c, sizeof payload_c - 1),
+    A_SEND(160, ROLE_C, 5, 0, payload_d, sizeof payload_d - 1),
+    A_SEND(160, ROLE_C, 7, ENET_PACKET_FLAG_UNSEQUENCED, payload_e, sizeof payload_e - 1),
+    A_SEND(170, ROLE_S, 2, ENET_PACKET_FLAG_RELIABLE, payload_f, sizeof payload_f - 1),
+    A_SEND(170, ROLE_S, 6, 0, payload_mtu, sizeof payload_mtu - 1),
+};
+
+static const Action act_dup[] = {
+    { .at_ms = 5,  .kind = ACT_CONNECT, .role = ROLE_C, .a = 2, .b = 0 },
+    A_SEND(150, ROLE_C, 0, ENET_PACKET_FLAG_RELIABLE, payload_a, sizeof payload_a - 1),
+    /* re-send the reliable data datagram: duplicate command, duplicate ACK */
+    { .at_ms = 153, .kind = ACT_DUP },
+    A_SEND(160, ROLE_C, 1, ENET_PACKET_FLAG_UNSEQUENCED, payload_c, sizeof payload_c - 1),
+    /* re-send the unsequenced datagram: must be deduplicated, no 2nd event */
+    { .at_ms = 163, .kind = ACT_DUP },
+};
+
+static const Action act_reconnect[] = {
+    { .at_ms = 5,   .kind = ACT_CONNECT,    .role = ROLE_C, .a = 2, .b = 0 },
+    A_SEND(150, ROLE_C, 0, ENET_PACKET_FLAG_RELIABLE, payload_a, sizeof payload_a - 1),
+    { .at_ms = 200, .kind = ACT_DISCONNECT, .role = ROLE_C, .a = 3 },
+    /* reconnect reusing the freed slot: full second handshake */
+    { .at_ms = 400, .kind = ACT_CONNECT,    .role = ROLE_C, .a = 2, .b = 0 },
+    A_SEND(500, ROLE_C, 0, ENET_PACKET_FLAG_RELIABLE, payload_d, sizeof payload_d - 1),
+};
+
+static const Action act_retimeout[] = {
+    { .at_ms = 5,   .kind = ACT_CONNECT,      .role = ROLE_C, .a = 2, .b = 0 },
+    /* client: fail fast: limit=4 attempts, min=200ms, max=1000ms
+     * (max must tolerate the 1ms pump jitter between ENet's internal
+     * serviceTime and the logged trace timestamps, so a retransmit that
+     * ENet emits at t and lenet at t+290ms still lands in the same
+     * multiset; the timeout event itself is timestamp-insensitive) */
+    { .at_ms = 100, .kind = ACT_PEER_TIMEOUT, .role = ROLE_C, .a = 4, .b = 200, .c = 1000 },
+    { .at_ms = 200, .kind = ACT_STOP_SERVER },
+    A_SEND(210, ROLE_C, 0, ENET_PACKET_FLAG_RELIABLE, payload_a, sizeof payload_a - 1),
+};
+
+static const Action act_mtu576[] = {
+    { .at_ms = 5,  .kind = ACT_CONNECT, .role = ROLE_C, .a = 2, .b = 0 },
+    A_SEND(150, ROLE_C, 0, ENET_PACKET_FLAG_RELIABLE, payload_big, sizeof payload_big),
+};
+
+static const Action act_throttleconf[] = {
+    { .at_ms = 5,   .kind = ACT_CONNECT, .role = ROLE_C, .a = 2, .b = 0 },
+    /* peer throttle configure: server tells the client its new parameters */
+    { .at_ms = 150, .kind = ACT_THROTTLECONF, .role = ROLE_S, .a = 7000, .b = 3, .c = 5 },
+    A_SEND(160, ROLE_C, 0, ENET_PACKET_FLAG_RELIABLE, payload_a, sizeof payload_a - 1),
+    /* client echoes the same configure back */
+    { .at_ms = 170, .kind = ACT_THROTTLECONF, .role = ROLE_C, .a = 700, .b = 3, .c = 5 },
+};
+
 #define SC(NM, DUR, ACTS) \
     { .name = (NM), .duration_ms = (DUR), .actions = (ACTS), \
       .action_count = sizeof (ACTS) / sizeof ((ACTS)[0]), .with_checksum = 0, \
-      .in_bw = 0, .out_bw = 0 }
+      .in_bw = 0, .out_bw = 0, .channel_limit = 0, .mtu = 0 }
 
 #define SC_CS(NM, DUR, ACTS) \
     { .name = (NM), .duration_ms = (DUR), .actions = (ACTS), \
       .action_count = sizeof (ACTS) / sizeof ((ACTS)[0]), .with_checksum = 1, \
-      .in_bw = 0, .out_bw = 0 }
+      .in_bw = 0, .out_bw = 0, .channel_limit = 0, .mtu = 0 }
 
 #define SC_BW(NM, DUR, ACTS, IN, OUT) \
     { .name = (NM), .duration_ms = (DUR), .actions = (ACTS), \
       .action_count = sizeof (ACTS) / sizeof ((ACTS)[0]), .with_checksum = 0, \
-      .in_bw = (IN), .out_bw = (OUT) }
+      .in_bw = (IN), .out_bw = (OUT), .channel_limit = 0, .mtu = 0 }
+
+#define SC_CFG(NM, DUR, ACTS, IN, OUT, CHL, MTU) \
+    { .name = (NM), .duration_ms = (DUR), .actions = (ACTS), \
+      .action_count = sizeof (ACTS) / sizeof ((ACTS)[0]), .with_checksum = 0, \
+      .in_bw = (IN), .out_bw = (OUT), .channel_limit = (CHL), .mtu = (MTU) }
 
 static const Scenario scenarios[] = {
     SC("connect",      400,  act_connect),
@@ -444,6 +516,12 @@ static const Scenario scenarios[] = {
     SC("disclater",    800,  act_disclater),
     SC("multip",       800,  act_multip),
     SC("inject",       800,  act_inject),
+    SC_CFG("multichannel", 800, act_multichannel, 0, 0, 8, 0),
+    SC("dup",          800,  act_dup),
+    SC("reconnect",   1000,  act_reconnect),
+    SC("retimeout",   2200,  act_retimeout),
+    SC_CFG("mtu576",  1800,  act_mtu576, 0, 0, 0, 576),
+    SC("throttleconf", 800,  act_throttleconf),
 };
 
 /* ---------------- runner ---------------- */
@@ -464,7 +542,7 @@ static ENetHost *role_host(Role r, ENetHost *client, ENetHost *server, ENetHost 
 
 static void perform_action(const Action *act, ENetHost *client, ENetHost *server, ENetHost *client2,
                            ENetPeer **client_peer, ENetPeer **server_peer, ENetPeer **client2_peer,
-                           int *client_stopped) {
+                           int *client_stopped, int *server_stopped) {
     ENetPeer *peer = NULL;
     Role r = act->role;
 
@@ -523,6 +601,30 @@ static void perform_action(const Action *act, ENetHost *client, ENetHost *server
         enet_peer_disconnect_later(peer, act->a);
         return;
     }
+    case ACT_THROTTLECONF: {
+        peer = (r == ROLE_C) ? *client_peer : (r == ROLE_D) ? *client2_peer : *server_peer;
+        if (peer == NULL) return;
+        fprintf(trace_file, "A %llu %s THROTTLECONF peer=%u interval=%u accel=%u decel=%u\n",
+                (unsigned long long)now_ms(), role_name(r),
+                peer->incomingPeerID, act->a, act->b, act->c);
+        enet_peer_throttle_configure(peer, act->a, act->b, act->c);
+        return;
+    }
+    case ACT_DUP: {
+        /* re-send the last captured C2S datagram, logged as X2S (injected) */
+        if (dup_len > 0) {
+            log_datagram("X2S", dup_buf, dup_len);
+            if (sendto(proxy_fd, dup_buf, dup_len, 0,
+                       (struct sockaddr *)&proxy_addr, sizeof proxy_addr) < 0)
+              perror("dup sendto");
+        }
+        return;
+    }
+    case ACT_STOP_SERVER: {
+        *server_stopped = 1;
+        fprintf(trace_file, "A %llu S STOP\n", (unsigned long long)now_ms());
+        return;
+    }
     case ACT_PEER_TIMEOUT: {
         peer = (r == ROLE_C) ? *client_peer : (r == ROLE_D) ? *client2_peer : *server_peer;
         if (peer == NULL) return;
@@ -556,10 +658,16 @@ static void run_scenario(const Scenario *sc) {
     make_addr(&client2_addr_en, "127.0.0.1", CLIENT2_PORT);
     make_addr(&server_addr_en, "127.0.0.1", SERVER_PORT);
 
-    ENetHost *client = enet_host_create(&client_addr_en, 1, 2, sc->in_bw, sc->out_bw);
-    ENetHost *server = enet_host_create(&server_addr_en, 16, 2, sc->in_bw, sc->out_bw);
-    ENetHost *client2 = enet_host_create(&client2_addr_en, 1, 2, sc->in_bw, sc->out_bw);
+    uint32_t chl = sc->channel_limit ? sc->channel_limit : 2;
+    uint32_t mtu = sc->mtu ? sc->mtu : 1392;
+
+    ENetHost *client = enet_host_create(&client_addr_en, 1, chl, sc->in_bw, sc->out_bw);
+    ENetHost *server = enet_host_create(&server_addr_en, 16, chl, sc->in_bw, sc->out_bw);
+    ENetHost *client2 = enet_host_create(&client2_addr_en, 1, chl, sc->in_bw, sc->out_bw);
     if (!client || !server || !client2) { fprintf(stderr, "host create failed\n"); exit(1); }
+    client->mtu = mtu;
+    server->mtu = mtu;
+    client2->mtu = mtu;
     if (sc->with_checksum) {
         client->checksum = enet_crc32;
         server->checksum = enet_crc32;
@@ -568,6 +676,8 @@ static void run_scenario(const Scenario *sc) {
     ENetPeer *client_peer = NULL, *server_peer = NULL, *client2_peer = NULL;
     char done[64] = {0};
     int client_stopped = 0;
+    int server_stopped = 0;
+    dup_len = 0;
 
     proxy_init();
 
@@ -576,12 +686,13 @@ static void run_scenario(const Scenario *sc) {
         for (size_t i = 0; i < sc->action_count; i++) {
             if (!done[i] && sc->actions[i].at_ms <= t) {
                 perform_action(&sc->actions[i], client, server, client2,
-                               &client_peer, &server_peer, &client2_peer, &client_stopped);
+                               &client_peer, &server_peer, &client2_peer,
+                               &client_stopped, &server_stopped);
                 done[i] = 1;
             }
         }
         if (!client_stopped) drain_events(client, "C", &client_peer);
-        drain_events(server, "S", &server_peer);
+        if (!server_stopped) drain_events(server, "S", &server_peer);
         drain_events(client2, "D", &client2_peer);
         proxy_pump();
         usleep(500);
@@ -606,7 +717,9 @@ int main(int argc, char **argv) {
         fprintf(stderr, "usage: harness record <scenario>\n"
                         "scenarios: connect send_c2s send_s2c frag "
                         "disc_client disc_server idle timeout checksum "
-                        "bandwidth unfrag disclater multip inject\n");
+                        "bandwidth unfrag disclater multip inject "
+                        "multichannel dup reconnect retimeout mtu576 "
+                        "throttleconf\n");
         return 1;
     }
     const char *want = argv[2];
@@ -638,6 +751,7 @@ int main(int argc, char **argv) {
 
     fprintf(trace_file, "S %s\n", found->name);
     run_scenario(found);
+    fprintf(trace_file, "T %llu\n", (unsigned long long)now_ms());
     fclose(trace_file);
     enet_deinitialize();
     printf("recorded %s\n", path);

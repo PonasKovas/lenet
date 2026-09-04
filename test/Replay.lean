@@ -81,6 +81,7 @@ inductive ApiCall where
   | broadcast (ch : UInt8) (flags : UInt32) (payload : ByteArray)
   | disconnect (peer : UInt16) (data : UInt32)
   | disclater (peer : UInt16) (data : UInt32)
+  | throttleconf (peer : UInt16) (interval accel decel : UInt32)
   | peertimeout (limit mn mx : UInt32)
   | stop
 
@@ -93,6 +94,9 @@ inductive Line where
   | api (ms : UInt32) (role : Role) (call : ApiCall)
   | ev (ms : UInt32) (role : Role) (e : ExpEvent)
   | dat (ms : UInt32) (dir : Dir) (bytes : ByteArray)
+  /-- Recording end marker (`T <ms>`): the harness pumped until this wall
+  time; ENet was silent between the last recorded line and here. -/
+  | end (ms : UInt32)
 
 /-! ## Parsing -/
 
@@ -154,6 +158,11 @@ private def parseApiCall (kind : String) (ts : Array String) : Option ApiCall :=
   | "DISCLATER" => do
       let d ← kvVal "data" ts
       some (.disclater ((kvVal "peer" ts).map parseU16 |>.getD 0) (parseU32 d))
+  | "THROTTLECONF" => do
+      let i ← kvVal "interval" ts
+      let a ← kvVal "accel" ts
+      let c ← kvVal "decel" ts
+      some (.throttleconf ((kvVal "peer" ts).map parseU16 |>.getD 0) (parseU32 i) (parseU32 a) (parseU32 c))
   | "PEERTIMEOUT" => do
       let a ← kvVal "limit" ts
       let b ← kvVal "min" ts
@@ -198,6 +207,9 @@ def parseLine (s : String) : Option Line := do
       let dir ← (ts[2]? >>= parseDir)
       let hx ← kvVal "hex" ts
       some (.dat msNat.toUInt32 dir (parseHex hx))
+  | "T" => do
+      let msNat ← (ts[1]? >>= (·.toNat?))
+      some (.end msNat.toUInt32)
   | _ => none
 
 def parseTrace (text : String) : Array Line :=
@@ -271,13 +283,15 @@ def clientAddr : Address := Address.ipv4 127 0 0 1 40001
 def client2Addr : Address := Address.ipv4 127 0 0 1 40011
 def serverAddr : Address := Address.ipv4 127 0 0 1 40002
 
-/-- Scenario host bandwidth configs, mirroring the harness's Scenario table
-(the trace format does not record host configs). `(inBw, outBw)` for both
-hosts of the scenario. -/
-def scenarioBandwidth (scenario : String) : UInt32 × UInt32 :=
+/-- Scenario host configs, mirroring the harness's Scenario table (the trace
+format does not record host configs): `(inBw, outBw, channelLimit, mtu)` for
+both hosts of the scenario. -/
+def scenarioHostConfig (scenario : String) : UInt32 × UInt32 × Nat × UInt32 :=
   match scenario with
-  | "bandwidth" => (1000000, 500000)
-  | _ => (0, 0)
+  | "bandwidth" => (1000000, 500000, 2, Constants.defaultMtu.toUInt32)
+  | "multichannel" => (0, 0, 8, Constants.defaultMtu.toUInt32)
+  | "mtu576" => (0, 0, 2, 576)
+  | _ => (0, 0, 2, Constants.defaultMtu.toUInt32)
 
 /-! ## Replay -/
 
@@ -350,6 +364,8 @@ private def applyApi (st : ReplayState) (ms : UInt32) : ApiCall → ReplayState
     service { st with host := h } ms
   | .disconnect peer data => service { st with host := st.host.disconnect peer data } ms
   | .disclater peer data => service { st with host := st.host.disconnectLater peer data } ms
+  | .throttleconf peer interval accel decel =>
+    service { st with host := st.host.throttleConfigure peer interval accel decel } ms
   | .peertimeout limit mn mx =>
     let st2 :=
       if h : 0 < st.host.peers.size then
@@ -390,13 +406,14 @@ private def step (role : Role) (st : ReplayState) (line : Line) : ReplayState :=
           service { st2 with host := h, events := st2.events ++ evs } ms
       else
         service st ms
+    | .end _ => st -- handled by tailService after the fold
 
 def initialHost (scenario : String) (role : Role) : Host :=
-  let (inBw, outBw) := scenarioBandwidth scenario
+  let (inBw, outBw, chl, mtu) := scenarioHostConfig scenario
   let h := match role with
-    | .client => Host.create clientAddr 1 2 inBw outBw 0x12345678
-    | .client2 => Host.create client2Addr 1 2 inBw outBw 0x12345678
-    | .server => Host.create serverAddr 16 2 inBw outBw 0x12345678
+    | .client => Host.create clientAddr 1 chl inBw outBw 0x12345678 mtu
+    | .client2 => Host.create client2Addr 1 chl inBw outBw 0x12345678 mtu
+    | .server => Host.create serverAddr 16 chl inBw outBw 0x12345678 mtu
   { h with checksumEnabled := scenarioChecksum scenario }
 
 /-- The connectID the recorded client used, taken from its CONNECT datagram
@@ -417,14 +434,41 @@ def traceConnectId (hasChecksum : Bool) (role : Role) (lines : Array Line) : Opt
     | _ => none
   | none => none
 
+/-- Tail service: the recording ran until the `T` end marker, but the replay
+only ticks at trace-line timestamps. Pending timers (retransmit backoff,
+peer timeouts, pings) between the last line and the recording end are flushed
+here in 10ms steps, mirroring the harness's continuous pump. ENet was silent
+in that window by definition (otherwise lines would exist), so any event or
+command lenet emits there is compared against... ENet's recorded behavior,
+which is exactly what the diff is for. -/
+private def tailService (st : ReplayState) (fromMs : UInt32) (toMs : UInt32) : ReplayState :=
+  -- fuel bounds the tick count (10ms steps across the tail window)
+  let fuel := ((toMs - fromMs).toNat + 10) / 10 + 1
+  let rec loop (st : ReplayState) (t : UInt32) : Nat → ReplayState
+    | 0 => st
+    | fuel' + 1 =>
+      if t ≥ toMs ∨ st.stoppedFlag then st
+      else
+        let t' := t + 10
+        loop (service st t') t' fuel'
+  loop st fromMs fuel
+
 def replayRole (scenario : String) (role : Role) (lines : Array Line) : ReplayResult :=
   let hasChecksum := scenarioChecksum scenario
-  let st := lines.foldl (step role) {
+  let st0 := lines.foldl (step role) {
     host := initialHost scenario role
     decodeChecksummed := hasChecksum
     connectIdOverride := if role == .server then none else traceConnectId hasChecksum role lines
     connectAddr := (roleAddrs role).1
   }
+  -- Flush pending timers between the last trace line and the recording end.
+  let lastMs : UInt32 := lines.foldl (init := 0) fun acc l =>
+    match l with
+    | .api ms _ _ | .ev ms _ _ | .dat ms _ _ | .end ms => max acc ms
+  let endMs := (lines.find? fun l => match l with | .end _ => true | _ => false)
+  let st := match endMs with
+    | some (.end t) => tailService st0 lastMs t
+    | _ => st0
   let expEvents := lines.filterMap fun
     | .ev _ r e => if r == role then some e else none
     | _ => none
@@ -538,7 +582,8 @@ private def replayAndReport (scenario : String) (lines : Array Line) : IO Bool :
 def scenarioNames : Array String :=
   #["connect", "send_c2s", "send_s2c", "frag", "disc_client", "disc_server",
     "idle", "timeout", "checksum", "bandwidth", "unfrag", "disclater",
-    "multip", "inject"]
+    "multip", "inject", "multichannel", "dup", "reconnect", "retimeout",
+    "mtu576", "throttleconf"]
 
 end Replay
 

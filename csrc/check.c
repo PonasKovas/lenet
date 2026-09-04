@@ -5,7 +5,7 @@
 
 int main(void) {
     lenet_initialize();
-    lenet_host *h = lenet_host_create(0, 0, 16, 2, 0, 0);
+    lenet_host *h = lenet_host_create(0, 0, 16, 2, 0, 0, 0);
     if (h == NULL) { fprintf(stderr, "create failed\n"); return 1; }
     int32_t peer = lenet_host_connect(h, 0x0100007F /* 127.0.0.1 */, 40010, 2, 0);
     if (peer < 0) { fprintf(stderr, "connect failed\n"); return 1; }

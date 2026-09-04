@@ -18,9 +18,9 @@ structure HostContext where
   activeEventPkt : ByteArray := ByteArray.empty
 
 @[export lenet_ffi_host_create]
-def ffi_host_create (hostIp : UInt32) (port : UInt16) (peerCount : USize) (channelLimit : USize) (inBw : UInt32) (outBw : UInt32) (seed : UInt32) : IO (Option (IO.Ref HostContext)) := do
+def ffi_host_create (hostIp : UInt32) (port : UInt16) (peerCount : USize) (channelLimit : USize) (inBw : UInt32) (outBw : UInt32) (seed : UInt32) (mtu : UInt32) : IO (Option (IO.Ref HostContext)) := do
   let address : Address := { host := hostIp, port }
-  let host := Host.create address peerCount.toNat channelLimit.toNat inBw outBw seed
+  let host := Host.create address peerCount.toNat channelLimit.toNat inBw outBw seed mtu
   let ctx ← IO.mkRef { host := host }
   return some ctx
 
@@ -62,6 +62,23 @@ def ffi_host_broadcast (ctxRef : IO.Ref HostContext) (channelId : UInt8) (mode :
 def ffi_host_disconnect (ctxRef : IO.Ref HostContext) (peerId : UInt16) (data : UInt32) : IO Unit := do
   let ctx ← ctxRef.get
   let newHost := ctx.host.disconnect peerId data
+  ctxRef.set { ctx with host := newHost }
+
+@[export lenet_ffi_host_disconnect_later]
+def ffi_host_disconnect_later (ctxRef : IO.Ref HostContext) (peerId : UInt16) (data : UInt32) : IO Unit := do
+  let ctx ← ctxRef.get
+  let newHost := ctx.host.disconnectLater peerId data
+  ctxRef.set { ctx with host := newHost }
+
+@[export lenet_ffi_host_enable_checksum]
+def ffi_host_enable_checksum (ctxRef : IO.Ref HostContext) : IO Unit := do
+  let ctx ← ctxRef.get
+  ctxRef.set { ctx with host := { ctx.host with checksumEnabled := true } }
+
+@[export lenet_ffi_peer_throttle_configure]
+def ffi_peer_throttle_configure (ctxRef : IO.Ref HostContext) (peerId : UInt16) (interval accel decel : UInt32) : IO Unit := do
+  let ctx ← ctxRef.get
+  let newHost := ctx.host.throttleConfigure peerId interval accel decel
   ctxRef.set { ctx with host := newHost }
 
 @[export lenet_ffi_set_peer_timeout]

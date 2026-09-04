@@ -75,12 +75,14 @@ void lenet_initialize(void);
 
 /*
  * Creates a host. bind_ip/bind_port are informational (the socket is the
- * driver's); incoming_bw/outgoing_bw are bytes/second, 0 = unlimited.
+ * driver's); incoming_bw/outgoing_bw are bytes/second, 0 = unlimited;
+ * mtu is clamped to [576, 4096] (0 = default 1392).
  * Returns NULL on failure.
  */
 lenet_host *lenet_host_create(uint32_t bind_ip, uint16_t bind_port,
                               size_t peer_count, size_t channel_limit,
-                              uint32_t incoming_bw, uint32_t outgoing_bw);
+                              uint32_t incoming_bw, uint32_t outgoing_bw,
+                              uint32_t mtu);
 
 /** Destroys a host and frees all resources associated with it. */
 void lenet_host_destroy(lenet_host *host);
@@ -107,6 +109,21 @@ void lenet_host_broadcast(lenet_host *host, uint8_t channel, uint32_t flags,
 
 /** Begins a graceful disconnect of `peer_id`. */
 void lenet_host_disconnect(lenet_host *host, uint16_t peer_id, uint32_t data);
+
+/** ENet's enet_peer_disconnect_later: flushes queued packets, then
+ * disconnects. Degrades to lenet_host_disconnect when nothing is pending. */
+void lenet_host_disconnect_later(lenet_host *host, uint16_t peer_id, uint32_t data);
+
+/** ENet's enet_peer_throttle_configure: sets the local throttle parameters
+ * and informs the remote peer. */
+void lenet_peer_throttle_configure(lenet_host *host, uint16_t peer_id,
+                                   uint32_t interval, uint32_t acceleration,
+                                   uint32_t deceleration);
+
+/** Enables CRC32 checksums (must be enabled on both ends, like ENet's
+ * host->checksum = enet_crc32). Datagrams without a valid checksum are
+ * dropped on receive; all emitted datagrams carry one. */
+void lenet_host_enable_checksum(lenet_host *host);
 
 /** Configures timeout behavior for `peer_id` (see enet_peer_timeout). */
 void lenet_peer_set_timeout(lenet_host *host, uint16_t peer_id,

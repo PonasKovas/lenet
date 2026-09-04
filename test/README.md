@@ -66,6 +66,12 @@ and the replay is fully deterministic (no sockets, no real time).
 | `disclater`    | `enet_peer_disconnect_later` while reliable commands are in flight: deferred DISCONNECT once queues drain |
 | `multip`       | two clients → one server (second proxy), server broadcast + unicast to a specific peer; exercises the peer-address check in the receive path |
 | `inject`       | hand-crafted hostile datagrams spliced into the C2S path (INJECT action) against the live server: pins ENet's receive-path validation gates (see below) |
+| `multichannel` | 8 channels: per-channel sequencing, sends across channels 0-7 both directions |
+| `dup`          | DUP action re-sends captured datagrams: duplicate reliable command (idempotent, double ACK) + duplicate unsequenced (deduplicated) |
+| `reconnect`    | disconnect → reconnect: slot reuse, fresh sequence counters, session-ID carry-over on the reused slot (ENet's reset keeps sessions) |
+| `retimeout`    | client-side timeout: server stops responding → retransmit backoff → client timeout event |
+| `mtu576`       | hosts at minimum MTU: 40000-byte fragmented send at MTU 576 (~73 fragments) |
+| `throttleconf` | `enet_peer_throttle_configure` both directions (THROTTLE_CONFIGURE commands) |
 
 ## Hostile-input probes (`inject` scenario)
 
@@ -126,6 +132,11 @@ formal proofs (see TODO.md, "No fuzzing executable").
 | `disconnect`   | lenet initiates      | graceful disconnect + ack dance, data passthrough    |
 | `disconnect_r` | C initiates          | reverse graceful disconnect                          |
 | `timeout`      | —                    | lenet goes silent → ENet retransmit backoff → timeout |
+| `checksum`     | both                 | CRC32 checksums on (`enet_crc32` ↔ lenet checksum), byte-exact |
+| `bandwidth`    | both                 | hosts created with 1MB/500KB bandwidths: windowSize negotiation, throttled window |
+| `disclater`    | lenet initiates      | packets queued + `disconnect_later` without pumping: flush-then-disconnect |
+| `multip`       | two C clients → lenet| address-based peer demux, broadcast to both peers, unicast |
+| `unfrag`       | both                 | 8000-byte unreliable-fragmented send, byte-exact     |
 
 These exercise the FFI boundary too: `include/lenet.h` is implemented by
 `c/interop.c` as a shim over the raw `lenet_ffi_*` Lean exports.

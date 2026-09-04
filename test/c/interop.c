@@ -34,22 +34,30 @@
 #define ENET_PORT  40011
 
 static ENetHost *g_enet;
+static ENetHost *g_enet2;           /* second C client (multip scenario) */
 static ENetPeer *g_enet_peer;
+static ENetPeer *g_enet_peer2;
 static int g_lenet_fd = -1;
 static lenet_host *g_lenet;
 static int32_t g_lenet_peer = -1;
+static int32_t g_lenet_peer2 = -1;  /* lenet's slot for the second client */
 
 static int g_l_connected, g_c_connected, g_l_disconnected, g_c_disconnected;
+static int g_l2_connected, g_c2_connected;
 static int g_lenet_dead;            /* stop servicing lenet (timeout scenario) */
 static int g_l_connect_data = -1;   /* data from lenet's CONNECT event */
 static int g_c_connect_data = -1;   /* data from enet's CONNECT event */
 static int g_l_disc_data = -1;      /* data from lenet's DISCONNECT event */
 static int g_c_disc_data = -1;      /* data from enet's DISCONNECT event */
-static int g_l_pkts, g_c_pkts;      /* packets received on each side */
-static uint8_t g_l_ch0[64 * 1024], g_c_ch0[64 * 1024];
+static int g_l_pkts, g_c_pkts, g_c2_pkts; /* packets received on each side */
+static uint8_t g_l_ch0[64 * 1024], g_c_ch0[64 * 1024], g_c2_ch0[64 * 1024];
 static uint8_t g_l_ch1[4096], g_c_ch1[4096];
-static size_t g_l_ch0len, g_c_ch0len, g_l_ch1len, g_c_ch1len;
+static size_t g_l_ch0len, g_c_ch0len, g_l_ch1len, g_c_ch1len, g_c2_ch0len;
 static uint32_t g_start;
+static uint32_t g_bw_in, g_bw_out;  /* host bandwidth config (0 = unlimited) */
+static uint32_t g_mtu;              /* host MTU (0 = default) */
+static int g_checksums;             /* enable enet_crc32/lenet checksums */
+static int g_lenet_is_server;       /* lenet is the server (multip) */
 
 #define CHECK(cond, ...) do { \
     if (!(cond)) { fprintf(stderr, "FAIL: " __VA_ARGS__); \
@@ -76,8 +84,10 @@ static ENetHost *create_enet_host(uint32_t host, uint16_t port, size_t peers) {
     memset(&a, 0, sizeof a);
     a.host = host;
     a.port = port;
-    ENetHost *h = enet_host_create(&a, peers, 2, 0, 0);
+    ENetHost *h = enet_host_create(&a, peers, 2, g_bw_in, g_bw_out);
     if (!h) { fprintf(stderr, "FATAL: enet_host_create\n"); exit(2); }
+    h->mtu = g_mtu ? g_mtu : 1392;
+    if (g_checksums) h->checksum = enet_crc32;
     return h;
 }
 
@@ -93,6 +103,52 @@ static int make_udp(uint16_t port) {
     int fl = fcntl(fd, F_GETFL, 0);
     fcntl(fd, F_SETFL, fl | O_NONBLOCK);
     return fd;
+}
+
+static void handle_enet_event(ENetHost *host, ENetEvent *ev) {
+    switch (ev->type) {
+    case ENET_EVENT_TYPE_CONNECT:
+        if (host == g_enet) {
+            g_enet_peer = ev->peer;
+            g_c_connected = 1;
+            g_c_connect_data = (int)ev->data;
+            printf("  enet: CONNECT data=%u\n", ev->data);
+        } else {
+            g_enet_peer2 = ev->peer;
+            g_c2_connected = 1;
+            printf("  enet2: CONNECT data=%u\n", ev->data);
+        }
+        break;
+    case ENET_EVENT_TYPE_RECEIVE: {
+        printf("  enet: RECEIVE ch=%u len=%u\n", ev->channelID,
+               (unsigned)ev->packet->dataLength);
+        uint8_t *acc = (host == g_enet) ? g_c_ch0 : g_c2_ch0;
+        size_t *acc_len = (host == g_enet) ? &g_c_ch0len : &g_c2_ch0len;
+        if (ev->channelID == 0 && *acc_len + ev->packet->dataLength <= 64 * 1024) {
+            memcpy(acc + *acc_len, ev->packet->data, ev->packet->dataLength);
+            *acc_len += ev->packet->dataLength;
+        } else if (ev->channelID == 1 && host == g_enet &&
+                   g_c_ch1len + ev->packet->dataLength <= sizeof g_c_ch1) {
+            memcpy(g_c_ch1 + g_c_ch1len, ev->packet->data, ev->packet->dataLength);
+            g_c_ch1len += ev->packet->dataLength;
+        }
+        if (host == g_enet) g_c_pkts++; else g_c2_pkts++;
+        enet_packet_destroy(ev->packet);
+        break;
+    }
+    case ENET_EVENT_TYPE_DISCONNECT:
+        if (host == g_enet) {
+            g_c_disconnected = 1;
+            g_c_disc_data = (int)ev->data;
+            printf("  enet: DISCONNECT data=%u\n", ev->data);
+        } else {
+            g_c2_connected = 0;
+            printf("  enet2: DISCONNECT data=%u\n", ev->data);
+        }
+        break;
+    default:
+        break;
+    }
 }
 
 /* One pump iteration: feed lenet, run enet, emit lenet's outputs. */
@@ -116,36 +172,10 @@ static void pump(void) {
 
     /* 2. enet host events */
     ENetEvent ev;
-    while (enet_host_service(g_enet, &ev, 0) > 0) {
-        switch (ev.type) {
-        case ENET_EVENT_TYPE_CONNECT:
-            g_enet_peer = ev.peer;
-            g_c_connected = 1;
-            g_c_connect_data = (int)ev.data;
-            printf("  enet: CONNECT data=%u\n", ev.data);
-            break;
-        case ENET_EVENT_TYPE_RECEIVE:
-            printf("  enet: RECEIVE ch=%u len=%u\n", ev.channelID,
-                   (unsigned)ev.packet->dataLength);
-            if (ev.channelID == 0 && g_c_ch0len + ev.packet->dataLength <= sizeof g_c_ch0) {
-                memcpy(g_c_ch0 + g_c_ch0len, ev.packet->data, ev.packet->dataLength);
-                g_c_ch0len += ev.packet->dataLength;
-            } else if (ev.channelID == 1 && g_c_ch1len + ev.packet->dataLength <= sizeof g_c_ch1) {
-                memcpy(g_c_ch1 + g_c_ch1len, ev.packet->data, ev.packet->dataLength);
-                g_c_ch1len += ev.packet->dataLength;
-            }
-            g_c_pkts++;
-            enet_packet_destroy(ev.packet);
-            break;
-        case ENET_EVENT_TYPE_DISCONNECT:
-            g_c_disconnected = 1;
-            g_c_disc_data = (int)ev.data;
-            printf("  enet: DISCONNECT data=%u\n", ev.data);
-            break;
-        default:
-            break;
-        }
-    }
+    while (g_enet && enet_host_service(g_enet, &ev, 0) > 0)
+        handle_enet_event(g_enet, &ev);
+    while (g_enet2 && enet_host_service(g_enet2, &ev, 0) > 0)
+        handle_enet_event(g_enet2, &ev);
 
     /* 3. lenet outputs: send datagrams, collect events */
     if (!g_lenet_dead && g_lenet) {
@@ -165,9 +195,15 @@ static void pump(void) {
         while (lenet_host_poll_event(g_lenet, &lev, payload, sizeof payload, &plen) == 1) {
             switch (lev.type) {
             case LENET_EVENT_CONNECT:
-                g_l_connected = 1;
-                g_l_connect_data = (int)lev.data;
-                printf("  lenet: CONNECT peer=%u data=%u\n", lev.peer_id, lev.data);
+                if (!g_l_connected) {
+                    g_l_connected = 1;
+                    g_l_connect_data = (int)lev.data;
+                    printf("  lenet: CONNECT peer=%u data=%u\n", lev.peer_id, lev.data);
+                } else {
+                    g_l2_connected = 1;
+                    g_lenet_peer2 = (int32_t)lev.peer_id;
+                    printf("  lenet: CONNECT2 peer=%u data=%u\n", lev.peer_id, lev.data);
+                }
                 break;
             case LENET_EVENT_DISCONNECT:
                 g_l_disconnected = 1;
@@ -197,8 +233,9 @@ static void pump(void) {
 static int setup_client_connected(uint32_t connect_data) {
     g_enet = create_enet_host(htonl(INADDR_LOOPBACK), ENET_PORT, 16);
     g_lenet_fd = make_udp(LENET_PORT);
-    g_lenet = lenet_host_create(htonl(INADDR_LOOPBACK), LENET_PORT, 1, 2, 0, 0);
+    g_lenet = lenet_host_create(htonl(INADDR_LOOPBACK), LENET_PORT, 1, 2, 0, 0, 0);
     CHECK(g_lenet != NULL, "lenet_host_create failed");
+    if (g_checksums) lenet_host_enable_checksum(g_lenet);
     g_lenet_peer = lenet_host_connect(g_lenet, htonl(INADDR_LOOPBACK), ENET_PORT,
                                       2, connect_data);
     CHECK(g_lenet_peer >= 0, "lenet_host_connect failed");
@@ -211,8 +248,9 @@ static int setup_client_connected(uint32_t connect_data) {
 static int setup_server_connected(uint32_t connect_data) {
     g_enet = create_enet_host(htonl(INADDR_LOOPBACK), ENET_PORT, 1);
     g_lenet_fd = make_udp(LENET_PORT);
-    g_lenet = lenet_host_create(htonl(INADDR_LOOPBACK), LENET_PORT, 16, 2, 0, 0);
+    g_lenet = lenet_host_create(htonl(INADDR_LOOPBACK), LENET_PORT, 16, 2, 0, 0, 0);
     CHECK(g_lenet != NULL, "lenet_host_create failed");
+    if (g_checksums) lenet_host_enable_checksum(g_lenet);
     ENetAddress taddr;
     memset(&taddr, 0, sizeof taddr);
     taddr.host = htonl(INADDR_LOOPBACK);
@@ -221,6 +259,32 @@ static int setup_server_connected(uint32_t connect_data) {
     CHECK(g_enet_peer != NULL, "enet_host_connect failed");
     WAIT(g_l_connected && g_c_connected, 2000,
          "reverse handshake timeout (l=%d c=%d)", g_l_connected, g_c_connected);
+    return 0;
+}
+
+/* lenet-as-server with TWO C clients, both connected (multip) */
+static int setup_server_connected2(uint32_t connect_data) {
+    g_lenet_is_server = 1;
+    g_enet = create_enet_host(htonl(INADDR_LOOPBACK), ENET_PORT, 1);
+    g_lenet_fd = make_udp(LENET_PORT);
+    g_lenet = lenet_host_create(htonl(INADDR_LOOPBACK), LENET_PORT, 16, 2, 0, 0, 0);
+    CHECK(g_lenet != NULL, "lenet_host_create failed");
+
+    ENetAddress taddr;
+    memset(&taddr, 0, sizeof taddr);
+    taddr.host = htonl(INADDR_LOOPBACK);
+    taddr.port = LENET_PORT;
+
+    g_enet_peer = enet_host_connect(g_enet, &taddr, 2, connect_data);
+    CHECK(g_enet_peer != NULL, "enet_host_connect failed (client 1)");
+    WAIT(g_l_connected && g_c_connected, 2000,
+         "handshake 1 timeout (l=%d c=%d)", g_l_connected, g_c_connected);
+
+    g_enet2 = create_enet_host(htonl(INADDR_LOOPBACK), ENET_PORT + 2, 1);
+    g_enet_peer2 = enet_host_connect(g_enet2, &taddr, 2, connect_data);
+    CHECK(g_enet_peer2 != NULL, "enet_host_connect failed (client 2)");
+    WAIT(g_l2_connected && g_c2_connected, 2000,
+         "handshake 2 timeout (l2=%d c2=%d)", g_l2_connected, g_c2_connected);
     return 0;
 }
 
@@ -338,10 +402,121 @@ static int scen_timeout(void) {
     return 0;
 }
 
+static int scen_checksum(void) {
+    g_checksums = 1;
+    CHECK(setup_client_connected(0) == 0, "setup failed");
+    /* the handshake itself already proves checksum byte-compatibility both
+     * ways: ENet's enet_crc32-verified datagrams from lenet, and lenet's
+     * checksum verification of ENet's datagrams (mismatches drop silently
+     * and the handshake would time out) */
+    const char *to_c = "checksummed";
+    CHECK(lenet_host_send(g_lenet, (uint16_t)g_lenet_peer, 0,
+                          LENET_RELIABLE, to_c, 11) == 0, "lenet send failed");
+    WAIT(g_c_pkts >= 1, 2000, "checksummed packet did not arrive");
+    CHECK(g_c_ch0len == 11 && memcmp(g_c_ch0, to_c, 11) == 0, "bytes mismatch");
+
+    const char *from_c = "and-back";
+    ENetPacket *pkt = enet_packet_create(from_c, 8, ENET_PACKET_FLAG_RELIABLE);
+    enet_peer_send(g_enet_peer, 0, pkt);
+    WAIT(g_l_ch0len >= 8, 2000, "lenet did not receive checksummed packet");
+    CHECK(g_l_ch0len == 8 && memcmp(g_l_ch0, from_c, 8) == 0, "bytes mismatch (lenet)");
+    return 0;
+}
+
+static int scen_bandwidth(void) {
+    g_bw_in = 1000000;
+    g_bw_out = 500000;
+    CHECK(setup_client_connected(0) == 0, "setup failed");
+    /* the handshake exercises windowSize negotiation under nonzero
+     * bandwidths; the sends exercise the throttled window */
+    uint8_t pay[2000];
+    for (int i = 0; i < (int)sizeof pay; i++) pay[i] = (uint8_t)(i * 11);
+    CHECK(lenet_host_send(g_lenet, (uint16_t)g_lenet_peer, 0,
+                          LENET_RELIABLE, pay, sizeof pay) == 0, "lenet send failed");
+    WAIT(g_c_ch0len == sizeof pay, 3000, "C received %zu/2000 bytes", g_c_ch0len);
+    CHECK(memcmp(g_c_ch0, pay, sizeof pay) == 0, "bytes mismatch");
+
+    ENetPacket *pkt = enet_packet_create(pay, sizeof pay, ENET_PACKET_FLAG_RELIABLE);
+    enet_peer_send(g_enet_peer, 0, pkt);
+    WAIT(g_l_ch0len == sizeof pay, 3000, "lenet received %zu/2000 bytes", g_l_ch0len);
+    CHECK(memcmp(g_l_ch0, pay, sizeof pay) == 0, "bytes mismatch (lenet)");
+    return 0;
+}
+
+static int scen_disclater(void) {
+    CHECK(setup_client_connected(0) == 0, "setup failed");
+    /* queue packets and the deferred disconnect without pumping in between:
+     * lenet must flush both packets before the disconnect goes out */
+    uint8_t p1[100], p2[50];
+    for (int i = 0; i < 100; i++) p1[i] = (uint8_t)(i + 1);
+    for (int i = 0; i < 50; i++) p2[i] = (uint8_t)(200 - i);
+    CHECK(lenet_host_send(g_lenet, (uint16_t)g_lenet_peer, 0,
+                          LENET_RELIABLE, p1, sizeof p1) == 0, "send 1");
+    CHECK(lenet_host_send(g_lenet, (uint16_t)g_lenet_peer, 0,
+                          LENET_RELIABLE, p2, sizeof p2) == 0, "send 2");
+    lenet_host_disconnect_later(g_lenet, (uint16_t)g_lenet_peer, 42);
+
+    WAIT(g_c_pkts >= 2 && g_c_disconnected && g_l_disconnected, 3000,
+         "disclater incomplete (pkts=%d c=%d l=%d)",
+         g_c_pkts, g_c_disconnected, g_l_disconnected);
+    CHECK(g_c_ch0len == 150 && memcmp(g_c_ch0, p1, 100) == 0
+          && memcmp(g_c_ch0 + 100, p2, 50) == 0, "flushed bytes mismatch");
+    CHECK(g_c_disc_data == 42, "deferred data=%d, want 42", g_c_disc_data);
+    return 0;
+}
+
+static int scen_multip(void) {
+    CHECK(setup_server_connected2(0) == 0, "setup failed");
+    /* both C clients send to lenet; lenet must distinguish them by address */
+    const char *m1 = "from-c1";
+    const char *m2 = "from-c2";
+    ENetPacket *p1 = enet_packet_create(m1, 7, ENET_PACKET_FLAG_RELIABLE);
+    ENetPacket *p2 = enet_packet_create(m2, 7, ENET_PACKET_FLAG_RELIABLE);
+    enet_peer_send(g_enet_peer, 0, p1);
+    enet_peer_send(g_enet_peer2, 0, p2);
+    WAIT(g_l_pkts >= 2, 2000, "lenet received %d/2 packets", g_l_pkts);
+    CHECK(g_l_ch0len == 14 && memcmp(g_l_ch0, m1, 7) == 0
+          && memcmp(g_l_ch0 + 7, m2, 7) == 0, "multi-client bytes mismatch (lenet)");
+
+    /* lenet broadcasts to both; then unicasts to client 2 only */
+    const char *bc = "BC";
+    lenet_host_broadcast(g_lenet, 0, LENET_RELIABLE, bc, 2);
+    const char *solo = "solo";
+    CHECK(lenet_host_send(g_lenet, (uint16_t)g_lenet_peer2, 0,
+                          LENET_RELIABLE, solo, 4) == 0, "unicast send");
+    WAIT(g_c_pkts >= 1 && g_c2_pkts >= 1, 2000,
+         "broadcast incomplete (c=%d c2=%d)", g_c_pkts, g_c2_pkts);
+    /* C1 received only the broadcast (2 bytes); C2 received broadcast + solo */
+    CHECK(g_c_ch0len == 2 && memcmp(g_c_ch0, bc, 2) == 0, "broadcast bytes mismatch (C1)");
+    CHECK(g_c2_pkts >= 2, "client 2 missed broadcast or unicast");
+    return 0;
+}
+
+static int scen_unfrag(void) {
+    CHECK(setup_client_connected(0) == 0, "setup failed");
+    static uint8_t big[8000];
+    for (size_t i = 0; i < sizeof big; i++)
+        big[i] = (uint8_t)(i * 13 + (i >> 6));
+
+    CHECK(lenet_host_send(g_lenet, (uint16_t)g_lenet_peer, 0,
+                          LENET_UNRELIABLE_FRAGMENT, big, sizeof big) == 0,
+          "lenet unreliable-fragment send failed");
+    WAIT(g_c_ch0len == sizeof big, 3000, "C received %zu/8000 bytes", g_c_ch0len);
+    CHECK(memcmp(g_c_ch0, big, sizeof big) == 0, "unreliable-fragment mismatch (C side)");
+
+    ENetPacket *pkt = enet_packet_create(big, sizeof big,
+                                         ENET_PACKET_FLAG_UNRELIABLE_FRAGMENT);
+    enet_peer_send(g_enet_peer, 0, pkt);
+    WAIT(g_l_ch0len == sizeof big, 3000, "lenet received %zu/8000 bytes", g_l_ch0len);
+    CHECK(memcmp(g_l_ch0, big, sizeof big) == 0, "unreliable-fragment mismatch (lenet)");
+    return 0;
+}
+
 int main(int argc, char **argv) {
     if (argc != 2) {
         fprintf(stderr, "usage: interop <scenario>\n"
-                        "scenarios: connect connect_r send frag disconnect disconnect_r timeout\n");
+                        "scenarios: connect connect_r send frag disconnect disconnect_r "
+                        "timeout checksum bandwidth disclater multip unfrag\n");
         return 1;
     }
     if (enet_initialize() != 0) { fprintf(stderr, "enet_initialize failed\n"); return 2; }
@@ -355,12 +530,18 @@ int main(int argc, char **argv) {
     else if (strcmp(argv[1], "disconnect") == 0) rc = scen_disconnect();
     else if (strcmp(argv[1], "disconnect_r") == 0) rc = scen_disconnect_r();
     else if (strcmp(argv[1], "timeout") == 0) rc = scen_timeout();
+    else if (strcmp(argv[1], "checksum") == 0) rc = scen_checksum();
+    else if (strcmp(argv[1], "bandwidth") == 0) rc = scen_bandwidth();
+    else if (strcmp(argv[1], "disclater") == 0) rc = scen_disclater();
+    else if (strcmp(argv[1], "multip") == 0) rc = scen_multip();
+    else if (strcmp(argv[1], "unfrag") == 0) rc = scen_unfrag();
     else { fprintf(stderr, "unknown scenario: %s\n", argv[1]); return 1; }
 
     printf("%s %s\n", rc == 0 ? "PASS" : "FAILED", argv[1]);
 
     if (g_lenet) lenet_host_destroy(g_lenet);
     if (g_enet) enet_host_destroy(g_enet);
+    if (g_enet2) enet_host_destroy(g_enet2);
     enet_deinitialize();
     return rc == 0 ? 0 : 1;
 }

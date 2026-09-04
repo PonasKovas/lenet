@@ -54,9 +54,12 @@ def windowSizeFor (hostOutBw : UInt32) (peerInBw : UInt32) : UInt32 :=
       Nat.min peerInBw.toNat hostOutBw.toNat / scale * Constants.minimumWindowSize
   Nat.min Constants.maximumWindowSize (Nat.max Constants.minimumWindowSize raw) |>.toUInt32
 
-/-- Creates an initialized host with `peerCount` allocated peer slots. -/
-def create (address : Address := {}) (peerCount : Nat := 32) (channelLimit : Nat := Constants.maximumChannelCount) (inBw : UInt32 := 0) (outBw : UInt32 := 0) (seed : UInt32 := 0x87654321) : Host :=
+/-- Creates an initialized host with `peerCount` allocated peer slots.
+`mtu` is clamped to [576, 4096] (ENet: ENET_PROTOCOL_MINIMUM_MTU /
+ENET_PROTOCOL_MAXIMUM_MTU; hosts outside the range are silently corrected). -/
+def create (address : Address := {}) (peerCount : Nat := 32) (channelLimit : Nat := Constants.maximumChannelCount) (inBw : UInt32 := 0) (outBw : UInt32 := 0) (seed : UInt32 := 0x87654321) (mtu : UInt32 := Constants.defaultMtu.toUInt32) : Host :=
   let cl := if channelLimit == 0 ∨ channelLimit > Constants.maximumChannelCount then Constants.maximumChannelCount else channelLimit
+  let mtu := Nat.min Constants.maximumMtu (Nat.max Constants.minimumMtu mtu.toNat) |>.toUInt32
   let peers := (List.range peerCount).toArray.map fun idx =>
     Peer.create idx.toUInt16 1 address
   {
@@ -65,6 +68,7 @@ def create (address : Address := {}) (peerCount : Nat := 32) (channelLimit : Nat
     channelLimit      := cl
     incomingBandwidth := inBw
     outgoingBandwidth := outBw
+    mtu
     randomSeed        := seed
   }
 
@@ -97,8 +101,11 @@ def connect (h : Host) (remoteAddress : Address) (channelCount : Nat := 2) (data
 
     let connectParams : Protocol.ConnectParams := {
       outgoingPeerId             := p.peerId
-      incomingSessionId          := 0xFF
-      outgoingSessionId          := 0xFF
+      -- ENet (enet_host_connect): the CONNECT advertises the slot's current
+      -- session IDs - 0xFF/0xFF for a fresh slot, the previously negotiated
+      -- values for a reused one.
+      incomingSessionId          := p.incomingSessionId
+      outgoingSessionId          := p.outgoingSessionId
       mtu                        := hRand.mtu
       -- ENet: the client's window derives from its own outgoing bandwidth
       -- (enet_host_connect); a fresh peer slot has incomingBandwidth = 0.
@@ -167,18 +174,7 @@ def disconnect (h : Host) (peerId : UInt16) (data : UInt32 := 0) : Host :=
   let idx := peerId.toNat
   if hIdx : idx < h.peers.size then
     let p := h.peers[idx]
-    -- Control commands on channel 0xFF share a pre-incremented counter.
-    let (p, controlSeq) := p.nextControlSeq
-    let cmd : Protocol.Command := {
-      channelId              := 0xFF
-      reliableSequenceNumber := controlSeq
-      acknowledge            := true
-      unsequenced            := false
-      body                   := .disconnect data
-    }
-    let outCmd : OutgoingCommand := { command := cmd }
-    let updatedPeer := { p with state := .disconnecting, eventData := data }.queueOutgoingCommand outCmd
-    { h with peers := h.peers.set idx updatedPeer hIdx }
+    { h with peers := h.peers.set idx (p.queueDisconnect data) hIdx }
   else
     h
 
@@ -197,22 +193,49 @@ def disconnectLater (h : Host) (peerId : UInt16) (data : UInt32 := 0) : Host :=
   else
     h
 
-/-- ENet's disconnectLater drain transition (protocol.c:1593): once a
-`disconnectLater` peer has no queued or in-flight commands left, the queued
-DISCONNECT (carrying the deferred data) goes out. -/
-def flushDisconnectLater (p : Peer) : Peer :=
-  if p.state == .disconnectLater ∧ p.outgoingCommands.isEmpty ∧ p.sentReliableCommands.isEmpty then
+/-- ENet's enet_peer_throttle_configure: sets the local throttle parameters
+and tells the remote peer via an ack-flagged THROTTLE_CONFIGURE command. -/
+def throttleConfigure (h : Host) (peerId : UInt16) (interval accel decel : UInt32) : Host :=
+  let idx := peerId.toNat
+  if hIdx : idx < h.peers.size then
+    let p := h.peers[idx]
+    -- Control commands on channel 0xFF share a pre-incremented counter.
     let (p, controlSeq) := p.nextControlSeq
     let cmd : Protocol.Command := {
       channelId              := 0xFF
       reliableSequenceNumber := controlSeq
       acknowledge            := true
       unsequenced            := false
-      body                   := .disconnect p.eventData
+      body                   := .throttleConfigure interval accel decel
     }
-    { p with state := .disconnecting }.queueOutgoingCommand { command := cmd }
+    let updatedPeer := { p with
+      packetThrottleInterval     := interval
+      packetThrottleAcceleration := accel
+      packetThrottleDeceleration := decel
+    }.queueOutgoingCommand { command := cmd }
+    { h with peers := h.peers.set idx updatedPeer hIdx }
+  else
+    h
+
+/-- ENet's disconnectLater drain transition (protocol.c:1593): once a
+`disconnectLater` peer has no queued or in-flight commands left, the queued
+DISCONNECT (carrying the deferred data) goes out. -/
+def flushDisconnectLater (p : Peer) : Peer :=
+  if p.state == .disconnectLater ∧ p.outgoingCommands.isEmpty ∧ p.sentReliableCommands.isEmpty then
+    p.queueDisconnect p.eventData
   else
     p
+
+/-- ENet (send_acknowledgements): when the peer's ACK for a DISCONNECT
+command is transmitted, the peer dispatches ZOMBIE - the DISCONNECT event
+fires and the peer resets, freeing the slot. Lenet emitted the event at
+receive time (same tick); the reset + event happen here once the acks have
+drained. -/
+def flushAcknowledgingDisconnect (p : Peer) : Peer × Option Event :=
+  if p.state == .acknowledgingDisconnect ∧ p.acknowledgements.isEmpty then
+    (Peer.reset p, some (Event.disconnect p.peerId p.eventData))
+  else
+    (p, none)
 
 /--
 Consumes an incoming raw UDP datagram received from `fromAddr`.
@@ -511,19 +534,22 @@ def packOutgoingCommands (p : Peer) (now : UInt32) : Peer × Array Protocol.Comm
 
 /-- Polls a single peer for outgoing datagrams. Loops until no further
 progress is possible, mirroring ENet's CONTINUE_SENDING multi-pass packing:
-each pass produces one MTU-bounded datagram. -/
-def pollPeer (p : Peer) (now : UInt32) (checksumEnabled : Bool) (compressor : Option Compressor) : Peer × Array (Address × ByteArray) :=
+each pass produces one MTU-bounded datagram. May emit disconnect events when
+an `acknowledgingDisconnect` peer's acks drain (ENet: ZOMBIE dispatch at ack
+send, event + reset at dispatch). -/
+def pollPeer (p : Peer) (now : UInt32) (checksumEnabled : Bool) (compressor : Option Compressor) : Peer × Array (Address × ByteArray) × Array Event :=
   if p.state == .disconnected then
-    (p, #[])
+    (p, #[], #[])
   else
-    let rec loop (p : Peer) (fuel : Nat) (acc : Array (Address × ByteArray)) : Peer × Array (Address × ByteArray) :=
+    let rec loop (p : Peer) (fuel : Nat) (acc : Array (Address × ByteArray)) : Peer × Array (Address × ByteArray) × Array Event :=
       match fuel with
-      | 0 => (p, acc)
+      | 0 => (p, acc, #[])
       | fuel' + 1 =>
         let p := flushDisconnectLater p
         let (updatedPeer, commandsToPack) := packOutgoingCommands p now
         if commandsToPack.isEmpty then
-          (updatedPeer, acc)
+          let (p2, dispatchEv) := flushAcknowledgingDisconnect updatedPeer
+          (p2, acc, dispatchEv.map (#[·]) |>.getD #[])
         else
           let header : Protocol.Header := {
             peerId     := updatedPeer.outgoingPeerId
@@ -552,13 +578,14 @@ def pollPeer (p : Peer) (now : UInt32) (checksumEnabled : Bool) (compressor : Op
 
 /--
 Packages pending ACKs and outgoing commands across all peers into datagrams.
-Returns the updated host and the array of outgoing `(destinationAddress, datagramBytes)`.
+Returns the updated host, outgoing `(destinationAddress, datagramBytes)`, and
+any disconnect events dispatched at ack-send time.
 -/
-def pollOutgoing (h : Host) (now : UInt32) : Host × Array (Address × ByteArray) :=
-  let (updatedPeers, packets) := h.peers.foldl (init := (#[], #[])) fun (peersAcc, pktsAcc) p =>
-    let (p', pkts) := pollPeer p now h.checksumEnabled h.compressor
-    (peersAcc.push p', pktsAcc ++ pkts)
-  ({ h with peers := updatedPeers }, packets)
+def pollOutgoing (h : Host) (now : UInt32) : Host × Array (Address × ByteArray) × Array Event :=
+  let (updatedPeers, packets, events) := h.peers.foldl (init := (#[], #[], #[])) fun (peersAcc, pktsAcc, evsAcc) p =>
+    let (p', pkts, evs) := pollPeer p now h.checksumEnabled h.compressor
+    (peersAcc.push p', pktsAcc ++ pkts, evsAcc ++ evs)
+  ({ h with peers := updatedPeers }, packets, events)
 
 structure TimeoutCheckResult where
   stillInFlight   : Array OutgoingCommand := #[]
@@ -582,7 +609,9 @@ def checkPeerTimeouts (p : Peer) (now : UInt32) : Peer × Option Event :=
           else
             acc.earliestTimeout
         let acc := { acc with earliestTimeout := earliest }
-        if p.isTimedOut now outCmd.sendAttempts then
+        -- ENet: the timeout condition is evaluated against the freshly
+        -- updated earliestTimeout within the same iteration.
+        if p.isTimedOut now acc.earliestTimeout outCmd.sendAttempts then
           { acc with isTimedOut := true }
         else
           let retryCmd := { outCmd with
@@ -593,9 +622,9 @@ def checkPeerTimeouts (p : Peer) (now : UInt32) : Peer × Option Event :=
         { acc with stillInFlight := acc.stillInFlight.push outCmd }
 
   if result.isTimedOut then
-    let deadPeer := { p with state := .zombie, earliestTimeout := result.earliestTimeout }
-    -- ENet's notify_disconnect always reports data = 0 on this path.
-    (deadPeer, some (Event.disconnect p.peerId 0))
+    -- ENet's notify_disconnect (timeout path): event (data = 0) +
+    -- enet_peer_reset, so the slot is immediately reusable.
+    (Peer.reset p, some (Event.disconnect p.peerId 0))
   else
     let newOutgoing := result.retransmits ++ p.outgoingCommands
     let pUpdated := { p with
@@ -745,8 +774,8 @@ Returns the updated `Host`, outgoing datagrams to transmit, and any application 
 def service (h : Host) (now : UInt32) : Host × Array (Address × ByteArray) × Array Event :=
   let hThrottled := h.bandwidthThrottle now
   let (hTimedOut, timeoutEvents) := hThrottled.checkTimeoutsAndPings now
-  let (hPolled, outgoingPackets) := hTimedOut.pollOutgoing now
-  (hPolled, outgoingPackets, timeoutEvents)
+  let (hPolled, outgoingPackets, dispatchEvents) := hTimedOut.pollOutgoing now
+  (hPolled, outgoingPackets, timeoutEvents ++ dispatchEvents)
 
 end Host
 

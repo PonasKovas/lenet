@@ -28,7 +28,7 @@
 /* ---- raw Lean FFI exports (implemented in Lenet/FFI.lean) ---- */
 
 extern lean_object *lenet_ffi_host_create(uint32_t, uint16_t, size_t, size_t,
-                                          uint32_t, uint32_t, uint32_t);
+                                          uint32_t, uint32_t, uint32_t, uint32_t);
 extern lean_object *lenet_ffi_host_destroy(lean_object *);
 extern lean_object *lenet_ffi_host_connect(lean_object *, uint32_t, uint16_t,
                                            size_t, uint32_t);
@@ -37,6 +37,10 @@ extern lean_object *lenet_ffi_host_send(lean_object *, uint16_t, uint8_t,
 extern lean_object *lenet_ffi_host_broadcast(lean_object *, uint8_t, uint32_t,
                                              lean_object *);
 extern lean_object *lenet_ffi_host_disconnect(lean_object *, uint16_t, uint32_t);
+extern lean_object *lenet_ffi_host_disconnect_later(lean_object *, uint16_t, uint32_t);
+extern lean_object *lenet_ffi_host_enable_checksum(lean_object *);
+extern lean_object *lenet_ffi_peer_throttle_configure(lean_object *, uint16_t,
+                                                      uint32_t, uint32_t, uint32_t);
 extern lean_object *lenet_ffi_set_peer_timeout(lean_object *, uint16_t, uint32_t,
                                                uint32_t, uint32_t);
 extern lean_object *lenet_ffi_host_handle_datagram(lean_object *, uint32_t,
@@ -110,12 +114,14 @@ static lean_object *mk_byte_array(const void *data, size_t len) {
 
 lenet_host *lenet_host_create(uint32_t bind_ip, uint16_t bind_port,
                               size_t peer_count, size_t channel_limit,
-                              uint32_t incoming_bw, uint32_t outgoing_bw) {
+                              uint32_t incoming_bw, uint32_t outgoing_bw,
+                              uint32_t mtu) {
     lenet_initialize();
     uint32_t seed = (uint32_t)time(NULL);
+    if (mtu == 0) mtu = 1392;
     lean_object *r = lenet_ffi_host_create(bind_ip, bind_port, peer_count,
                                            channel_limit, incoming_bw,
-                                           outgoing_bw, seed);
+                                           outgoing_bw, seed, mtu);
     if (!lean_io_result_is_ok(r)) {
         lean_io_result_show_error(r);
         lean_dec(r);
@@ -186,6 +192,33 @@ void lenet_host_disconnect(lenet_host *host, uint16_t peer_id, uint32_t data) {
     ensure_init();
     lean_inc((lean_object *)host);
     lean_object *r = lenet_ffi_host_disconnect((lean_object *)host, peer_id, data);
+    lean_dec(r);
+}
+
+void lenet_host_disconnect_later(lenet_host *host, uint16_t peer_id, uint32_t data) {
+    if (host == NULL) return;
+    ensure_init();
+    lean_inc((lean_object *)host);
+    lean_object *r = lenet_ffi_host_disconnect_later((lean_object *)host, peer_id, data);
+    lean_dec(r);
+}
+
+void lenet_host_enable_checksum(lenet_host *host) {
+    if (host == NULL) return;
+    ensure_init();
+    lean_inc((lean_object *)host);
+    lean_object *r = lenet_ffi_host_enable_checksum((lean_object *)host);
+    lean_dec(r);
+}
+
+void lenet_peer_throttle_configure(lenet_host *host, uint16_t peer_id,
+                                   uint32_t interval, uint32_t acceleration,
+                                   uint32_t deceleration) {
+    if (host == NULL) return;
+    ensure_init();
+    lean_inc((lean_object *)host);
+    lean_object *r = lenet_ffi_peer_throttle_configure((lean_object *)host, peer_id,
+                                                       interval, acceleration, deceleration);
     lean_dec(r);
 }
 

@@ -23,10 +23,11 @@ compatibility testing works), then come back here.
 
 ## Current state
 
-- 14 golden-trace scenarios, all roles PASS (connect, send_c2s, send_s2c,
+- 20 golden-trace scenarios, all roles PASS (connect, send_c2s, send_s2c,
   frag, disc_client, disc_server, idle, timeout, checksum, bandwidth, unfrag,
-  disclater, multip, inject).
-- Live interop: 7/7 PASS. C API distribution builds and self-checks.
+  disclater, multip, inject, multichannel, dup, reconnect, retimeout, mtu576,
+  throttleconf).
+- Live interop: 12/12 PASS. C API distribution builds and self-checks.
 
 ## Roadmap
 
@@ -45,17 +46,22 @@ Phases in order; each one gates the next. Exit criteria per phase listed.
    matrix in test/README.md). Recorded ENet responses confirmed all three
    fixes on the wire.
 
-**Pass B:**
-3. Scenarios: `multichannel` (8 channels), `dup` (DUP action re-sending a
-   captured datagram: duplicate reliable/ACK idempotency), `reconnect`
-   (disconnect -> reconnect, slot reuse, state reset), `retimeout`
-   (client-side timeout), `mtu576` (needs an MTU parameter on `Host.create`,
-   clamped to [576, 4096]), `throttleconf` (`enet_peer_throttle_configure`).
-4. Interop extensions: FFI/C API additions (`lenet_host_enable_checksum`,
-   `lenet_host_disconnect_later`, MTU on create) + interop scenarios
-   `checksum`, `bandwidth`, `disclater`, `multip`, `unfrag`.
+**Pass B (done):**
+3. ~~Scenarios~~ — done: `multichannel` (8 channels), `dup` (DUP action
+   re-sending captured datagrams), `reconnect` (slot reuse + session
+   carry-over), `retimeout` (client-side timeout), `mtu576` (MTU param on
+   `Host.create`), `throttleconf`. Found and fixed along the way: the
+   disconnect lifecycle (peers are now reset when their disconnect event is
+   dispatched - slots are reusable), `Peer.queueDisconnect` in the
+   `disconnectLater` ack path (the DISCONNECT was never queued), and the
+   timeout condition now evaluates against the freshly updated
+   `earliestTimeout` (ENet same-iteration parity).
+4. ~~Interop extensions~~ — done: FFI/C API additions
+   (`lenet_host_enable_checksum`, `lenet_host_disconnect_later`,
+   `lenet_peer_throttle_configure`, MTU on `lenet_host_create`) + interop
+   scenarios `checksum`, `bandwidth`, `disclater`, `multip`, `unfrag`.
 
-**Exit criteria:** ~19 scenarios all PASS; interop ~12/12; DESIGN.md
+**Exit criteria (met):** 20 scenarios all PASS; interop 12/12; DESIGN.md
 constraints recorded; divergence triage documented.
 
 ### Phase 1 — Code quality

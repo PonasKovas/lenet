@@ -95,12 +95,12 @@ def create (peerId : UInt16) (channelCount : Nat := 1) (address : Address := {})
     mtu := Constants.defaultMtu.toUInt32
   }
 
-/-- Resets the peer back to disconnected state, clearing channels and sequence numbers. -/
+/-- Resets the peer back to disconnected state, clearing channels and sequence numbers.
+ENet's enet_peer_reset does NOT reset the session IDs: a reused slot keeps the
+previously negotiated sessions (fresh slots start at 0xFF from host creation). -/
 def reset (p : Peer) : Peer :=
   { p with
     outgoingPeerId               := Constants.maximumPeerId
-    incomingSessionId            := 0xFF
-    outgoingSessionId            := 0xFF
     connectId                    := 0
     state                        := .disconnected
     channels                     := Array.replicate p.channels.size Channel.init
@@ -136,6 +136,20 @@ def queueOutgoingCommand (p : Peer) (cmd : OutgoingCommand) : Peer :=
 def nextControlSeq (p : Peer) : Peer × UInt16 :=
   let next := p.outgoingControlSeq + 1
   ({ p with outgoingControlSeq := next }, next)
+
+/-- Queues the graceful-disconnect DISCONNECT command (control channel 0xFF)
+and enters the `disconnecting` state (ENet's enet_peer_disconnect). -/
+def queueDisconnect (p : Peer) (data : UInt32) : Peer :=
+  let (p, controlSeq) := p.nextControlSeq
+  let cmd : Protocol.Command := {
+    channelId              := 0xFF
+    reliableSequenceNumber := controlSeq
+    acknowledge            := true
+    unsequenced            := false
+    body                   := .disconnect data
+  }
+  { p with state := .disconnecting, eventData := data }
+    |>.queueOutgoingCommand { command := cmd }
 
 /-- Queues an acknowledgment (channelId, reliableSequenceNumber, sentTime) to be sent to this peer. -/
 def queueAck (p : Peer) (channelId : UInt8) (seq : UInt16) (sentTime : UInt16) : Peer :=
@@ -395,12 +409,15 @@ def updateRtt (p : Peer) (now : UInt32) (rtt : UInt32) : Peer :=
 
 /--
 Checks whether a peer has exceeded timeout limits on unacknowledged reliable commands.
+`earliestTimeout` is the *updated* earliest timeout (ENet updates
+`peer->earliestTimeout` within the same check_timeouts iteration and then
+evaluates the condition against the fresh value).
 -/
-def isTimedOut (p : Peer) (now : UInt32) (sendAttempts : Nat) : Bool :=
-  if p.earliestTimeout == 0 then
+def isTimedOut (p : Peer) (now : UInt32) (earliestTimeout : UInt32) (sendAttempts : Nat) : Bool :=
+  if earliestTimeout == 0 then
     false
   else
-    let elapsed := Time.difference now p.earliestTimeout
+    let elapsed := Time.difference now earliestTimeout
     let attemptThreshold := (1 : UInt32) <<< (if sendAttempts == 0 then 0 else (sendAttempts - 1).toUInt32)
     elapsed ≥ p.timeoutMaximum ∨ (attemptThreshold ≥ p.timeoutLimit ∧ elapsed ≥ p.timeoutMinimum)
 
@@ -436,13 +453,16 @@ def handleCommand (p : Peer) (now : UInt32) (cmd : Protocol.Command) (sentTime :
         (pRemoved, #[])
     | .disconnecting, some removedCmd =>
       if removedCmd.body.commandNumber == Constants.commandDisconnect then
-        -- ENet's notify_disconnect always reports data = 0 here.
-        ({ pRemoved with state := .zombie }, #[Event.disconnect pRemoved.peerId 0])
+        -- ENet's notify_disconnect: event (data = 0) + enet_peer_reset, so
+        -- the slot is immediately reusable for a new connection.
+        (Peer.reset pRemoved, #[Event.disconnect pRemoved.peerId 0])
       else
         (pRemoved, #[])
     | .disconnectLater, _ =>
+      -- ENet (handle_acknowledge): once the acks have drained, queue the
+      -- actual DISCONNECT (en_peer_disconnect) carrying the deferred data.
       if pRemoved.outgoingCommands.isEmpty ∧ pRemoved.sentReliableCommands.isEmpty then
-        ({ pRemoved with state := .disconnecting }, #[])
+        (pRemoved.queueDisconnect pRemoved.eventData, #[])
       else
         (pRemoved, #[])
     | _, _ =>
@@ -563,7 +583,19 @@ def handleCommand (p : Peer) (now : UInt32) (cmd : Protocol.Command) (sentTime :
         (pAck, #[])
 
   | .disconnect data =>
-    ({ pAck with state := .zombie, eventData := data }, #[Event.disconnect pAck.peerId data])
+    -- ENet enet_protocol_handle_disconnect:
+    -- - already disconnecting/zombie/acknowledgingDisconnect: ignore
+    -- - connected/disconnectLater + ack-flagged: ACKNOWLEDGING_DISCONNECT;
+    --   the ACK goes out at the next pack and the peer resets once the acks
+    --   have drained (Host.pollPeer - ENet dispatches ZOMBIE in
+    --   send_acknowledgements and resets when the event is dispatched).
+    -- - other states: ZOMBIE-equivalent immediately (event + reset).
+    if pAck.state == .disconnected ∨ pAck.state == .zombie ∨ pAck.state == .acknowledgingDisconnect then
+      (pAck, #[])
+    else if pAck.state == .connected ∨ pAck.state == .disconnectLater then
+      ({ pAck with state := .acknowledgingDisconnect, eventData := data }, #[])
+    else
+      (Peer.reset { pAck with eventData := data }, #[Event.disconnect pAck.peerId data])
 
   | .bandwidthLimit inBw outBw =>
     -- ENet recomputes the peer's windowSize here too (handle_bandwidth_limit),
