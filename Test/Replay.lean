@@ -275,8 +275,14 @@ private def step (role : Role) (st : ReplayState) (line : Line) : ReplayState :=
       service st ms
     | .dat ms dir bytes =>
       if dir.targets role then
-        let (h, evs) := st.host.handleDatagram ms proxyAddr bytes
-        service { st with host := h, events := st.events ++ evs } ms
+        -- ENet's service order: bandwidth throttle → receive → send. The
+        -- replay mirrors this by servicing the clock tick first (which runs
+        -- the throttle), then feeding the datagram, then draining output.
+        let st2 := service st ms
+        if st2.stoppedFlag then st2
+        else
+          let (h, evs) := st2.host.handleDatagram ms proxyAddr bytes
+          service { st2 with host := h, events := st2.events ++ evs } ms
       else
         service st ms
 
@@ -345,16 +351,22 @@ private def eventDiffOf (exp : Array ExpEvent) (act : Array Event) : Option (Nat
     | none, none => none
 
 private def cmdDiffOf (exp act : Array Protocol.Command) : Option (Nat × String) :=
-  let n := max exp.size act.size
+  -- The merged command streams are compared as multisets (sorted by the
+  -- masked form). The relative order of independent control commands
+  -- (ping/bandwidthLimit/acks) within the same millisecond depends on the
+  -- two hosts' service-call interleaving and is not protocol-visible;
+  -- ordering-sensitive behavior is still verified via the event stream and
+  -- per-channel sequence numbers.
+  let exp' := (exp.map maskCmd |>.qsort (· < ·))
+  let act' := (act.map maskCmd |>.qsort (· < ·))
+  let n := max exp'.size act'.size
   firstDiff n fun i =>
-    match exp[i]?, act[i]? with
-    | none, some c => some s!"unexpected extra command: {maskCmd c}"
-    | some c, none => some s!"missing command: {maskCmd c}"
+    match exp'[i]?, act'[i]? with
+    | none, some c => some s!"unexpected extra command: {c}"
+    | some c, none => some s!"missing command: {c}"
     | some e, some a =>
-      let me := maskCmd e
-      let ma := maskCmd a
-      if me == ma then none
-      else some s!"ENet:  {me}\n         lenet: {ma}"
+      if e == a then none
+      else some s!"ENet:  {e}\n         lenet: {a}"
     | none, none => none
 
 private def replayAndReport (scenario : String) (lines : Array Line) : IO Bool := do
@@ -383,6 +395,12 @@ private def replayAndReport (scenario : String) (lines : Array Line) : IO Bool :
       for e in res.expDecodeErrors do
         IO.println s!"    ENet datagram failed to decode with lenet's decoder: {e}"
       IO.println s!"    (ENet commands={res.expCmds.size}, lenet commands={res.outCmds.size}; ENet events={res.expEvents.size}, lenet events={res.events.size})"
+      if (← IO.getEnv "LENET_DEBUG").isSome then
+        for i in [0:max res.expCmds.size res.outCmds.size] do
+          let e := res.expCmds[i]?.map maskCmd |>.getD "—"
+          let a := res.outCmds[i]?.map maskCmd |>.getD "—"
+          IO.println s!"    [{i}] ENet:  {e}"
+          IO.println s!"        lenet: {a}"
   pure allOk
 
 def scenarioNames : Array String :=

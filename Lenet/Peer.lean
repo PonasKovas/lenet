@@ -67,6 +67,13 @@ structure Peer where
   packetThrottleInterval         : UInt32 := Constants.defaultPacketThrottleInterval
   eventData                      : UInt32 := 0
   reliableDataInTransit          : Nat := 0
+  /-- Sequence counter for reliable control commands sent on channel 0xFF
+  (connect/verifyConnect/disconnect/ping). ENet uses `channels[0xFF]`, which is
+  out of bounds but in practice acts as a persistent counter starting at 0. -/
+  outgoingControlSeq             : UInt16 := 0
+  /-- Group number assigned to outgoing unsequenced packets (pre-incremented,
+  so the first unsequenced packet is group 1, matching ENet). -/
+  outgoingUnsequencedGroup       : UInt16 := 0
   outgoingCommands               : Array OutgoingCommand := #[]
   sentReliableCommands           : Array OutgoingCommand := #[]
   acknowledgements               : Array (UInt8 × UInt16 × UInt16) := #[]
@@ -82,7 +89,7 @@ def create (peerId : UInt16) (channelCount : Nat := 1) (address : Address := {})
     peerId
     address
     channels
-    mtu := Constants.minimumMtu.toUInt32
+    mtu := Constants.defaultMtu.toUInt32
   }
 
 /-- Resets the peer back to disconnected state, clearing channels and sequence numbers. -/
@@ -108,6 +115,8 @@ def reset (p : Peer) : Peer :=
     packetThrottleCounter        := 0
     packetThrottleEpoch          := 0
     reliableDataInTransit        := 0
+    outgoingControlSeq           := 0
+    outgoingUnsequencedGroup     := 0
     eventData                    := 0
     outgoingCommands             := #[]
     sentReliableCommands         := #[]
@@ -118,6 +127,11 @@ def reset (p : Peer) : Peer :=
 /-- Queues an outgoing command for transmission. -/
 def queueOutgoingCommand (p : Peer) (cmd : OutgoingCommand) : Peer :=
   { p with outgoingCommands := p.outgoingCommands.push cmd }
+
+/-- Pre-increments and returns the control-command sequence number (channel 0xFF). -/
+def nextControlSeq (p : Peer) : Peer × UInt16 :=
+  let next := p.outgoingControlSeq + 1
+  ({ p with outgoingControlSeq := next }, next)
 
 /-- Queues an acknowledgment (channelId, reliableSequenceNumber, sentTime) to be sent to this peer. -/
 def queueAck (p : Peer) (channelId : UInt8) (seq : UInt16) (sentTime : UInt16) : Peer :=
@@ -176,7 +190,9 @@ def send (p : Peer) (channelId : UInt8) (packet : Packet) (hasChecksum : Bool :=
 
   let channel := p.channels[channelId.toNat]?.getD Channel.init
   let headerOverhead : Nat := 4 + (if hasChecksum then 4 else 0)
-  let fragmentOverhead : Nat := headerOverhead + 28
+  -- ENet: mtu - sizeof(ENetProtocolHeader) - sizeof(ENetProtocolSendFragment)
+  -- (4-byte protocol header + 24-byte fragment command incl. its 4-byte header)
+  let fragmentOverhead : Nat := headerOverhead + 24
   let maxPayload : Nat := if p.mtu.toNat > fragmentOverhead then p.mtu.toNat - fragmentOverhead else 500
 
   if packet.data.size > maxPayload then
@@ -194,9 +210,23 @@ def send (p : Peer) (channelId : UInt8) (packet : Packet) (hasChecksum : Bool :=
       else
         channel.nextReliableSequenceNumber
 
+    -- ENet queues every fragment through setup_outgoing_command, which
+    -- increments the channel's reliable counter per fragment: fragment i
+    -- carries reliableSequenceNumber = startSeq + i (reliable fragments),
+    -- while unreliable fragments all share the channel's current reliable
+    -- sequence number.
+    let endChannel : Channel :=
+      if isUnreliableFrag then
+        ch' -- unreliable counter already advanced once
+      else
+        { ch' with
+          outgoingReliableSequenceNumber :=
+            startSeq + (fragmentCount - 1).toUInt16
+          outgoingUnreliableSequenceNumber := 0 }
+
     let newChannels :=
       if h : channelId.toNat < p.channels.size then
-        p.channels.set channelId.toNat ch' h
+        p.channels.set channelId.toNat endChannel h
       else
         p.channels
 
@@ -224,7 +254,9 @@ def send (p : Peer) (channelId : UInt8) (packet : Packet) (hasChecksum : Bool :=
 
       let cmd : Protocol.Command := {
         channelId
-        reliableSequenceNumber := if isUnreliableFrag then 0 else startSeq
+        reliableSequenceNumber :=
+          if isUnreliableFrag then channel.outgoingReliableSequenceNumber
+          else startSeq + i.toUInt16
         acknowledge            := !isUnreliableFrag
         unsequenced            := false
         body                   := cmdBody
@@ -240,55 +272,59 @@ def send (p : Peer) (channelId : UInt8) (packet : Packet) (hasChecksum : Bool :=
     return updatedPeer
   else
     -- Unfragmented single command send
-    let (ch', cmd) := match packet.delivery with
+    let (p2, ch', cmd) := match packet.delivery with
       | .reliable =>
         let (ch, seq) := channel.nextReliableSequenceNumber
-        (ch, {
+        (p, ch, ({
           channelId
           reliableSequenceNumber := seq
           acknowledge            := true
           unsequenced            := false
           body                   := .sendReliable packet.data
-        })
+        } : Protocol.Command))
       | .unreliable =>
         let (ch, unseq) := channel.nextUnreliableSequenceNumber
-        (ch, {
+        (p, ch, ({
           channelId
           reliableSequenceNumber := ch.outgoingReliableSequenceNumber
           acknowledge            := false
           unsequenced            := false
           body                   := .sendUnreliable unseq packet.data
-        })
+        } : Protocol.Command))
       | .unsequenced =>
-        (channel, {
-          channelId
-          reliableSequenceNumber := 0
-          acknowledge            := false
-          unsequenced            := true
-          body                   := .sendUnsequenced 0 packet.data
-        })
+        -- ENet pre-increments the peer-level unsequenced group (first = 1).
+        let group := p.outgoingUnsequencedGroup + 1
+        ({ p with outgoingUnsequencedGroup := group },
+          channel,
+          ({
+            channelId
+            reliableSequenceNumber := 0
+            acknowledge            := false
+            unsequenced            := true
+            body                   := .sendUnsequenced group packet.data
+          } : Protocol.Command))
       | .unreliableFragment =>
         let (ch, unseq) := channel.nextUnreliableSequenceNumber
-        (ch, {
+        (p, ch, ({
           channelId
           reliableSequenceNumber := ch.outgoingReliableSequenceNumber
           acknowledge            := false
           unsequenced            := false
           body                   := .sendUnreliable unseq packet.data
-        })
+        } : Protocol.Command))
 
     let newChannels :=
-      if h : channelId.toNat < p.channels.size then
-        p.channels.set channelId.toNat ch' h
+      if h : channelId.toNat < p2.channels.size then
+        p2.channels.set channelId.toNat ch' h
       else
-        p.channels
+        p2.channels
 
     let outCmd : OutgoingCommand := {
       command        := cmd
       fragmentOffset := 0
       fragmentLength := packet.data.size
     }
-    return ({ p with channels := newChannels }).queueOutgoingCommand outCmd
+    return ({ p2 with channels := newChannels }).queueOutgoingCommand outCmd
 
 /--
 Dynamically updates the packet throttle based on current round trip time.
@@ -396,7 +432,8 @@ def handleCommand (p : Peer) (now : UInt32) (cmd : Protocol.Command) (sentTime :
         (pRemoved, #[])
     | .disconnecting, some removedCmd =>
       if removedCmd.body.commandNumber == Constants.commandDisconnect then
-        ({ pRemoved with state := .zombie }, #[Event.disconnect pRemoved.peerId pRemoved.eventData])
+        -- ENet's notify_disconnect always reports data = 0 here.
+        ({ pRemoved with state := .zombie }, #[Event.disconnect pRemoved.peerId 0])
       else
         (pRemoved, #[])
     | .disconnectLater, _ =>
@@ -534,7 +571,28 @@ def handleCommand (p : Peer) (now : UInt32) (cmd : Protocol.Command) (sentTime :
        packetThrottleDeceleration := decel
     }, #[])
 
-  | .connect .. | .verifyConnect .. =>
+  | .verifyConnect params =>
+    -- Client side: the server's VERIFY_CONNECT completes the handshake
+    -- (ENet: enet_protocol_handle_verify_connect).
+    if pAck.state == .connecting then
+      -- ENet removes the client's CONNECT from the sent-reliable list here
+      -- (nothing ever ACKs it - the VERIFY_CONNECT replaces it).
+      let (pRm, _) := pAck.removeSentReliableCommand 0xFF 1
+      let p' := { pRm with
+        outgoingPeerId      := params.outgoingPeerId
+        incomingSessionId   := params.incomingSessionId
+        outgoingSessionId   := params.outgoingSessionId
+        connectId           := params.connectId
+        mtu                 := params.mtu
+        windowSize          := params.windowSize
+        state               := .connected
+      }
+      (p', #[Event.connect p'.peerId p'.eventData])
+    else
+      (pAck, #[])
+
+  | .connect .. =>
+    -- A CONNECT for an existing peer is invalid; ignore (ENet does the same).
     (pAck, #[])
 
 end Peer

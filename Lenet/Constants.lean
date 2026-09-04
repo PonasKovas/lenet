@@ -4,6 +4,8 @@ namespace Lenet.Constants
 
 def minimumMtu : Nat := 576
 def maximumMtu : Nat := 4096
+/-- ENet's `ENET_HOST_DEFAULT_MTU` — the default MTU a host is created with. -/
+def defaultMtu : Nat := 1392
 def maximumPacketCommands : Nat := 32
 def minimumWindowSize : Nat := 4096
 def maximumWindowSize : Nat := 65536
