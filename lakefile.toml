@@ -1,9 +1,16 @@
 name = "lenet"
 version = "0.1.0"
-defaultTargets = ["Lenet"]
+defaultTargets = ["Lenet", "LenetProofs"]
 
 [[lean_lib]]
 name = "Lenet"
+
+# Formal proofs over the Lenet core. Kept as a separate library so the C
+# distribution (Lenet:static) never compiles them; theorems are erased at
+# runtime anyway, but this keeps the dependency direction explicit:
+# LenetProofs -> Lenet, never the reverse.
+[[lean_lib]]
+name = "LenetProofs"
 
 [[lean_exe]]
 name = "replay"
