@@ -36,6 +36,11 @@ compatibility testing works), then come back here.
 - Live interop: 12/12 PASS. C API distribution builds and self-checks.
 - Phase 1 (code quality) is done: typed errors, `Vector`-backed fixed-size
   windows, no panicking constructs, conventions in DESIGN.md 1.7.
+- Phase 2 (formal proofs) first pass is done: separate `LenetProofs` lib in
+  CI - codec reader algebra + parse fuel adequacy, reassembly invariant +
+  completion soundness, channel drain/advance theorems + wrap-boundary pin,
+  time translation invariance, unsequenced idempotence, divisor audit (see
+  the Phase 2 section for the deferred remainder).
 
 ## Roadmap
 
@@ -120,6 +125,45 @@ arbitrary input; fragment reassembly bounds safety; reliable in-order
 delivery; no-panics across `Host.handleDatagram` / `Host.service`.
 **Exit criteria:** proofs compile and are maintained in CI; corpus still
 passes (proofs must not break the tested behavior).
+
+**Progress (first pass):** separate `LenetProofs` lib (in defaultTargets, so
+CI builds it; the C distribution never compiles proofs). Proven so far:
+
+- Wave 0 (fix + pin): ENet's cyclic receive-window gate applied to
+  `receiveReliable` (wrap deadlock at 0xFFFF fixed, staging bounded - see
+  test/README.md triage); `wrap_delivery` pins the fixed boundary.
+- Codec (`Proofs/Codec.lean`): reader primitives in ok/err form; append-based
+  byte layout with field-level write/read inverses (`write_read_u16/u32`,
+  bv_decide for the fixed-width identities); `parseCommands` fuel adequacy
+  (fuel = payload size achieves the maximal parse).
+- Reassembly (`Proofs/Reassembly.lean`): the bitmap/counter invariant
+  (`fragmentsRemaining + received.count = fragmentCount`) established by
+  `init` and preserved by `addFragment`; write-bounds; completion soundness
+  (all slots received when the buffer dispatches - no completion via
+  replayed fragment numbers).
+- Channel (`Proofs/Channel.lean`): drain fuel adequacy + the drain advances
+  its frontier by exactly the delivered count; `receiveReliable_advance`
+  (incoming counter advances by the delivered count, wrap-aware).
+- Time (`Proofs/Time.lean`): translation invariance of `difference`/`less`
+  (cyclic subtraction invariance, bv_decide).
+- Unsequenced (`Proofs/Unsequenced.lean`): `checkAndAdd` idempotence in all
+  three acceptance cases (re-receiving an accepted group is always a
+  duplicate).
+- Panic (`Proofs/Panic.lean`): the divisor audit - every division site named
+  with its non-zero-divisor proof; a new unguarded division fails review by
+  its absence here. Combined with Phase 1's conventions (proof-carrying
+  indexing, no getElem!/unsafe/partial), this is the no-panics gate.
+
+**Remaining for the full exit criteria (deferred, in order of value):**
+- roundtrip composition theorems at the full-`Datagram` level (the
+  per-command groundwork is done; needs a reader-algebra composition lemma
+  for multi-field payloads)
+- `nextDeadline` upper-bound property (fold-is-min; driver-facing)
+- Peer-level window-skew invariant connecting `Peer.send`'s window
+  discipline to the receive-path preconditions (stretch; cut from the
+  first pass)
+- formal no-panics composition over `Host.handleDatagram` / `Host.service`
+  (the ingredient lemmas exist; needs the top-level statement)
 
 ### Phase 3 — Performance
 
