@@ -55,23 +55,23 @@ def Inv (a : FragmentAssembler) : Prop :=
   a.fragmentsRemaining + a.received.countP (fun b => b) = a.fragmentCount
 
 /-- A successfully initialized assembler satisfies the invariant. -/
-theorem init_inv {ssn : UInt16} {tl fc : Nat} {a : FragmentAssembler}
-    (h : FragmentAssembler.init ssn tl fc = .ok a) : Inv a := by
+theorem init_inv {ssn : UInt16} {tl fc maxPacketSize : Nat} {a : FragmentAssembler}
+    (h : FragmentAssembler.init ssn tl fc maxPacketSize = Except.ok a) : Inv a := by
   unfold FragmentAssembler.init at h
   by_cases h1 : fc = 0
   · simp [h1, Except.throw_eq', Except.bind_error'] at h
   by_cases h2 : fc > Constants.maximumFragmentCount
   · simp [h1, h2, Except.throw_eq', Except.bind_error'] at h
-  by_cases h3 : tl > Constants.maximumMtu * 1024
+  by_cases h3 : tl > maxPacketSize
   · simp [h1, h2, h3, Except.throw_eq', Except.bind_error'] at h
   by_cases h4 : tl < fc
   · simp [h1, h2, h3, h4, Except.throw_eq', Except.map_error'] at h
   have h1' : (fc == 0) = false := by simp [h1]
   have h2' : (fc > Constants.maximumFragmentCount) = false := by simp [h2]
-  have h3' : (tl > Constants.maximumMtu * 1024) = false := by simp [h3]
+  have h3' : (tl > maxPacketSize) = false := by simp [h3]
   have h4' : (tl < fc) = false := by simp [h4]
-  simp only [h1', h2', h3', h4'] at h
-  simp only [Bool.false_eq_true, reduceIte, Except.throw_eq', Except.pure_eq'] at h
+  simp only [h1', h2', h3', h4', Bool.false_eq_true, reduceIte, Except.throw_eq',
+    Except.pure_eq'] at h
   simp at h
   subst h
   refine ⟨?_, ?_, ?_⟩

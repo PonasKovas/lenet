@@ -407,48 +407,72 @@ def isTimedOut (p : Peer) (now : UInt32) (earliestTimeout : UInt32) (sendAttempt
 def acceptsTraffic (p : Peer) : Bool :=
   p.state == .connected ∨ p.state == .disconnectLater
 
+/-- Absorbs a fragment into the assembler array: finds the assembler for
+`params.startSequenceNumber` (creating one when below the concurrency cap
+`maximumFragmentAssemblers` and the fragment count is within
+`maximumReceivedFragmentCount` - robustness guards, DESIGN.md 1.5,
+deliberately stricter than ENet whose pending-assembler growth is bounded
+only by its window span). Returns the (possibly grown) array and the
+assembler to deliver to. -/
+def absorbFragment (xs : Array FragmentAssembler) (params : Protocol.FragmentParams) :
+    Array FragmentAssembler × Option FragmentAssembler :=
+  match xs.find? (fun a => a.startSequenceNumber == params.startSequenceNumber) with
+  | some asm => (xs, some asm)
+  | none =>
+    if xs.size ≥ Constants.maximumFragmentAssemblers ∨
+        params.fragmentCount.toNat > Constants.maximumReceivedFragmentCount then
+      (xs, none)
+    else
+      match FragmentAssembler.init params.startSequenceNumber params.totalLength.toNat
+          params.fragmentCount.toNat with
+      | .ok newAsm => (xs.push newAsm, some newAsm)
+      | .error _ => (xs, none)
+
+/-- The assembler array after delivering a fragment result: the matching
+assembler is updated in place while the assembly is partial, and filtered
+out when it completes. `none` (no assembler, e.g. cap-rejected or invalid
+parameters) leaves the array unchanged. -/
+def assemblerArrayAfterDeliver (xs : Array FragmentAssembler)
+    (params : Protocol.FragmentParams)
+    (result : Option (Except CodecError (FragmentAssembler × Option ByteArray))) :
+    Array FragmentAssembler :=
+  match result with
+  | none => xs
+  | some (.error _) => xs
+  | some (.ok (updatedAsm, none)) =>
+    xs.map (fun a => if a.startSequenceNumber == params.startSequenceNumber then updatedAsm else a)
+  | some (.ok (_, some _)) =>
+    xs.filter (fun a => a.startSequenceNumber ≠ params.startSequenceNumber)
+
 /-- Delivers a fragment to the (possibly newly created) assembler for
 `params.startSequenceNumber` and returns the updated peer with any receive
 event fired on assembly completion. Fragments with invalid parameters (which
 ENet validates identically on receipt) are dropped. -/
 def handleFragment (p : Peer) (channelId : UInt8) (params : Protocol.FragmentParams)
     (unreliable : Bool) : Peer × Array Event :=
-  let startSeq := params.startSequenceNumber
-  let (assemblers, assembler?) :=
-    match p.fragmentAssemblers.find? (fun a => a.startSequenceNumber == startSeq) with
-    | some asm => (p.fragmentAssemblers, some asm)
-    | none =>
-      match FragmentAssembler.init startSeq params.totalLength.toNat params.fragmentCount.toNat with
-      | .ok newAsm => (p.fragmentAssemblers.push newAsm, some newAsm)
-      | .error _   => (p.fragmentAssemblers, none)
-
-  match assembler? with
-  | none => (p, #[]) -- invalid fragment parameters: drop
-  | some assembler =>
-    match assembler.addFragment params.fragmentNumber.toNat params.fragmentOffset.toNat params.data with
-    | .error _ =>
-      (p, #[])
-    | .ok (updatedAsm, none) =>
-      let updatedList :=
-        assemblers.map (fun a => if a.startSequenceNumber == startSeq then updatedAsm else a)
-      ({ p with fragmentAssemblers := updatedList }, #[])
-    | .ok (_, some fullData) =>
-      -- Assembly complete: the assembler is consumed and the reassembled
-      -- payload goes through the channel's reliable/unreliable receive path.
-      let pClean := { p with fragmentAssemblers := assemblers.filter (fun a => a.startSequenceNumber ≠ startSeq) }
-      let chIdx := channelId.toNat
-      if h : chIdx < pClean.channels.size then
-        let ch := pClean.channels[chIdx]
-        let (ch', events) :=
-          if unreliable then
-            let (ch', deliveredOpt) := ch.receiveUnreliable startSeq (Packet.unreliableFragment fullData)
-            (ch', deliveredOpt.map (fun pkt => Event.receive pClean.peerId channelId pkt) |>.toArray)
-          else
-            let (ch', delivered) := ch.receiveReliable startSeq (Packet.reliable fullData)
-            (ch', delivered.map (fun pkt => Event.receive pClean.peerId channelId pkt))
-        ({ pClean with channels := pClean.channels.set chIdx ch' h }, events)
-      else
-        (pClean, #[])
+  let (xs, assembler?) := absorbFragment p.fragmentAssemblers params
+  let result : Option (Except CodecError (FragmentAssembler × Option ByteArray)) :=
+    assembler?.bind
+      (fun asm => asm.addFragment params.fragmentNumber.toNat params.fragmentOffset.toNat params.data)
+  let p' := { p with fragmentAssemblers := assemblerArrayAfterDeliver xs params result }
+  match result with
+  | some (.ok (_, some fullData)) =>
+    -- Assembly complete: the assembler is consumed and the reassembled
+    -- payload goes through the channel's reliable/unreliable receive path.
+    let chIdx := channelId.toNat
+    if h : chIdx < p'.channels.size then
+      let ch := p'.channels[chIdx]
+      let (ch', events) :=
+        if unreliable then
+          let (ch', deliveredOpt) := ch.receiveUnreliable params.startSequenceNumber (Packet.unreliableFragment fullData)
+          (ch', deliveredOpt.map (fun pkt => Event.receive p'.peerId channelId pkt) |>.toArray)
+        else
+          let (ch', delivered) := ch.receiveReliable params.startSequenceNumber (Packet.reliable fullData)
+          (ch', delivered.map (fun pkt => Event.receive p'.peerId channelId pkt))
+      ({ p' with channels := p'.channels.set chIdx ch' h }, events)
+    else
+      (p', #[])
+  | _ => (p', #[])
 
 /--
 Processes a single incoming protocol command received from this peer.

@@ -336,11 +336,25 @@ private def collectOutgoing (st : ReplayState) (outs : Array (Address × ByteArr
     | .ok cmds => { s with outCmds := s.outCmds ++ cmds, emitted := s.emitted.push bytes }
     | .error e => { s with errors := s.errors.push s!"emitted datagram failed to decode: {e}" }
 
+/-- Resource-safety tripwire (see Lenet/Proofs/Resources.lean): the corpus
+runs against these hard bounds after every service step. The assembler cap
+is enforced by `Peer.handleFragment`; staging is bounded by the receive-
+window gate; the ack queue is driver-rate-coupled (generous bound here). -/
+private def checkResourceBounds (h : Host) (st : ReplayState) : ReplayState :=
+  if h.peers.any fun p => p.fragmentAssemblers.size > Constants.maximumFragmentAssemblers
+      ∨ h.peers.any fun p => p.channels.any fun ch =>
+          ch.stagedReliable.size > Constants.freeReliableWindows * Constants.reliableWindowSize
+      ∨ h.peers.any fun p => p.acknowledgements.size > 65536 then
+    { st with errors := st.errors.push "resource bound exceeded" }
+  else st
+
 private def service (st : ReplayState) (now : UInt32) : ReplayState :=
   if st.stoppedFlag then st
   else
     let (h, outs, evs) := st.host.service now
-    collectOutgoing { st with host := h, now := max st.now now, events := st.events ++ evs } outs
+    collectOutgoing
+      (checkResourceBounds h
+        { st with host := h, now := max st.now now, events := st.events ++ evs }) outs
 
 /-- Deadline-driven ticking: services the host at every timer deadline it
 has scheduled strictly before `ms`, in order. This is what makes the replay

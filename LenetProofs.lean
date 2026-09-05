@@ -6,3 +6,4 @@ import Lenet.Proofs.Channel
 import Lenet.Proofs.Time
 import Lenet.Proofs.Unsequenced
 import Lenet.Proofs.Panic
+import Lenet.Proofs.Resources

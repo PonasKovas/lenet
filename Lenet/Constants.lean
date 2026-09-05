@@ -13,6 +13,20 @@ def minimumChannelCount : Nat := 1
 def maximumChannelCount : Nat := 255
 def maximumPeerId : UInt16 := 0x0FFF
 def maximumFragmentCount : Nat := 1024 * 1024
+/-- Cap on concurrently-assembling fragmented packets per peer. ENet has no
+explicit cap; its effective bound is the receive window span with each
+pending assembly allocating the full `totalLength` up front - far more
+permissive than this. Robustness (DESIGN.md 1.5), not parity: beyond the
+cap, fragments of *new* assemblies are dropped (the sender retransmits;
+in-flight assemblies keep absorbing). -/
+def maximumFragmentAssemblers : Nat := 32
+/-- Upper bound on the fragment count of a *received* fragment set. Any
+legitimate packet (host `maximumPacketSize` 32MB at the smallest MTU's
+~548-byte fragment payload) needs at most ~60k fragments; the wire format
+admits 2^32, and the assembler's received-bitset is a boxed `Array Bool`, so
+an unguarded hostile `fragmentCount` near the wire maximum would allocate
+gigabytes before validation. -/
+def maximumReceivedFragmentCount : Nat := 65536
 
 /-! ### Sliding Window Parameters -/
 
