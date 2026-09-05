@@ -191,8 +191,20 @@ one thread (or external serialization).
   wrap logic is exercised by proofs instead).
 - **Packet loss / reordering chaos scenarios** (recording is
   non-deterministic; the replay needs determinism).
-- **Resource-exhaustion parity** (e.g. fragment-assembler growth on rejected
-  fragments): documented, not tested; ENet has similar pressure points.
+- **Packet loss / reordering chaos scenarios** (recording is
+  non-deterministic; the replay needs determinism).
+- **Resource-exhaustion *parity***: matching ENet's exact memory behavior
+  under hostile input is out of scope (and ENet has similar pressure
+  points). This does **not** descope Lenet's own robustness - see
+  `Lenet/Proofs/Resources.lean` for the enforced bounds: fragment
+  assemblers are hard-capped (`maximumFragmentAssemblers`, proven in
+  `handleFragment_cap_preserved`), received fragment counts are
+  wire-guarded (`maximumReceivedFragmentCount`), staging is bounded by the
+  receive-window gate, and the replay corpus asserts all three after every
+  service step (`checkResourceBounds` in test/Replay.lean). The ack queue
+  is intentionally uncapped (driver-pump-coupled; capping would drop ACKs
+  for no robustness gain) - documented, and the only remaining
+  ENet-comparable pressure point.
 
 ## Decided constraints (do not relitigate)
 
