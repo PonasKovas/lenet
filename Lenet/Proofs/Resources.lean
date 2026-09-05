@@ -135,6 +135,7 @@ theorem absorbFragment_cap_preserved (xs : Array FragmentAssembler)
   · next _ => exact hcap
   · next =>
     by_cases hguard : xs.size ≥ Constants.maximumFragmentAssemblers ∨
+        params.fragmentCount.toNat = 0 ∨
         params.fragmentCount.toNat > Constants.maximumReceivedFragmentCount
     · simp only [hguard, reduceIte]
       exact hcap
@@ -166,50 +167,31 @@ theorem assemblerArrayAfterDeliver_size (xs : Array FragmentAssembler)
       (p := fun a : FragmentAssembler =>
         a.startSequenceNumber ≠ params.startSequenceNumber)) (Nat.le_refl _)
 
-/-- `handleFragment` never grows the assembler array beyond the cap: both
-match arms set `fragmentAssemblers := assemblerArrayAfterDeliver xs params
-result`, which never exceeds `xs = (absorbFragment ...).1`, itself capped by
-`absorbFragment_cap_preserved`. -/
+/-- `handleFragment` never grows the assembler array beyond the cap: when the
+gate passes, both match arms set `fragmentAssemblers :=
+assemblerArrayAfterDeliver xs params result`, which never exceeds
+`xs = (absorbFragment ...).1`, itself capped by `absorbFragment_cap_preserved`;
+when the gate fails the peer is returned unchanged. -/
 theorem handleFragment_cap_preserved (p : Peer) (channelId : UInt8)
     (params : Protocol.FragmentParams) (unreliable : Bool)
     (hcap : p.fragmentAssemblers.size ≤ Constants.maximumFragmentAssemblers) :
     (handleFragment p channelId params unreliable).1.fragmentAssemblers.size
       ≤ Constants.maximumFragmentAssemblers := by
   unfold handleFragment
-  split
-  · next xs asm heq =>
+  by_cases hg : fragmentGateOk p channelId params unreliable = true
+  · rw [if_neg (by simp [hg] : ¬((!fragmentGateOk p channelId params unreliable) = true))]
+    -- gate passed: the array is `assemblerArrayAfterDeliver` of the absorbed array
+    generalize habs : absorbFragment p.fragmentAssemblers params = ab
+    obtain ⟨xs, asm⟩ := ab
+    simp only [] -- zeta the lets, iota-reduce the pair match
     have hfst : (absorbFragment p.fragmentAssemblers params).1 = xs :=
-      congrArg Prod.fst heq
+      congrArg Prod.fst habs
     have hxs := absorbFragment_cap_preserved p.fragmentAssemblers params hcap
     rw [hfst] at hxs
-    simp only [] -- zeta-reduce the lets
-    -- both match arms set fragmentAssemblers := assemblerArrayAfterDeliver …
-    split
-    · next fullData _ =>
-      -- completion arm: the delivery path's channel-if keeps `p'`'s array
-      split
-      · next _ _ =>
-        show (assemblerArrayAfterDeliver xs params
-          (Option.bind asm fun asm => asm.addFragment params.fragmentNumber.toNat
-            params.fragmentOffset.toNat params.data)).size ≤ _
-        have hd := assemblerArrayAfterDeliver_size xs params
-          (Option.bind asm fun asm => asm.addFragment params.fragmentNumber.toNat
-            params.fragmentOffset.toNat params.data)
-        omega
-      · next =>
-        show (assemblerArrayAfterDeliver xs params
-          (Option.bind asm fun asm => asm.addFragment params.fragmentNumber.toNat
-            params.fragmentOffset.toNat params.data)).size ≤ _
-        have hd := assemblerArrayAfterDeliver_size xs params
-          (Option.bind asm fun asm => asm.addFragment params.fragmentNumber.toNat
-            params.fragmentOffset.toNat params.data)
-        omega
-    · next =>
-      show (assemblerArrayAfterDeliver xs params
-        (Option.bind asm fun asm => asm.addFragment params.fragmentNumber.toNat
-          params.fragmentOffset.toNat params.data)).size ≤ _
-      have hd := assemblerArrayAfterDeliver_size xs params
-        (Option.bind asm fun asm => asm.addFragment params.fragmentNumber.toNat
-          params.fragmentOffset.toNat params.data)
-      omega
+    -- every delivery arm keeps `fragmentAssemblers := assemblerArrayAfterDeliver …`
+    split <;> try split
+    all_goals
+      exact Nat.le_trans (assemblerArrayAfterDeliver_size _ _ _) hxs
+  · rw [if_pos (by simp [hg] : ((!fragmentGateOk p channelId params unreliable) = true))]
+    exact hcap
 end Lenet.Proofs

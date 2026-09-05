@@ -616,10 +616,10 @@ private def replayAndReport (scenario : String) (lines : Array Line) : IO Bool :
   pure allOk
 
 def scenarioNames : Array String :=
-  #["connect", "send_c2s", "send_s2c", "frag", "disc_client", "disc_server",
-    "idle", "timeout", "checksum", "bandwidth", "unfrag", "disclater",
-    "multip", "inject", "multichannel", "dup", "reconnect", "retimeout",
-    "mtu576", "throttleconf"]
+  #["connect", "send_c2s", "send_s2c", "frag", "fragthen", "disc_client",
+    "disc_server", "idle", "timeout", "checksum", "bandwidth", "unfrag",
+    "disclater", "multip", "inject", "multichannel", "dup", "reconnect",
+    "retimeout", "mtu576", "throttleconf"]
 
 end Replay
 

@@ -3,11 +3,22 @@ import Lenet.Packet
 
 namespace Lenet
 
+/-- A reliable delivery staged out of order: `seq` is the sequence number it
+starts at, `span` the number of sequence numbers it occupies (1 for a plain
+reliable packet, the fragment count for a reassembled fragmented packet).
+ENet treats a fragment set as one incoming reliable command spanning
+`fragmentCount` sequence numbers and advances the dispatch frontier by the
+whole span when it dispatches (peer.c `dispatch_incoming_reliable_commands`:
+`incomingReliableSequenceNumber += fragmentCount - 1`). -/
+structure StagedReliable where
+  seq : UInt16
+  span : Nat
+  packet : Packet
+deriving BEq, Inhabited
 /--
 Per-channel sequencing and sliding window state.
 Each peer connection in ENet maintains an array of independent channels.
 -/
-
 structure Channel where
   /-- Next sequence number to assign to an outgoing reliable command on this channel. -/
   outgoingReliableSequenceNumber   : UInt16 := 0
@@ -20,8 +31,9 @@ structure Channel where
   /-- In-flight unacknowledged reliable command counts for each of the
   `Constants.reliableWindows` windows. Fixed-size by construction. -/
   reliableWindows                  : Vector UInt16 Constants.reliableWindows := Vector.replicate Constants.reliableWindows 0
-  /-- Staged out-of-order reliable packets waiting for gaps in sequence numbers to be filled. -/
-  stagedReliable                   : Array (UInt16 × Packet) := #[]
+  /-- Staged out-of-order reliable deliveries waiting for gaps in sequence
+  numbers to be filled. -/
+  stagedReliable                   : Array StagedReliable := #[]
 deriving BEq, Inhabited
 
 namespace Channel
@@ -32,7 +44,7 @@ def init : Channel := {}
 /-- Any index reduced mod the window count is a valid window slot. -/
 theorem modWindowIndex_lt (i : Nat) :
     i % Constants.reliableWindows < Constants.reliableWindows :=
-  Nat.mod_lt _ (by decide)
+    Nat.mod_lt _ (by decide)
 
 /-- Computes the window slot index (0..15) for a 16-bit sequence number. -/
 @[inline]
@@ -118,64 +130,90 @@ def canSendReliable (c : Channel) (seq : UInt16) : Bool :=
     else
       !c.isWindowRangeInUse relWin (freeWins + 2)
 
-/--
-Recursively drains contiguous staged reliable packets starting from `curSeq + 1`.
-Bounded by `fuel` (initial value: `staged.size`) to guarantee structural termination.
--/
-def drainContiguousLoop (curSeq : UInt16) (staged : Array (UInt16 × Packet)) (delivered : Array Packet) (fuel : Nat) : UInt16 × Array Packet × Array (UInt16 × Packet) :=
-  match fuel with
-  | 0 => (curSeq, delivered, staged)
-  | fuel' + 1 =>
-    let targetSeq := curSeq + 1
-    match staged.findIdx? (fun (s, _) => s == targetSeq) with
-    | some idx =>
-      if h : idx < staged.size then
-        let pkt := staged[idx].2
-        let remaining := staged.eraseIdx idx h
-        drainContiguousLoop targetSeq remaining (delivered.push pkt) fuel'
-      else
-        (curSeq, delivered, staged)
-    | none =>
-      (curSeq, delivered, staged)
+  /--
+  Recursively drains contiguous staged reliable deliveries starting from
+  `curSeq + 1`. Each staged delivery occupies `span` sequence numbers: after
+  delivering it, the frontier continues from its end (ENet peer.c
+  `dispatch_incoming_reliable_commands`:
+  `incomingReliableSequenceNumber += fragmentCount - 1`).
 
-/--
-Drains contiguous staged reliable packets starting from `curSeq + 1`.
-Returns the advanced sequence number, the drained packets in order, and the remaining staged packets.
--/
-def drainContiguous (curSeq : UInt16) (staged : Array (UInt16 × Packet)) : UInt16 × Array Packet × Array (UInt16 × Packet) :=
-  drainContiguousLoop curSeq staged #[] staged.size
+  Bounded by `fuel` (initial value: `staged.size`) to guarantee structural
+  termination. Returns delivered entries as `(span, packet)` pairs and the
+  accumulated total span of the delivered entries.
+  -/
+  def drainContiguousLoop (curSeq : UInt16) (staged : Array StagedReliable)
+      (delivered : Array (Nat × Packet)) (fuel : Nat) (advance : Nat) :
+      UInt16 × Array (Nat × Packet) × Array StagedReliable × Nat :=
+    match fuel with
+    | 0 => (curSeq, delivered, staged, advance)
+    | fuel' + 1 =>
+      let targetSeq := curSeq + 1
+      match staged.findIdx? (fun (e : StagedReliable) => e.seq == targetSeq) with
+      | some idx =>
+        if h : idx < staged.size then
+          let entry : StagedReliable := staged[idx]
+          let remaining := staged.eraseIdx idx h
+          drainContiguousLoop (targetSeq + (entry.span - 1).toUInt16) remaining
+            (delivered.push (entry.span, entry.packet)) fuel' (advance + entry.span)
+        else
+          (curSeq, delivered, staged, advance)
+      | none =>
+        (curSeq, delivered, staged, advance)
 
-/--
-Processes an incoming reliable packet with sequence number `seq`.
-- If outside the sliding receive window (ENet peer.c queue_incoming_command:
-  discard), drops it. The window test is cyclic - "behind" counts as one full
-  cycle "ahead" - which is what keeps plain UInt16 wrap-around delivery safe:
-  at `incomingReliableSequenceNumber = 0xFFFF` the legitimately next command
-  `0x0000` is still accepted. Without this gate a wrap-naive staleness test
-  (`seq <= incoming`) would deadlock the channel after 65536 deliveries, and
-  far-future sequence numbers would stage without bound.
-- If duplicate of the dispatch frontier (`seq == incomingReliableSequenceNumber`), drops it.
-- If in-order (`seq == incomingReliableSequenceNumber + 1`), delivers it and drains any contiguous staged packets.
-- If ahead within the window, stages it until preceding packets arrive.
--/
-def receiveReliable (c : Channel) (seq : UInt16) (packet : Packet) : Channel × Array Packet :=
-  if !c.isIncomingReliableInWindow seq then
-    (c, #[])
-  else if seq == c.incomingReliableSequenceNumber then
-    (c, #[]) -- duplicate of the dispatch frontier
-  else if seq == c.incomingReliableSequenceNumber + 1 then
-    let (newSeq, drained, remainingStaged) := drainContiguous seq c.stagedReliable
-    let updatedChannel := { c with
-      incomingReliableSequenceNumber   := newSeq
-      incomingUnreliableSequenceNumber := 0
-      stagedReliable                   := remainingStaged
-    }
-    (updatedChannel, #[packet] ++ drained)
-  else
-    -- Out-of-order: store in staged list (avoiding duplicate sequence insertions)
-    let alreadyStaged := c.stagedReliable.any (fun (s, _) => s == seq)
-    let newStaged := if alreadyStaged then c.stagedReliable else c.stagedReliable.push (seq, packet)
-    ({ c with stagedReliable := newStaged }, #[])
+  /--
+  Drains contiguous staged reliable deliveries starting from `curSeq + 1`.
+
+  Returns the advanced sequence number, the drained `(span, packet)` entries
+  in order, the remaining staged deliveries, and the total drained span.
+  -/
+  def drainContiguous (curSeq : UInt16) (staged : Array StagedReliable) :
+      UInt16 × Array (Nat × Packet) × Array StagedReliable × Nat :=
+    drainContiguousLoop curSeq staged #[] staged.size 0
+
+  /--
+  Processes an incoming reliable delivery of `span` sequence numbers starting
+  at `seq` (span 1 for a plain packet, the fragment count for a reassembled
+  fragmented packet).
+  - If outside the sliding receive window (ENet peer.c queue_incoming_command:
+    discard), drops it. The window test is cyclic - "behind" counts as one full
+    cycle "ahead" - which is what keeps plain UInt16 wrap-around delivery safe:
+    at `incomingReliableSequenceNumber = 0xFFFF` the legitimately next command
+    `0x0000` is still accepted. Without this gate a wrap-naive staleness test
+    (`seq <= incoming`) would deadlock the channel after 65536 deliveries, and
+    far-future sequence numbers would stage without bound.
+  - If duplicate of the dispatch frontier (`seq == incomingReliableSequenceNumber`), drops it.
+  - If in-order (`seq == incomingReliableSequenceNumber + 1`), delivers it,
+    advancing the frontier by the whole span (peer.c
+    `dispatch_incoming_reliable_commands`), and drains any contiguous staged
+    deliveries.
+  - If ahead within the window, stages it until preceding deliveries arrive.
+  -/
+  def receiveReliableSpan (c : Channel) (seq : UInt16) (span : Nat) (packet : Packet) :
+      Channel × Array (Nat × Packet) :=
+    if !c.isIncomingReliableInWindow seq then
+      (c, #[])
+    else if seq == c.incomingReliableSequenceNumber then
+      (c, #[]) -- duplicate of the dispatch frontier
+    else if seq == c.incomingReliableSequenceNumber + 1 then
+      let (newSeq, drained, remainingStaged, _) :=
+        drainContiguous (seq + (span - 1).toUInt16) c.stagedReliable
+      let updatedChannel := { c with
+        incomingReliableSequenceNumber   := newSeq
+        incomingUnreliableSequenceNumber := 0
+        stagedReliable                   := remainingStaged
+      }
+      (updatedChannel, #[(span, packet)] ++ drained)
+    else
+      -- Out-of-order: store in staged list (avoiding duplicate sequence insertions)
+      let alreadyStaged := c.stagedReliable.any (fun e => e.seq == seq)
+      let newStaged := if alreadyStaged then c.stagedReliable
+                       else c.stagedReliable.push { seq, span, packet }
+      ({ c with stagedReliable := newStaged }, #[])
+
+  /-- Processes an incoming single-sequence reliable packet (span 1). -/
+  def receiveReliable (c : Channel) (seq : UInt16) (packet : Packet) :
+      Channel × Array (Nat × Packet) :=
+    receiveReliableSpan c seq 1 packet
 
 /--
 Processes an incoming unreliable packet on this channel.

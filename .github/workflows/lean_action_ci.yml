@@ -19,7 +19,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: leanprover/lean-action@v1
-
+      # Compile-only: the Phase 3 benchmark executable must keep building;
+      # it is never run in CI.
+      - run: lake build bench
   # Tier 1: no ENet needed - golden traces are committed and the replay
   # is fully deterministic.
   replay:

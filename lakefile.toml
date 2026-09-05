@@ -16,3 +16,10 @@ name = "LenetProofs"
 name = "replay"
 root = "Replay"
 srcDir = "test"
+
+# Phase 3 benchmark executable (TODO.md, "Phase 3 - Performance").
+# Compile-only in CI; run it locally to record baseline numbers.
+[[lean_exe]]
+name = "bench"
+root = "Bench"
+srcDir = "bench"

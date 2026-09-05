@@ -419,9 +419,10 @@ def absorbFragment (xs : Array FragmentAssembler) (params : Protocol.FragmentPar
   match xs.find? (fun a => a.startSequenceNumber == params.startSequenceNumber) with
   | some asm => (xs, some asm)
   | none =>
-    if xs.size ≥ Constants.maximumFragmentAssemblers ∨
-        params.fragmentCount.toNat > Constants.maximumReceivedFragmentCount then
-      (xs, none)
+      if xs.size ≥ Constants.maximumFragmentAssemblers ∨
+          params.fragmentCount.toNat = 0 ∨
+          params.fragmentCount.toNat > Constants.maximumReceivedFragmentCount then
+        (xs, none)
     else
       match FragmentAssembler.init params.startSequenceNumber params.totalLength.toNat
           params.fragmentCount.toNat with
@@ -444,35 +445,58 @@ def assemblerArrayAfterDeliver (xs : Array FragmentAssembler)
   | some (.ok (_, some _)) =>
     xs.filter (fun a => a.startSequenceNumber ≠ params.startSequenceNumber)
 
+/-- The reliable-fragment receive gate: unreliable fragments always pass;
+reliable fragments must be inside the receive window and not duplicate the
+dispatch frontier (protocol.c handle_send_fragment's cyclic window check plus
+peer.c queue_incoming_command's duplicate check) - anything else is a stale or
+duplicate fragment set and is dropped. Unreliable fragments keep Lenet's
+existing dispatch model. -/
+def fragmentGateOk (p : Peer) (channelId : UInt8) (params : Protocol.FragmentParams)
+    (unreliable : Bool) : Bool :=
+  if unreliable then true
+  else
+    match p.channels[channelId.toNat]? with
+    | none => false
+    | some ch =>
+      ch.isIncomingReliableInWindow params.startSequenceNumber ∧
+        params.startSequenceNumber ≠ ch.incomingReliableSequenceNumber
+
 /-- Delivers a fragment to the (possibly newly created) assembler for
 `params.startSequenceNumber` and returns the updated peer with any receive
 event fired on assembly completion. Fragments with invalid parameters (which
 ENet validates identically on receipt) are dropped. -/
-def handleFragment (p : Peer) (channelId : UInt8) (params : Protocol.FragmentParams)
-    (unreliable : Bool) : Peer × Array Event :=
-  let (xs, assembler?) := absorbFragment p.fragmentAssemblers params
-  let result : Option (Except CodecError (FragmentAssembler × Option ByteArray)) :=
-    assembler?.bind
-      (fun asm => asm.addFragment params.fragmentNumber.toNat params.fragmentOffset.toNat params.data)
-  let p' := { p with fragmentAssemblers := assemblerArrayAfterDeliver xs params result }
-  match result with
-  | some (.ok (_, some fullData)) =>
-    -- Assembly complete: the assembler is consumed and the reassembled
-    -- payload goes through the channel's reliable/unreliable receive path.
-    let chIdx := channelId.toNat
-    if h : chIdx < p'.channels.size then
-      let ch := p'.channels[chIdx]
-      let (ch', events) :=
-        if unreliable then
-          let (ch', deliveredOpt) := ch.receiveUnreliable params.startSequenceNumber (Packet.unreliableFragment fullData)
-          (ch', deliveredOpt.map (fun pkt => Event.receive p'.peerId channelId pkt) |>.toArray)
-        else
-          let (ch', delivered) := ch.receiveReliable params.startSequenceNumber (Packet.reliable fullData)
-          (ch', delivered.map (fun pkt => Event.receive p'.peerId channelId pkt))
-      ({ p' with channels := p'.channels.set chIdx ch' h }, events)
+  def handleFragment (p : Peer) (channelId : UInt8) (params : Protocol.FragmentParams)
+      (unreliable : Bool) : Peer × Array Event :=
+    if !fragmentGateOk p channelId params unreliable then
+      (p, #[])
     else
-      (p', #[])
-  | _ => (p', #[])
+      let (xs, assembler?) := absorbFragment p.fragmentAssemblers params
+      let result : Option (Except CodecError (FragmentAssembler × Option ByteArray)) :=
+        assembler?.bind
+          (fun asm => asm.addFragment params.fragmentNumber.toNat params.fragmentOffset.toNat params.data)
+      let p' := { p with fragmentAssemblers := assemblerArrayAfterDeliver xs params result }
+      match result with
+      | some (.ok (_, some fullData)) =>
+        -- Assembly complete: the assembler is consumed and the reassembled
+        -- payload goes through the channel's reliable/unreliable receive path.
+        -- The reliable delivery spans `fragmentCount` sequence numbers (ENet
+        -- advances the dispatch frontier by the whole span at dispatch).
+        let chIdx := channelId.toNat
+        if h : chIdx < p'.channels.size then
+          let ch := p'.channels[chIdx]
+          let (ch', events) :=
+            if unreliable then
+              let (ch', deliveredOpt) := ch.receiveUnreliable params.startSequenceNumber (Packet.unreliableFragment fullData)
+              (ch', deliveredOpt.map (fun pkt => Event.receive p'.peerId channelId pkt) |>.toArray)
+            else
+              let (ch', delivered) :=
+                ch.receiveReliableSpan params.startSequenceNumber params.fragmentCount.toNat
+                  (Packet.reliable fullData)
+              (ch', delivered.map (fun (_, pkt) => Event.receive p'.peerId channelId pkt))
+          ({ p' with channels := p'.channels.set chIdx ch' h }, events)
+        else
+          (p', #[])
+      | _ => (p', #[])
 
 /--
 Processes a single incoming protocol command received from this peer.
@@ -531,7 +555,7 @@ def handleCommand (p : Peer) (now : UInt32) (cmd : Protocol.Command) (sentTime :
         let ch := pAck.channels[chIdx]
         let (ch', delivered) := ch.receiveReliable cmd.reliableSequenceNumber (Packet.reliable data)
         let newChannels := pAck.channels.set chIdx ch' h
-        let events := delivered.map (fun pkt => Event.receive pAck.peerId cmd.channelId pkt)
+          let events := delivered.map (fun (_, pkt) => Event.receive pAck.peerId cmd.channelId pkt)
         ({ pAck with channels := newChannels }, events)
       else
         (pAck, #[])

@@ -29,10 +29,10 @@ compatibility testing works), then come back here.
 
 ## Current state
 
-- 20 golden-trace scenarios, all roles PASS (connect, send_c2s, send_s2c,
-  frag, disc_client, disc_server, idle, timeout, checksum, bandwidth, unfrag,
-  disclater, multip, inject, multichannel, dup, reconnect, retimeout, mtu576,
-  throttleconf).
+- 21 golden-trace scenarios, all roles PASS (connect, send_c2s, send_s2c,
+  frag, fragthen, disc_client, disc_server, idle, timeout, checksum,
+  bandwidth, unfrag, disclater, multip, inject, multichannel, dup,
+  reconnect, retimeout, mtu576, throttleconf).
 - Live interop: 12/12 PASS. C API distribution builds and self-checks.
 - Phase 1 (code quality) is done: typed errors, `Vector`-backed fixed-size
   windows, no panicking constructs, conventions in DESIGN.md 1.7.
@@ -142,8 +142,8 @@ CI builds it; the C distribution never compiles proofs). Proven so far:
   (all slots received when the buffer dispatches - no completion via
   replayed fragment numbers).
 - Channel (`Proofs/Channel.lean`): drain fuel adequacy + the drain advances
-  its frontier by exactly the delivered count; `receiveReliable_advance`
-  (incoming counter advances by the delivered count, wrap-aware).
+  its frontier by exactly the delivered span total; `receiveReliableSpan_advance`
+  (incoming counter advances by the delivered span total, wrap-aware).
 - Time (`Proofs/Time.lean`): translation invariance of `difference`/`less`
   (cyclic subtraction invariance, bv_decide).
 - Unsequenced (`Proofs/Unsequenced.lean`): `checkAndAdd` idempotence in all
@@ -167,10 +167,33 @@ CI builds it; the C distribution never compiles proofs). Proven so far:
 
 ### Phase 3 — Performance
 
-Benchmark executable (throughput per delivery mode, CPU cost per service
-tick), then easy wins only (buffer reuse vs `extract`, fold/array churn,
-encode paths). **Exit criteria:** recorded baseline numbers; proofs + corpus
-stay green.
+Benchmark executable done (`bench/Bench.lean`, `lake build bench`; compile-only
+in CI, run locally): closed-loop client/server pair in one process,
+throughput per delivery mode + CPU cost per service tick. The bench fails
+(exit 1) if any scenario loses or corrupts a packet, so its numbers are only
+printed when they mean something. Note: `IO.lazyPure` is `pure (f ())`, so a
+pure timed body must depend on a value read from IO (the bench seeds each run
+from the starting clock read) or the optimizer hoists it out of the timed
+region entirely.
+
+Baseline (median of 5 runs; i5-8350U @ 1.70 GHz, Lean 4.33.1, release build;
+run-to-run jitter ~±10% — regenerate locally for current numbers):
+
+| scenario                | pkts/s | MB/s | ns/pkt |
+|-------------------------|--------|------|--------|
+| reliable 1200B          | ~250k  | ~300 | ~3950  |
+| unreliable 1200B        | ~360k  | ~430 | ~2800  |
+| unsequenced 1200B       | ~260k  | ~315 | ~3830  |
+| reliable 4096B (frag)   | ~44k   | ~180 | ~22800 |
+| unrelfrag 4096B (frag)  | ~54k   | ~220 | ~18400 |
+
+Service tick (one pump round: service both hosts + route datagrams): idle
+connected pair ~2.7 µs/tick; loaded (64 reliable 1200 B sends + pump) ~255
+µs/tick ≈ 4.0 µs/packet — consistent with the throughput case's ns/packet.
+
+Remaining: easy wins only (buffer reuse vs `extract`, fold/array churn,
+encode paths), gated on the baseline above. **Exit criteria:** recorded
+baseline numbers (done); proofs + corpus stay green.
 
 ### Phase 4 — lenet-rs (async Rust bindings)
 

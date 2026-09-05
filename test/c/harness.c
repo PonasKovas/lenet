@@ -294,6 +294,25 @@ static const Action act_frag[] = {
     A_SEND(150, ROLE_C, 0, ENET_PACKET_FLAG_RELIABLE, payload_big, sizeof payload_big),
 };
 
+/* A reassembled fragment set occupies `fragmentCount` sequence numbers and
+ * dispatch moves the frontier by the whole span (peer.c
+ * dispatch_incoming_reliable_commands). This scenario pins that: reliable and
+ * unreliable traffic is sent both mid-set (queued behind the window) and
+ * after the set has dispatched, including a second full fragment set - a
+ * span-naive frontier advances by 1 per set, deadlocks the channel, and the
+ * follow-up traffic is never received (no events, no acks). */
+static const Action act_fragthen[] = {
+    { .at_ms = 5,   .kind = ACT_CONNECT, .role = ROLE_C, .a = 2, .b = 0 },
+    A_SEND(150, ROLE_C, 0, ENET_PACKET_FLAG_RELIABLE, payload_big, sizeof payload_big),
+    /* queued behind the in-flight fragment set */
+    A_SEND(200, ROLE_C, 0, ENET_PACKET_FLAG_RELIABLE, payload_a, sizeof payload_a - 1),
+    A_SEND(210, ROLE_C, 0, 0, payload_b, sizeof payload_b - 1),
+    /* after the first set has dispatched and been acked */
+    A_SEND(900, ROLE_C, 0, ENET_PACKET_FLAG_RELIABLE, payload_mtu, sizeof payload_mtu - 1),
+    A_SEND(950, ROLE_C, 0, ENET_PACKET_FLAG_RELIABLE, payload_big, sizeof payload_big),
+    A_SEND(960, ROLE_C, 0, ENET_PACKET_FLAG_RELIABLE, payload_a, sizeof payload_a - 1),
+};
+
 static const Action act_disc_client[] = {
     { .at_ms = 5,   .kind = ACT_CONNECT, .role = ROLE_C, .a = 2, .b = 0 },
     A_SEND(150, ROLE_C, 0, ENET_PACKET_FLAG_RELIABLE, payload_a, sizeof payload_a - 1),
@@ -506,6 +525,7 @@ static const Scenario scenarios[] = {
     SC("send_c2s",     700,  act_send_c2s),
     SC("send_s2c",     700,  act_send_s2c),
     SC("frag",        1200,  act_frag),
+    SC("fragthen",    2400,  act_fragthen),
     SC("disc_client",  800,  act_disc_client),
     SC("disc_server",  800,  act_disc_server),
     SC("idle",        2600,  act_idle),
@@ -715,7 +735,7 @@ static void hex_decode(const char *hex, unsigned char *out, size_t len) {
 int main(int argc, char **argv) {
     if (argc != 3 || strcmp(argv[1], "record") != 0) {
         fprintf(stderr, "usage: harness record <scenario>\n"
-                        "scenarios: connect send_c2s send_s2c frag "
+                        "scenarios: connect send_c2s send_s2c frag fragthen "
                         "disc_client disc_server idle timeout checksum "
                         "bandwidth unfrag disclater multip inject "
                         "multichannel dup reconnect retimeout mtu576 "

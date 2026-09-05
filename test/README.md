@@ -56,6 +56,7 @@ and the replay is fully deterministic (no sockets, no real time).
 | `send_c2s`     | reliable + unreliable + unsequenced sends, near-MTU packet       |
 | `send_s2c`     | same, server → client                                            |
 | `frag`         | 40 KB reliable packet split into MTU-bounded fragments           |
+| `fragthen`     | fragmentation span dispatch: more reliable/unreliable traffic queued behind and sent after a full fragment set, plus a second set — a span-naive dispatch frontier (advance-by-1 per set) deadlocks the channel and loses the follow-up traffic (regression for the fixed fragmentation frontier bug, see divergence triage) |
 | `disc_client`  | client-initiated graceful disconnect                             |
 | `disc_server`  | server-initiated graceful disconnect                             |
 | `idle`         | keepalive: ping/ACK duty with no traffic                         |
@@ -126,6 +127,27 @@ formal proofs (see TODO.md, "No fuzzing executable").
 Observed or analysis-found behavioral differences, with their DESIGN.md 1.5
 classification.
 
+- **Fragment-set dispatch span (lenet bug — fixed).** ENet treats a fragment
+  set as one incoming reliable command spanning `fragmentCount` sequence
+  numbers; dispatching the reassembled packet advances the receive frontier
+  by the whole span (`peer.c dispatch_incoming_reliable_commands`:
+  `incomingReliableSequenceNumber += fragmentCount - 1`). Lenet dispatched
+  every reliable delivery as one sequence number wide, so after the first
+  fragmented delivery the frontier no longer lined up with later commands -
+  they were classified duplicates/out-of-order and staged forever: the
+  channel silently stopped receiving everything after the first fragment
+  set. Found by the Phase 3 benchmark's fragmented batches (the old `frag`
+  scenario sends nothing after the set, which is why the corpus missed it).
+  Fixed: staged deliveries are now `StagedReliable {seq, span, packet}`,
+  delivery goes through `Channel.receiveReliableSpan` (plain packets span 1,
+  reassembled sets span `fragmentCount`), and the drain advances the
+  frontier by each staged entry's span. Also added ENet's reliable-fragment
+  receive gate (`Peer.fragmentGateOk`: cyclic receive-window plus
+  frontier-duplicate check on the set's start sequence, `protocol.c
+  handle_send_fragment` + `peer.c queue_incoming_command`) - Lenet used to
+  assemble stale and duplicate fragment sets that ENet discards. Pinned by
+  the `fragthen` golden scenario; the span arithmetic is pinned by proofs
+  (`Lenet/Proofs/Channel.lean`).
 - **Receive window gate on reliable commands (lenet bug — fixed).** ENet
   discards reliable commands outside the cyclic receive window
   (`peer.c:877-883`, `enet_peer_queue_incoming_command`) before any
