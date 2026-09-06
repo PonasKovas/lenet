@@ -46,6 +46,7 @@ extern lean_object *lenet_ffi_set_peer_timeout(lean_object *, uint16_t, uint32_t
 extern lean_object *lenet_ffi_host_handle_datagram(lean_object *, uint32_t,
                                                    uint32_t, uint16_t, lean_object *);
 extern lean_object *lenet_ffi_host_service(lean_object *, uint32_t);
+extern lean_object *lenet_ffi_host_next_deadline(lean_object *);
 extern lean_object *lenet_ffi_host_poll_event(lean_object *);
 extern lean_object *lenet_ffi_host_poll_outgoing(lean_object *);
 
@@ -259,6 +260,27 @@ int32_t lenet_host_service(lenet_host *host, uint32_t now_ms) {
 }
 
 /* ---- output polling ---- */
+
+int32_t lenet_host_next_deadline(lenet_host *host, uint32_t *deadline) {
+    if (host == NULL || deadline == NULL) return -1;
+    ensure_init();
+    lean_inc((lean_object *)host);
+    lean_object *r = lenet_ffi_host_next_deadline((lean_object *)host);
+    if (!lean_io_result_is_ok(r)) {
+        lean_dec(r);
+        return -1;
+    }
+    lean_object *opt = lean_ctor_get(r, 0); /* Option UInt32 */
+    lean_inc(opt);
+    lean_dec(r);
+    if (lean_obj_tag(opt) == 0) { /* none */
+        lean_dec(opt);
+        return 0;
+    }
+    *deadline = (uint32_t)lean_unbox_uint32(lean_ctor_get(opt, 0));
+    lean_dec(opt);
+    return 1;
+}
 
 /* The outgoing datagram is copied into a thread-local buffer so that
  * hosts on different threads never share it. */

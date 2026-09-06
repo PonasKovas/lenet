@@ -206,6 +206,32 @@ builder-style API, event stream. Threading contract: one host,
 one thread (or external serialization).
 **Exit criteria:** async interop test vs real ENet from Rust.
 
+**Progress (first pass, in `../lenet-rs`, git):**
+- C API extended first (this repo, uncommitted): `lenet_host_next_deadline`
+  added to `include/lenet.h` + `lenet_capi.c` + a new `lenet_ffi_host_next_deadline`
+  export in `Lenet/FFI.lean`; `make -C csrc check` green. The driver needs
+  the deadline to schedule service ticks without busy-pumping.
+- Workspace crates: `lenet-sys` (hand-written externs, `build.rs` links
+  `liblenet.a`, `LENET_LIB_DIR` override), `lenet` (safe sans-I/O API:
+  `HostBuilder`→`Host`, typed errors, payload-buffered `poll_event`),
+  `lenet-tokio` (one pump task: recv → handle_datagram, `service` at
+  wrap-aware `next_deadline` + 100 ms fallback tick, outgoing/events
+  flushed to socket/mpsc; `Connection` handles for send/disconnect,
+  `Endpoint::peer` for server-role sends, `with_host` escape hatch),
+  `enet-helper` (real ENet oracle binary: cmake-builds the pinned ENet,
+  echo server + client modes).
+- Tests: sans-I/O unit tests (`lenet/tests/sansio.rs`: two hosts routed by
+  hand — handshake + connect data, reliable roundtrip, 40 KB fragment
+  reassembly, graceful disconnect, idle stability, deadline presence) and
+  the exit-criterion async interop (`lenet-tokio/tests/interop.rs`): Rust
+  client ↔ ENet server (handshake + reliable echo + disconnect data,
+  fragmented 40 KB echo), and Rust as server ↔ ENet client roundtrip.
+  `cargo test --workspace`: 10/10 PASS, clippy clean.
+- Notes: outgoing datagrams only materialize on `service` (ENet parity,
+  ACKs included) — drivers must service before polling outgoing; the
+  initiator's own DISCONNECT event carries data 0; server-side CONNECT
+  events fire when the client ACKs the VERIFY_CONNECT, not on receipt.
+
 ## Explicitly out of scope
 
 - **Compression** (ENet's optional PPM range coder): descoped — see

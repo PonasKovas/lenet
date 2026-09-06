@@ -147,6 +147,15 @@ int32_t lenet_host_handle_datagram(lenet_host *host, uint32_t now_ms,
 int32_t lenet_host_service(lenet_host *host, uint32_t now_ms);
 
 /**
+ * Returns 1 and stores the next wall-clock deadline (ms, same clock as
+ * service) at which the host's state can change in *deadline, 0 if
+ * nothing is scheduled, -1 on error. Drivers use this to schedule their
+ * next service tick without busy-pumping. Timestamps may wrap; compare
+ * wrap-aware.
+ */
+int32_t lenet_host_next_deadline(lenet_host *host, uint32_t *deadline);
+
+/**
  * Pops one application event into *out.
  * For LENET_EVENT_RECEIVE, up to payload_cap bytes of the packet payload
  * are copied into payload_buf (may be NULL to learn the size only) and

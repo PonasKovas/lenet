@@ -111,6 +111,11 @@ def ffi_host_service (ctxRef : IO.Ref HostContext) (nowMs : UInt32) : IO Int32 :
   }
   return 0
 
+@[export lenet_ffi_host_next_deadline]
+def ffi_host_next_deadline (ctxRef : IO.Ref HostContext) : IO (Option UInt32) := do
+  let ctx ← ctxRef.get
+  return ctx.host.nextDeadline
+
 @[export lenet_ffi_host_poll_event]
 def ffi_host_poll_event (ctxRef : IO.Ref HostContext) : IO (Option (UInt32 × UInt16 × UInt8 × UInt32 × ByteArray)) := do
   let ctx ← ctxRef.get
