@@ -65,6 +65,9 @@ structure Peer where
   timeoutMaximum                 : UInt32 := Constants.defaultTimeoutMaximum
   packetThrottle                 : UInt32 := Constants.defaultPacketThrottle
   packetThrottleLimit            : UInt32 := Constants.packetThrottleScale
+  /-- Cycles through `0 ..< packetThrottleScale`; an unreliable packet is
+  dropped when it lands above `packetThrottle` (ENet `packetThrottleCounter`). -/
+  packetThrottleCounter          : UInt32 := 0
   packetThrottleEpoch            : UInt32 := 0
   packetThrottleAcceleration     : UInt32 := Constants.defaultPacketThrottleAcceleration
   packetThrottleDeceleration     : UInt32 := Constants.defaultPacketThrottleDeceleration

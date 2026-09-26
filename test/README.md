@@ -180,6 +180,21 @@ compatibility"). Open, undecided differences are listed in TODO.md.
   happen exactly as before for in-window traffic. The wrap boundary is now
   pinned by proofs (`Lenet/Proofs/Channel.lean`), since golden traces cannot
   reach it.
+- **Throttle drops of unreliable packets (lenet bug - fixed).** ENet drops
+  unreliable, unsequenced and unreliable-fragment packets on send in
+  proportion to the packet throttle (`protocol.c` check_outgoing_commands,
+  `packetThrottleCounter`); Lenet sent them all and only applied the
+  throttle to the reliable congestion window. Now `PackState.packUnreliable`
+  follows ENet: the counter steps by 7 modulo 32 per packet and a packet
+  whose step lands above the throttle is dropped, all its fragments with it.
+  Invisible to the corpus: its throttle stays at the full 32, where nothing
+  is dropped.
+- **Unsequenced drop cascade (enet bug - not copied).** When ENet's throttle
+  drops a packet it also drops every directly following command with the
+  same sequence numbers, meant for the rest of a fragment set. Unsequenced
+  packets all carry (0, 0), so one dropped unsequenced packet takes every
+  unsequenced packet queued right behind it along. Lenet drops only the
+  packet the counter picked. Sender-side only, so invisible to interop.
 - **Receive window gate on unreliable commands (documented, not mirrored).**
   ENet applies the same cyclic window gate to unreliable and
   unreliable-fragment commands (anything but SEND_UNSEQUENCED,

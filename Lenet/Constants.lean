@@ -77,6 +77,8 @@ def packetFlagUnreliableFragment : UInt32 := (1 : UInt32) <<< 3
 def defaultRoundTripTime              : UInt32 := 500
 def defaultPacketThrottle             : UInt32 := 32
 def packetThrottleScale               : UInt32 := 32
+/-- Step of the counter that picks which unreliable packets the throttle drops. -/
+def packetThrottleCounter             : UInt32 := 7
 def defaultPacketThrottleAcceleration : UInt32 := 2
 def defaultPacketThrottleDeceleration : UInt32 := 2
 def defaultPacketThrottleInterval     : UInt32 := 5000

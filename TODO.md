@@ -10,10 +10,6 @@ what is left, roughly in priority order.
 Not yet triaged as bugs or accepted; each needs a decision per
 DESIGN.md's rules.
 
-- **Unreliable packets are never throttled.** ENet drops unreliable packets
-  on send in proportion to the packet throttle (`check_outgoing_commands`,
-  `packetThrottleCounter`); Lenet sends them all. Lenet computes the
-  throttle but only applies it to the reliable congestion window.
 - **Outgoing bandwidth throttle uses a different input.** ENet's
   `enet_host_bandwidth_throttle` sets each peer's throttle limit from the
   bytes it sent during the epoch (`outgoingDataTotal`); Lenet uses the

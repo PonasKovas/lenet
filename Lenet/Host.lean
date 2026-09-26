@@ -323,6 +323,11 @@ structure PackState where
   /-- A reliable command hit a still-occupied sequence window: later reliable
   channel commands wait too, so none overtakes it (ENet's `windowWrap`). -/
   windowWrap        : Bool := false
+  /-- The peer's `packetThrottleCounter`, advanced per unreliable packet. -/
+  throttleCounter   : UInt32
+  /-- Channel and start sequence number of the unreliable fragment set whose
+  first fragment the throttle dropped: its other fragments go too. -/
+  droppedSet        : Option (UInt8 × UInt16) := none
 
 namespace PackState
 
@@ -339,6 +344,42 @@ namespace PackState
 @[inline] def defer (st : PackState) (outCmd : OutgoingCommand) : PackState :=
   { st with remainingOutgoing := st.remainingOutgoing.push outCmd }
 
+/-- Whether `cmd` is the first (or only) command of an unreliable packet,
+the unit the packet throttle drops. -/
+def startsUnreliablePacket (cmd : Protocol.Command) : Bool :=
+  match cmd.body with
+  | .sendUnreliable .. | .sendUnsequenced .. => true
+  | .sendUnreliableFragment f => f.fragmentOffset == 0
+  | _ => false
+
+/-- Whether `cmd` is a later fragment of the set the throttle dropped. -/
+def continuesDroppedSet (st : PackState) (cmd : Protocol.Command) : Bool :=
+  match st.droppedSet, cmd.body with
+  | some (channelId, startSeq), .sendUnreliableFragment f =>
+    f.fragmentOffset != 0 && channelId == cmd.channelId && startSeq == f.startSequenceNumber
+  | _, _ => false
+
+/-- Packs an unreliable command for peer `p`, or drops it: the counter steps
+through `0 ..< packetThrottleScale` and a packet whose step lands above the
+throttle is dropped, whole (ENet check_outgoing_commands). At the full
+throttle nothing is dropped.
+
+ENet drops a packet together with every directly following command that has
+the same sequence numbers. Unsequenced packets all have (0, 0), so ENet also
+drops every unsequenced packet queued right behind a dropped one; Lenet only
+drops the packet itself (see test/README.md, divergence triage). -/
+def packUnreliable (p : Peer) (st : PackState) (cmd : Protocol.Command) : PackState :=
+  if !startsUnreliablePacket cmd then st.pack cmd
+  else
+    let counter := (st.throttleCounter + Constants.packetThrottleCounter) % Constants.packetThrottleScale
+    if counter > p.packetThrottle then
+      { st with
+        throttleCounter := counter
+        droppedSet := match cmd.body with
+          | .sendUnreliableFragment f => some (cmd.channelId, f.startSequenceNumber)
+          | _ => none }
+    else { st.pack cmd with throttleCounter := counter }
+
 /-- Packs one queued ACK (ENet send_acknowledgements). -/
 def packAck (mtu : UInt32) (st : PackState) (ack : Acknowledgement) : PackState :=
   let cmd : Protocol.Command := {
@@ -350,13 +391,15 @@ def packAck (mtu : UInt32) (st : PackState) (ack : Acknowledgement) : PackState 
 
 /-- Packs one queued command for peer `p` (ENet check_outgoing_commands). A
 reliable command stays queued while its sequence window is not free or while
-the congestion window is exhausted. -/
+the congestion window is exhausted; an unreliable one may be dropped by
+the packet throttle (`packUnreliable`). -/
 def packCommand (p : Peer) (now : UInt32) (st : PackState) (outCmd : OutgoingCommand) : PackState :=
   let cmd := outCmd.command
   -- the command's data channel; control commands (channel 0xFF) have none
   let channel? := if cmd.acknowledge then st.channels[cmd.channelId.toNat]? else none
   let firstSend := outCmd.sendAttempts == 0
-  if st.full then st.defer outCmd
+  if st.continuesDroppedSet cmd then st
+  else if st.full then st.defer outCmd
   else if channel?.isSome && st.windowWrap then st.defer outCmd
   else if channel?.any (fun ch => firstSend && !ch.canSendReliable cmd.reliableSequenceNumber) then
     { st with windowWrap := true }.defer outCmd
@@ -367,7 +410,7 @@ def packCommand (p : Peer) (now : UInt32) (st : PackState) (outCmd : OutgoingCom
         Nat.max ((p.packetThrottle * p.windowSize) / Constants.packetThrottleScale).toNat p.mtu.toNat then
     st.defer outCmd
   else if !st.fits p.mtu cmd then { st with full := true }.defer outCmd
-  else if !cmd.acknowledge then st.pack cmd -- fire-and-forget
+  else if !cmd.acknowledge then st.packUnreliable p cmd -- fire-and-forget
   else
     -- reliable: occupy its sequence window on first send, and track it for
     -- acknowledgement and retransmission
@@ -394,9 +437,10 @@ following ENet's rules: ACKs first, then queued commands in order, at most
 the commands to send. -/
 def packOutgoingCommands (p : Peer) (now : UInt32) : Peer × Array Protocol.Command :=
   let initial : PackState := {
-    packetSize    := 4 -- ENetProtocolHeader (peer ID + sent time)
-    sentReliables := p.sentReliableCommands
-    channels      := p.channels
+    packetSize      := 4 -- ENetProtocolHeader (peer ID + sent time)
+    sentReliables   := p.sentReliableCommands
+    channels        := p.channels
+    throttleCounter := p.packetThrottleCounter
   }
   let withAcks := p.acknowledgements.foldl (PackState.packAck p.mtu) initial
   let final := p.outgoingCommands.foldl (PackState.packCommand p now) withAcks
@@ -406,6 +450,7 @@ def packOutgoingCommands (p : Peer) (now : UInt32) : Peer × Array Protocol.Comm
     sentReliableCommands  := final.sentReliables
     channels              := final.channels
     reliableDataInTransit := p.reliableDataInTransit + final.inTransitAdd
+    packetThrottleCounter := final.throttleCounter
   }
   (updatedPeer, final.commandsToPack)
 
