@@ -54,12 +54,16 @@ theorem receiveOnChannel_named (p : Peer) (c r) : ∀ e ∈ (p.receiveOnChannel 
 theorem handleFragment_peerId (p : Peer) (c s pr u) : (p.handleFragment c s pr u).1.peerId = p.peerId := by
   unfold handleFragment; split
   · rfl
+  split
+  · rfl
   · dsimp only; split
     · dsimp only; exact receiveOnChannel_peerId _ _ _
     all_goals rfl
 theorem handleFragment_named (p : Peer) (c s pr u) :
     ∀ e ∈ (p.handleFragment c s pr u).2.1, eventPeer e = p.peerId := by
   unfold handleFragment; split
+  · intro e he; simp at he
+  split
   · intro e he; simp at he
   · dsimp only; split
     · dsimp only; exact receiveOnChannel_named _ _ _

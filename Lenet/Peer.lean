@@ -494,14 +494,19 @@ ENet validates identically: ENet refuses such a command (`applyCommand`),
 so it is not acknowledged and the sender retransmits it. -/
 def handleFragment (p : Peer) (channelId : UInt8) (reliableSeq : UInt16)
     (params : Protocol.FragmentParams) (unreliable : Bool) : Peer × Array Event × Bool :=
-  if !fragmentGateOk p channelId reliableSeq params unreliable then
+  -- ENet refuses an empty fragment before anything else
+  if params.data.size == 0 then (p, #[], false)
+  else if !fragmentGateOk p channelId reliableSeq params unreliable then
     (p, #[], true)
   else
     let origin := fragmentOrigin channelId reliableSeq unreliable
     let (xs, assembler?) := absorbFragment p.fragmentAssemblers origin params
     let result : Option (Except CodecError (FragmentAssembler × Option ByteArray)) :=
       assembler?.bind fun asm =>
-        asm.addFragment params.fragmentNumber.toNat params.fragmentOffset.toNat params.data
+        -- a fragment that does not describe the set under way is refused (ENet)
+        if asm.totalLength != params.totalLength.toNat || asm.fragmentCount != params.fragmentCount.toNat then
+          some (.error (.custom "fragment does not match its set"))
+        else asm.addFragment params.fragmentNumber.toNat params.fragmentOffset.toNat params.data
     let p := { p with fragmentAssemblers := assemblerArrayAfterDeliver xs origin params result }
     match result with
     | some (.ok (_, some data)) =>

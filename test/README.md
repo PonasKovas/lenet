@@ -251,6 +251,15 @@ compatibility"). Open, undecided differences are listed in TODO.md.
   for events from a received datagram, missing timeouts and the remote
   DISCONNECT that completes once its ACK is out. `Host.service` now sets
   it too.
+- **Fragment validation (lenet bug - fixed, hostile input).** ENet refuses
+  an empty fragment and one whose total length or fragment count differs
+  from the set under way (no ACK, the rest of the datagram dropped). Lenet
+  took both: an empty fragment could complete a set, and a mismatched one
+  was copied into it. `Peer.handleFragment` now refuses them. Still
+  different, and only for hostile input: ENet also refuses a fragment whose
+  start sequence number is the dispatch frontier or a staged plain packet,
+  where Lenet acknowledges and ignores it (it keeps no record of whether a
+  staged entry was a fragment set).
 - **Header bytes (lenet bug - fixed).** ENet sets the SENT_TIME flag and
   writes the 2-byte sent time only when the datagram carries a command
   that asks for an ACK, and adds the session bits only once the remote

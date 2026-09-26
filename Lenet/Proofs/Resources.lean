@@ -213,6 +213,8 @@ theorem handleFragment_cap_preserved (p : Peer) (channelId : UInt8) (reliableSeq
     (handleFragment p channelId reliableSeq params unreliable).1.fragmentAssemblers.size
       ≤ Constants.maximumFragmentAssemblers := by
   unfold handleFragment
+  split
+  · exact hcap
   by_cases hg : fragmentGateOk p channelId reliableSeq params unreliable = true
   · rw [if_neg (by simp [hg] : ¬((!fragmentGateOk p channelId reliableSeq params unreliable) = true))]
     -- gate passed: the array is `assemblerArrayAfterDeliver` of the absorbed array
@@ -561,6 +563,8 @@ theorem handleFragment_peerStagedInv {p : Peer} (h : PeerStagedInv p) (channelId
   unfold Peer.handleFragment
   split
   · exact h
+  split
+  · exact h
   · dsimp only
     split
     · dsimp only
@@ -829,18 +833,25 @@ theorem handleFragment_ok {p : Peer} (h : ∀ a ∈ p.fragmentAssemblers, Assemb
   unfold handleFragment
   split
   · exact h
+  split
+  · exact h
   · dsimp only
     obtain ⟨hxs, hasm⟩ := absorbFragment_ok h (fragmentOrigin channelId reliableSeq unreliable) params
     have hdel := assemblerArrayAfterDeliver_ok hxs (fragmentOrigin channelId reliableSeq unreliable) params
       (result := (absorbFragment p.fragmentAssemblers (fragmentOrigin channelId reliableSeq unreliable) params).2.bind
-        fun asm => some (asm.addFragment params.fragmentNumber.toNat params.fragmentOffset.toNat params.data))
+        fun asm =>
+          if asm.totalLength != params.totalLength.toNat || asm.fragmentCount != params.fragmentCount.toNat then
+            some (.error (.custom "fragment does not match its set"))
+          else some (asm.addFragment params.fragmentNumber.toNat params.fragmentOffset.toNat params.data))
       (fun a' r hr => by
         cases hopt : (absorbFragment p.fragmentAssemblers (fragmentOrigin channelId reliableSeq unreliable) params).2 with
         | none => rw [hopt] at hr; cases hr
         | some asm =>
           rw [hopt] at hr
-          simp only [Option.bind_some, Option.some.injEq] at hr
-          exact addFragment_ok (hasm asm hopt) hr)
+          simp only [Option.bind_some] at hr
+          split at hr
+          · cases hr
+          · exact addFragment_ok (hasm asm hopt) (Option.some.inj hr))
     split
     · exact receiveOnChannel_ok hdel _ _
     · exact hdel

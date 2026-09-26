@@ -197,6 +197,26 @@ aligned blocks of 1024 and drops everything below the current block (see
 test/README.md, "Unsequenced window"). -/
 
 /-- The groups of `groups` that `feed` delivers, one packet per group. -/
+def fragmentValidationTests : List Test := [
+  { name := "an empty fragment is refused"
+    run := fun _ => do
+      let peer ← serverPeer
+      let cmd := relFrag 0 1 5 2 0
+      let cmd := { cmd with body := .sendFragment { fragParams 1 5 2 0 with data := .empty } }
+      let (q, _, reading) := peer.handleCommand 2000 cmd (some 0)
+      -- ENet handle_send_fragment: fragmentLength <= 0 returns -1
+      expect (!reading && q.acknowledgements.isEmpty) "empty fragment taken" },
+  { name := "a fragment that does not match its set is refused"
+    run := fun _ => do
+      let peer ← serverPeer
+      let (peer, _) := feed peer [relFrag 0 1 5 2 0]
+      -- fragment 1, claiming a set of 3 (another total length)
+      let (q, evs, reading) := peer.handleCommand 2000 (relFrag 0 1 5 3 1) (some 0)
+      expect (!reading && evs.isEmpty) "mismatched fragment taken"
+      expect (q.acknowledgements.size == peer.acknowledgements.size) "mismatched fragment acknowledged"
+      let (_, evs) := feed peer [relFrag 0 1 5 2 1]
+      expect (evs.size == 1) "the set no longer completes" } ]
+
 def deliveredGroups (p : Peer) (groups : List UInt16) : List UInt16 :=
   let (_, delivered) := groups.foldl (init := (p, [])) fun (p, acc) g =>
     let (p, evs) := feed p [unsequencedCmd 0 g (bytes 3 g.toNat)]
@@ -637,7 +657,7 @@ def hostTests : List Test := [
         expect (outs.isEmpty && evs.isEmpty) "service before the deadline sent something"
         expect (h'.peers == h.peers) "service before the deadline changed a peer" } ]
 
-def tests : List Test := fragmentTests ++ unsequencedTests ++ hostTests
+def tests : List Test := fragmentTests ++ fragmentValidationTests ++ unsequencedTests ++ hostTests
 
 end Unit
 
