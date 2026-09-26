@@ -371,6 +371,13 @@ def hostTests : List Test := [
       expect (cmds.any (·.body matches .sendUnreliable ..)) "unreliable packet not sent"
       expect (cmds.any (·.body matches .ping)) "no PING"
       expect (p.client.nextDeadline.any (Time.less · now)) "no keepalive deadline" },
+  { name := "a zero timeout parameter means its default"
+    run := fun _ => do
+      let p ← connected
+      let q := (p.client.setPeerTimeout p.clientPeer 0 0 5000).peers[p.clientPeer.toNat]!
+      -- ENet enet_peer_timeout: each 0 is replaced by its default
+      expect (q.timeoutLimit == Constants.defaultTimeoutLimit && q.timeoutMinimum == Constants.defaultTimeoutMinimum
+        && q.timeoutMaximum == 5000) s!"{q.timeoutLimit}/{q.timeoutMinimum}/{q.timeoutMaximum}" },
   { name := "a peer that never answers times out between the minimum and maximum"
     run := fun _ => do
       let p ← send (← connected) (pkt 100)

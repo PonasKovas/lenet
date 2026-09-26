@@ -136,7 +136,8 @@ void lenet_peer_throttle_configure(lenet_host *host, uint16_t peer_id,
  * dropped on receive; all emitted datagrams carry one. */
 void lenet_host_enable_checksum(lenet_host *host);
 
-/** Configures timeout behavior for `peer_id` (see enet_peer_timeout). */
+/** Configures timeout behavior for `peer_id` (see enet_peer_timeout); 0 keeps
+ * that parameter's default. */
 void lenet_peer_set_timeout(lenet_host *host, uint16_t peer_id,
                             uint32_t limit, uint32_t minimum, uint32_t maximum);
 

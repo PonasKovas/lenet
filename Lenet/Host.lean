@@ -220,10 +220,14 @@ def throttleConfigure (h : Host) (peerId : UInt16) (interval accel decel : UInt3
     }.queueControlCommand (.throttleConfigure interval accel decel)
 
 /-- ENet's enet_peer_timeout: sets the peer's timeout parameters (see
-`Peer.isTimedOut`). -/
+`Peer.isTimedOut`); 0 means the default, as in ENet. -/
 def setPeerTimeout (h : Host) (peerId : UInt16) (limit minimum maximum : UInt32) : Host :=
+  let orDefault (v dflt : UInt32) := if v == 0 then dflt else v
   h.modifyPeer peerId fun p =>
-    { p with timeoutLimit := limit, timeoutMinimum := minimum, timeoutMaximum := maximum }
+    { p with
+      timeoutLimit   := orDefault limit Constants.defaultTimeoutLimit
+      timeoutMinimum := orDefault minimum Constants.defaultTimeoutMinimum
+      timeoutMaximum := orDefault maximum Constants.defaultTimeoutMaximum }
 
 /-! ## Receiving -/
 

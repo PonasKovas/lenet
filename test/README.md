@@ -228,6 +228,11 @@ compatibility"). Open, undecided differences are listed in TODO.md.
   so a server application got disconnect events for connections it never
   heard of. `Host.checkPeerTimeouts` and `Peer.handleDisconnect` now reset
   such a peer without an event.
+- **Zero timeout parameters (lenet bug - fixed).** ENet's
+  enet_peer_timeout replaces each 0 by its default (32, 5000, 30000 ms).
+  Lenet stored the 0, so the common call `timeout(peer, 0, 0, 5000)` made
+  the peer disconnect at the first missed retransmit. `Host.setPeerTimeout`
+  now does what ENet does.
 - **No keepalive while unreliable data is queued (lenet bug - fixed).**
   ENet's send_outgoing_commands adds a PING once a pass packed no reliable
   command, nothing reliable is in flight and the peer has been idle for
