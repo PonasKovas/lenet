@@ -595,27 +595,37 @@ def handleCommand (p : Peer) (now : UInt32) (cmd : Protocol.Command) (sentTime :
   | .verifyConnect params =>
     -- Client side: the server's VERIFY_CONNECT completes the handshake
     -- (ENet: enet_protocol_handle_verify_connect).
-    if pAck.state == .connecting then
+    if pAck.state != .connecting then
+      (pAck, #[])
+    else if params.channelCount.toNat < Constants.minimumChannelCount ∨
+        params.channelCount.toNat > Constants.maximumChannelCount ∨
+        params.packetThrottleInterval != pAck.packetThrottleInterval ∨
+        params.packetThrottleAcceleration != pAck.packetThrottleAcceleration ∨
+        params.packetThrottleDeceleration != pAck.packetThrottleDeceleration ∨
+        params.connectId != pAck.connectId then
+      -- not an answer to our CONNECT: ENet dispatches ZOMBIE (event + reset)
+      (Peer.reset pAck, #[Event.disconnect pAck.peerId 0])
+    else
       -- ENet removes the client's CONNECT from the sent-reliable list here
       -- (nothing ever ACKs it - the VERIFY_CONNECT replaces it).
       let (pRm, _) := pAck.removeSentReliableCommand 0xFF 1
-      -- ENet clamps the received windowSize to [min, max] and only shrinks
-      -- the peer's own (bandwidth-derived) window to match.
-      let ws := Nat.min Constants.maximumWindowSize (Nat.max Constants.minimumWindowSize params.windowSize.toNat)
+      -- The server's MTU and window are clamped to the protocol range and
+      -- can only shrink the client's own values.
+      let clamp (lo hi : Nat) (v : UInt32) : Nat := Nat.min hi (Nat.max lo v.toNat)
+      let mtu := clamp Constants.minimumMtu Constants.maximumMtu params.mtu
+      let ws := clamp Constants.minimumWindowSize Constants.maximumWindowSize params.windowSize
       let p' := { pRm with
         outgoingPeerId      := params.outgoingPeerId
         incomingSessionId   := params.incomingSessionId
         outgoingSessionId   := params.outgoingSessionId
-        connectId           := params.connectId
-        mtu                 := params.mtu
+        channels            := pRm.channels.take params.channelCount.toNat
+        mtu                 := Nat.min pRm.mtu.toNat mtu |>.toUInt32
         windowSize          := Nat.min pRm.windowSize.toNat ws |>.toUInt32
         incomingBandwidth   := params.incomingBandwidth
         outgoingBandwidth   := params.outgoingBandwidth
         state               := .connected
       }
       (p', #[Event.connect p'.peerId p'.eventData])
-    else
-      (pAck, #[])
 
   | .connect .. =>
     -- A CONNECT for an existing peer is invalid; ignore (ENet does the same).
