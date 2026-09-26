@@ -255,11 +255,13 @@ def updateRtt (p : Peer) (now : UInt32) (rtt : UInt32) : Peer :=
       (p, sample, (sample + 1) / 2)
   let lowest := min rtt p.lowestRoundTripTime
   let highestVar := max var p.highestRoundTripTimeVariance
-  -- at each throttle epoch the epoch's extremes become the reference
-  -- values the throttle compares against
+  -- at each throttle epoch the epoch's extremes become the reference values
+  -- the throttle compares against, and the next epoch's extremes start over
+  -- from the current estimate
+  let newEpoch := p.packetThrottleEpoch == 0 ∨
+    Time.difference now p.packetThrottleEpoch ≥ p.packetThrottleInterval
   let p :=
-    if p.packetThrottleEpoch == 0 ∨
-        Time.difference now p.packetThrottleEpoch ≥ p.packetThrottleInterval then
+    if newEpoch then
       { p with
         lastRoundTripTime         := lowest
         lastRoundTripTimeVariance := max highestVar 1
@@ -268,8 +270,8 @@ def updateRtt (p : Peer) (now : UInt32) (rtt : UInt32) : Peer :=
   { p with
     roundTripTime                := rtt
     roundTripTimeVariance        := var
-    lowestRoundTripTime          := lowest
-    highestRoundTripTimeVariance := highestVar
+    lowestRoundTripTime          := if newEpoch then rtt else lowest
+    highestRoundTripTimeVariance := if newEpoch then var else highestVar
     lastReceiveTime              := max now 1
     earliestTimeout              := 0 }
 
