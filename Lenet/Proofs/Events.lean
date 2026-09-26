@@ -100,13 +100,13 @@ theorem handleFragment_state (p : Peer) (c s pr u) : (p.handleFragment c s pr u)
   · rfl
   · dsimp only; split
     · dsimp only; exact receiveOnChannel_state _ _ _
-    · rfl
+    all_goals rfl
 theorem handleFragment_events (p : Peer) (c s pr u) : ∀ e ∈ (p.handleFragment c s pr u).2.1, isReceive e := by
   unfold handleFragment; split
   · intro e he; simp at he
   · dsimp only; split
     · dsimp only; exact receiveOnChannel_events _ _ _
-    · intro e he; simp at he
+    all_goals (intro e he; simp at he)
 theorem handleData_state (p : Peer) (cmd) : (p.handleData cmd).1.state = p.state := by
   unfold handleData; split
   · exact receiveOnChannel_state _ _ _
@@ -129,12 +129,12 @@ theorem isConnected_up {p : Peer} (h : p.isConnected = true) : (phase p.state) =
 /-- Starting a disconnect never changes the phase: a connected peer goes
 disconnecting, a handshaking one goes zombie. -/
 theorem queueDisconnect_phase (p : Peer) (d) : (phase (p.queueDisconnect d).state) = (phase p.state) := by
-  cases hs : p.state <;> simp +decide [queueDisconnect, hs, phase, queueControlCommand, queueOutgoingCommand]
+  cases hs : p.state <;> simp +decide [queueDisconnect, hs, phase, queueControlCommand, queueOutgoingCommand, resetQueues]
 
 /-- An ACK completes a server handshake (connect) or a disconnect
 (disconnect), or changes no phase. -/
 theorem handleAcknowledge_wf (p : Peer) (n c s t) :
-    EventsWf (phase p.state) (p.handleAcknowledge n c s t).2.toList (phase (p.handleAcknowledge n c s t).1.state) := by
+    EventsWf (phase p.state) (p.handleAcknowledge n c s t).2.1.toList (phase (p.handleAcknowledge n c s t).1.state) := by
   unfold handleAcknowledge; dsimp only; split
   · exact .nil
   · generalize hq : (p.updateRtt n _).removeSentReliableCommand c s = q
@@ -172,7 +172,7 @@ theorem handleDisconnect_wf (p : Peer) (d) :
     | exact .disconnect .nil
 
 theorem handleVerifyConnect_wf (p : Peer) (pr) :
-    EventsWf (phase p.state) (p.handleVerifyConnect pr).2.toList (phase (p.handleVerifyConnect pr).1.state) := by
+    EventsWf (phase p.state) (p.handleVerifyConnect pr).2.1.toList (phase (p.handleVerifyConnect pr).1.state) := by
   unfold handleVerifyConnect
   split
   · exact .nil
@@ -190,50 +190,46 @@ theorem wf_of_state_receives {p q : Peer} {es : Array Event} (hs : q.state = p.s
   rw [hs, isConnected_up hup]
   exact .receives fun e h => he e (Array.mem_toList_iff.mp h)
 
-theorem ackCommand_state (p : Peer) (c s) : (p.ackCommand c s).state = p.state := by
-  unfold ackCommand; split <;> rfl
+theorem takesData_connected {p : Peer} {c : Nat} (h : (p.isConnected && decide (c < p.channels.size)) = true) :
+    p.isConnected = true := by
+  simp only [Bool.and_eq_true] at h; exact h.1
+
+/-- ENet's handler for any one command keeps the events well formed. -/
+theorem applyCommand_wf (p : Peer) (now cmd) :
+    EventsWf (phase p.state) (p.applyCommand now cmd).2.1.toList (phase (p.applyCommand now cmd).1.state) := by
+  unfold applyCommand
+  dsimp only
+  split
+  all_goals first
+    | exact handleAcknowledge_wf _ _ _ _ _
+    | exact handleVerifyConnect_wf _ _
+    | exact handleDisconnect_wf _ _
+    | exact .nil
+    | (split
+       · next hc =>
+         first
+           | exact wf_of_state_receives (handleData_state _ _) (takesData_connected hc) (handleData_events _ _)
+           | exact wf_of_state_receives (handleFragment_state _ _ _ _ _) (takesData_connected hc)
+               (handleFragment_events _ _ _ _ _)
+           | exact .nil
+       · exact .nil)
 
 /-- **Every incoming command keeps its peer's events well formed.** -/
 theorem handleCommand_wf (p : Peer) (now cmd st) :
-    EventsWf (phase p.state) (p.handleCommand now cmd st).2.toList
+    EventsWf (phase p.state) (p.handleCommand now cmd st).2.1.toList
       (phase (p.handleCommand now cmd st).1.state) := by
   unfold handleCommand
-  dsimp only
-  have fragment : ∀ params unreliable,
-      EventsWf (phase p.state)
-        (if p.isConnected = true then
-          match p.handleFragment cmd.channelId cmd.reliableSequenceNumber params unreliable with
-          | (q, events, accepted) => (if accepted = true then q.ackCommand cmd st else q, events)
-        else (p.ackCommand cmd st, #[])).2.toList
-        (phase (if p.isConnected = true then
-          match p.handleFragment cmd.channelId cmd.reliableSequenceNumber params unreliable with
-          | (q, events, accepted) => (if accepted = true then q.ackCommand cmd st else q, events)
-        else (p.ackCommand cmd st, #[])).1.state) := by
-    intro params unreliable
-    split
-    · next hc =>
-      have hs := handleFragment_state p cmd.channelId cmd.reliableSequenceNumber params unreliable
-      have he := handleFragment_events p cmd.channelId cmd.reliableSequenceNumber params unreliable
-      generalize p.handleFragment cmd.channelId cmd.reliableSequenceNumber params unreliable = r at hs he ⊢
-      obtain ⟨q, evs, acc⟩ := r
-      dsimp only at hs he ⊢
-      refine wf_of_state_receives ?_ hc he
-      split <;> simp [ackCommand_state, hs]
-    · rw [ackCommand_state]; exact .nil
+  have h := applyCommand_wf p now cmd
+  generalize p.applyCommand now cmd = r at h ⊢
+  obtain ⟨q, es, acc⟩ := r
+  dsimp only at h ⊢
   split
-  · exact fragment _ _
-  · exact fragment _ _
-  · have hp : phase p.state = phase (p.ackCommand cmd st).state := by rw [ackCommand_state]
-    rw [hp]
-    split
-    all_goals first
-      | exact handleAcknowledge_wf _ _ _ _ _
-      | exact handleDisconnect_wf _ _
-      | exact handleVerifyConnect_wf _ _
-      | exact .nil
-      | (split
-         · next hc => exact wf_of_state_receives (handleData_state _ _) hc (handleData_events _ _)
-         · exact .nil)
+  · exact h
+  · split
+    · exact h
+    · split
+      · exact h
+      · split <;> exact h
 
 /-- A timeout reports a disconnect, except for a server handshake the
 application never saw. -/

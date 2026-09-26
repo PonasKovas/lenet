@@ -228,6 +228,30 @@ compatibility"). Open, undecided differences are listed in TODO.md.
   so a server application got disconnect events for connections it never
   heard of. `Host.checkPeerTimeouts` and `Peer.handleDisconnect` now reset
   such a peer without an event.
+- **Refused commands (lenet bug - fixed).** ENet's handlers refuse some
+  commands (they return -1, `goto commandError` in
+  handle_incoming_commands): data, PING, BANDWIDTH_LIMIT and
+  THROTTLE_CONFIGURE for a peer that is not connected, data for a missing
+  channel, a CONNECT for an existing peer, an ACK for anything but the
+  VERIFY_CONNECT or DISCONNECT a handshake or disconnect waits for, a
+  VERIFY_CONNECT that does not answer the CONNECT, and a fragment that
+  does not fit its set. A refused command is not acknowledged, and ENet
+  drops the rest of its datagram. Otherwise ENet decides the ACK from the
+  peer's state after the command: none while disconnecting, still
+  handshaking as the server, or gone, and only the DISCONNECT while
+  acknowledging one. Lenet acknowledged every command up front, applied
+  BANDWIDTH_LIMIT and THROTTLE_CONFIGURE in any state, and always read the
+  whole datagram. So a disconnecting peer acknowledged data it threw away,
+  and a stray ACK ahead of the DISCONNECT's ACK in one datagram did not
+  delay the disconnect as it does in ENet. `Peer.applyCommand` now says
+  which commands ENet accepts, `Peer.handleCommand` queues the ACK after
+  it (`Peer.acksIn`), and `Host.readCommand` stops at a refused command.
+- **Remote DISCONNECT keeps the queues (lenet bug - fixed).** On a
+  DISCONNECT from the remote, ENet drops everything queued, in flight or
+  waiting for delivery (enet_peer_reset_queues) before it queues the ACK.
+  Lenet kept the queue, so packets queued before the DISCONNECT still went
+  out. `Peer.resetQueues` does what ENet does, for this and for the local
+  disconnect (which also left the channels' window counts behind).
 - **Reliable packets overtaking a held one (lenet bug - fixed).** ENet
   queues reliable data commands in their own list
   (`outgoingSendReliableCommands`), and once one of them is held back, by

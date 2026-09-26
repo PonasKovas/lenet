@@ -112,10 +112,11 @@ def unreliableCmd (ch : UInt8) (relSeq seq : UInt16) (data : ByteArray) : Protoc
 def unsequencedCmd (ch : UInt8) (group : UInt16) (data : ByteArray) : Protocol.Command :=
   { channelId := ch, reliableSequenceNumber := 0, unsequenced := true, body := .sendUnsequenced group data }
 
-/-- Feeds `cmds` to peer `p` in order, collecting the events. -/
+/-- Feeds `cmds` to peer `p` in order, each as if in a datagram of its own,
+collecting the events. -/
 def feed (p : Peer) (cmds : List Protocol.Command) : Peer × Array Event :=
   cmds.foldl (init := (p, #[])) fun (p, evs) cmd =>
-    let (p, e) := p.handleCommand 2000 cmd (some 0)
+    let (p, e, _) := p.handleCommand 2000 cmd (some 0)
     (p, evs ++ e)
 
 def serverPeer : Except String Peer := return (← connected).serverP
@@ -226,6 +227,24 @@ def send (p : Pair) (packet : Packet) (ch : UInt8 := 0) : Except String Pair := 
 
 def dropAll : Bool → Bool := fun _ => true
 
+/-- A datagram carrying `cmds`, header fields as a peer accepts them. -/
+def dgram (cmds : List Protocol.Command) : Protocol.Datagram :=
+  { header := { peerId := 0, session := 0, compressed := false, sentTime := some 0 }, commands := cmds.toArray }
+
+/-- An ACK of `(ch, seq)` echoing sent time `t`. -/
+def ackOf (ch : UInt8) (seq t : UInt16) : Protocol.Command :=
+  { channelId := ch, reliableSequenceNumber := seq, body := .acknowledge seq t }
+
+/-- A connected pair whose client has started a disconnect and sent its
+DISCONNECT (lost), with the DISCONNECT's sequence number. -/
+def disconnecting : Except String (Pair × UInt16) := do
+  let p ← connected
+  let p := { p with client := p.client.disconnect p.clientPeer }
+  let p := p.round dropAll
+  expect (p.clientP.state == .disconnecting) "client not disconnecting"
+  let some d := p.clientP.sentReliableCommands[0]? | throw "no DISCONNECT in flight"
+  return (p, d.command.reliableSequenceNumber)
+
 def hostTests : List Test := [
   { name := "send rejects a bad peer, a bad channel and an unconnected peer"
     run := fun _ => do
@@ -287,6 +306,39 @@ def hostTests : List Test := [
       -- (check_outgoing_commands: currentSendReliableCommand = end)
       expect (!cmds.any (·.body matches .sendReliable ..)) "a later reliable packet overtook the held one"
       expect (q.outgoingCommands.size == 2) "both packets not left queued" },
+  { name := "a command ENet refuses ends its datagram: a stray ACK hides the DISCONNECT's"
+    run := fun _ => do
+      let (p, seq) ← disconnecting
+      let t := p.now.toUInt16
+      -- an ACK for something the disconnect dropped, then the real one
+      let (q, evs) := Host.handlePeerDatagram p.clientP p.now serverAddr (dgram [ackOf 0 1 t, ackOf 0xFF seq t]) 0
+      expect evs.isEmpty "the DISCONNECT's ACK counted after a refused command"
+      expect (q.state == .disconnecting) "disconnect completed"
+      let (_, evs) := Host.handlePeerDatagram p.clientP p.now serverAddr (dgram [ackOf 0xFF seq t]) 0
+      expect (evs == #[.disconnect p.clientPeer 0]) "the ACK alone did not complete the disconnect" },
+  { name := "a disconnecting peer neither takes nor acknowledges data"
+    run := fun _ => do
+      let (p, _) ← disconnecting
+      let (q, evs, reading) := p.clientP.handleCommand p.now (reliableCmd 0 1 (bytes 10 1)) (some 0)
+      expect (evs.isEmpty && !reading) "data taken"
+      expect q.acknowledgements.isEmpty "data acknowledged" },
+  { name := "a remote DISCONNECT drops what is queued: only its ACK goes out"
+    run := fun _ => do
+      let p ← send (← connected) (pkt 100)
+      let (q, _, _) := p.clientP.handleCommand p.now
+        { channelId := 0xFF, reliableSequenceNumber := 5, acknowledge := true, body := .disconnect 3 } (some 0)
+      expect (q.state == .acknowledgingDisconnect) "not acknowledging the disconnect"
+      expect q.outgoingCommands.isEmpty "queued packet kept"
+      expect (q.acknowledgements.size == 1) s!"{q.acknowledgements.size} ACKs queued" },
+  { name := "a peer still handshaking refuses a BANDWIDTH_LIMIT"
+    run := fun _ => do
+      let .ok (client, _) := (Host.create clientAddr 1).connect serverAddr 2 | throw "connect failed"
+      let p := ({ client, server := Host.create serverAddr 1, now := 1000 } : Pair).round (fun c2s => !c2s)
+      let peer := p.server.peers[0]!
+      expect (peer.state == .acknowledgingConnect) "server peer not handshaking"
+      let (q, _, reading) := peer.handleCommand 1001
+        { channelId := 0xFF, reliableSequenceNumber := 2, acknowledge := true, body := .bandwidthLimit 1000 2000 } (some 0)
+      expect (!reading && q.incomingBandwidth == peer.incomingBandwidth) "BANDWIDTH_LIMIT taken" },
   { name := "a peer that never answers times out between the minimum and maximum"
     run := fun _ => do
       let p ← send (← connected) (pkt 100)
@@ -338,7 +390,7 @@ def hostTests : List Test := [
         | throw "connect failed"
       let p := ({ client, server := Host.create serverAddr 1, now := 1000 } : Pair).round (fun c2s => !c2s)
       let peer := p.server.peers[0]!
-      let (peer, evs) := peer.handleCommand 1001
+      let (peer, evs, _) := peer.handleCommand 1001
         { channelId := 0xFF, reliableSequenceNumber := 2, acknowledge := true, body := .disconnect 5 } (some 0)
       expect evs.isEmpty "reported a disconnect for a peer never reported connected"
       expect (peer.state == .disconnected) "slot not freed" },

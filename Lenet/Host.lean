@@ -305,6 +305,36 @@ def acceptsDatagram (p : Peer) (fromAddr : Address) (session : UInt8) : Bool :=
   !(p.state == .disconnected || p.state == .zombie || wrongAddress ||
     (negotiated && session != p.incomingSessionId))
 
+/-- One step of `handlePeerDatagram`'s command loop. The state is the peer,
+the events so far, whether to read on (ENet drops the rest of a datagram
+after a command it refuses, `Peer.handleCommand`), and whether a
+BANDWIDTH_LIMIT was applied (only a connected peer takes one). -/
+def readCommand (now : UInt32) (sentTime : Option UInt16) (st : Peer × Array Event × Bool × Bool)
+    (cmd : Protocol.Command) : Peer × Array Event × Bool × Bool :=
+  let (p, events, reading, bandwidthChanged) := st
+  if !reading then st
+  else
+    let bandwidthChanged := bandwidthChanged || (p.isConnected && cmd.body matches .bandwidthLimit ..)
+    let (p, newEvents, reading) := p.handleCommand now cmd sentTime
+    (p, events ++ newEvents, reading, bandwidthChanged)
+
+/-- Applies an accepted datagram's commands to its peer `p`, in order
+(`readCommand`), and returns the events they produce. `outgoingBandwidth`
+is the host's. -/
+def handlePeerDatagram (p : Peer) (now : UInt32) (fromAddr : Address) (datagram : Protocol.Datagram)
+    (outgoingBandwidth : UInt32) : Peer × Array Event :=
+  -- a peer connected to the broadcast address learns the real one
+  let p := { p with address := fromAddr }
+  let (p, events, _, bandwidthChanged) :=
+    datagram.commands.foldl (readCommand now datagram.header.sentTime) (p, #[], true, false)
+  -- ENet (handle_bandwidth_limit) also recomputes the receive window from the
+  -- peer's new incoming bandwidth, which needs the host's outgoing bandwidth:
+  -- done here, after the command loop (the last BANDWIDTH_LIMIT wins either way)
+  let p :=
+    if bandwidthChanged then { p with windowSize := windowSizeFor outgoingBandwidth p.incomingBandwidth }
+    else p
+  (p, events)
+
 /-- Processes one received UDP datagram from `fromAddr`: CONNECTs to the
 broadcast peer ID open a connection, everything else goes to its peer.
 Returns the updated host and the application events produced; undecodable
@@ -332,22 +362,8 @@ def handleDatagram (h : Host) (now : UInt32) (fromAddr : Address) (bytes : ByteA
           (h, #[])
         else
           let outgoingBandwidth := h.outgoingBandwidth
-          let (h, events) := h.withPeer peerId.toNat #[] fun p =>
-            -- a peer connected to the broadcast address learns the real one
-            let p := { p with address := fromAddr }
-            let (p, events) := datagram.commands.foldl (init := (p, #[])) fun (p, events) cmd =>
-              let (p, newEvents) := p.handleCommand now cmd datagram.header.sentTime
-              (p, events ++ newEvents)
-            -- ENet (handle_bandwidth_limit) also recomputes the receive window
-            -- from the peer's new incoming bandwidth, which needs the host's
-            -- outgoing bandwidth: done here, after the command fold (the last
-            -- BANDWIDTH_LIMIT wins either way)
-            let bandwidthChanged := datagram.commands.any fun c =>
-              match c.body with | .bandwidthLimit .. => true | _ => false
-            let p :=
-              if bandwidthChanged then { p with windowSize := windowSizeFor outgoingBandwidth p.incomingBandwidth }
-              else p
-            (p, events)
+          let (h, events) := h.withPeer peerId.toNat #[]
+            (handlePeerDatagram · now fromAddr datagram outgoingBandwidth)
           -- connects and disconnects trigger a bandwidth recalculation (ENet)
           let connectionChanged := events.any fun
             | .receive .. => false

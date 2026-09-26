@@ -224,6 +224,7 @@ theorem handleFragment_cap_preserved (p : Peer) (channelId : UInt8) (reliableSeq
     split
     · exact Nat.le_trans (receiveOnChannel_fragmentAssemblers_size _ _ _) (hdel _)
     · exact hdel _
+    · exact hdel _
   · rw [if_pos (by simp [hg] : ((!fragmentGateOk p channelId reliableSeq params unreliable) = true))]
     exact hcap
 
@@ -569,6 +570,7 @@ theorem handleFragment_peerStagedInv {p : Peer} (h : PeerStagedInv p) (channelId
       · exact receiveUnreliable_stagedReliableInv hc _ _ _
       · exact receiveReliableAndRelease_stagedReliableInv hc _ _ _
     · exact peerStagedInv_of_channels rfl h
+    · exact peerStagedInv_of_channels rfl h
 
 theorem removeSentReliableCommand_peerStagedInv {p : Peer} (h : PeerStagedInv p) (channelId : UInt8)
     (seq : UInt16) : PeerStagedInv (p.removeSentReliableCommand channelId seq).1 := by
@@ -833,6 +835,7 @@ theorem handleFragment_ok {p : Peer} (h : ∀ a ∈ p.fragmentAssemblers, Assemb
           exact addFragment_ok (hasm asm hopt) hr)
     split
     · exact receiveOnChannel_ok hdel _ _
+    · exact hdel
     · exact hdel
 
 /-- The fragment path keeps the peer's assemblers within the cap and well

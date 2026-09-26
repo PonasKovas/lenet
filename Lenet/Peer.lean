@@ -122,9 +122,20 @@ def queueControlCommand (p : Peer) (body : Protocol.CommandBody) : Peer :=
   { p with outgoingControlSeq := seq }.queueOutgoingCommand
     { command := { channelId := 0xFF, reliableSequenceNumber := seq, acknowledge := true, body } }
 
+/-- ENet enet_peer_reset_queues: drops everything queued, in flight or
+waiting for delivery, and the channels with it (ENet frees them). -/
+def resetQueues (p : Peer) : Peer :=
+  { p with
+    outgoingCommands      := #[]
+    sentReliableCommands  := #[]
+    acknowledgements      := #[]
+    reliableDataInTransit := 0
+    channels              := #[]
+    fragmentAssemblers    := #[] }
+
 /-- Starts a disconnect (ENet enet_peer_disconnect). Nothing happens when
 one is already under way or the slot is free. Otherwise everything queued
-or in flight is dropped (ENet enet_peer_reset_queues) and DISCONNECT is
+or in flight is dropped (`resetQueues`) and DISCONNECT is
 queued: a connected peer sends it reliably and waits for its ACK in
 `disconnecting`; a peer still handshaking sends it once, unacknowledged,
 and is then reset without an event (ENet flushes and resets at once; here
@@ -133,11 +144,7 @@ def queueDisconnect (p : Peer) (data : UInt32) : Peer :=
   match p.state with
   | .disconnecting | .disconnected | .acknowledgingDisconnect | .zombie => p
   | state =>
-    let p : Peer := { p with
-      outgoingCommands      := #[]
-      sentReliableCommands  := #[]
-      acknowledgements      := #[]
-      reliableDataInTransit := 0 }
+    let p := p.resetQueues
     if state == .connected || state == .disconnectLater then
       { p with state := .disconnecting }.queueControlCommand (.disconnect data)
     else
@@ -456,10 +463,9 @@ set. When the fragment completes the packet, the assembler is consumed and
 the packet goes through the channel's receive path; a reliable set occupies
 `fragmentCount` sequence numbers (ENet advances the dispatch frontier by the
 whole span). The flag is false when the fragment passed the gate but found
-no assembler (no room, or invalid parameters, which ENet validates
-identically): such a reliable fragment must not be acknowledged, so the
-sender retransmits it (ENet skips the acknowledgement of a command it
-failed to handle). -/
+no assembler (no room, or invalid parameters) or does not fit it, which
+ENet validates identically: ENet refuses such a command (`applyCommand`),
+so it is not acknowledged and the sender retransmits it. -/
 def handleFragment (p : Peer) (channelId : UInt8) (reliableSeq : UInt16)
     (params : Protocol.FragmentParams) (unreliable : Bool) : Peer × Array Event × Bool :=
   if !fragmentGateOk p channelId reliableSeq params unreliable then
@@ -481,6 +487,7 @@ def handleFragment (p : Peer) (channelId : UInt8) (reliableSeq : UInt16)
         else
           ch.receiveReliableAndRelease params.startSequenceNumber params.fragmentCount.toNat (.reliable data)
       (p, events, true)
+    | some (.error _) => (p, #[], false)
     | _ => (p, #[], assembler?.isSome)
 
 /-- Handles an unfragmented data command (send reliable/unreliable/
@@ -502,51 +509,57 @@ def handleData (p : Peer) (cmd : Protocol.Command) : Peer × Array Event :=
   | _ => (p, #[])
 
 /-- Handles an ACK (ENet handle_acknowledge): updates the RTT, retires the
-acknowledged command, and completes a pending handshake or disconnect. -/
+acknowledged command, and completes a pending handshake or disconnect. The
+flag is false where ENet refuses the ACK: one for anything but the
+VERIFY_CONNECT while the handshake waits for it, or for anything but the
+DISCONNECT while disconnecting (the RTT update and the removal stand). -/
 def handleAcknowledge (p : Peer) (now : UInt32) (channelId : UInt8) (seq sentTime : UInt16) :
-    Peer × Array Event :=
+    Peer × Array Event × Bool :=
   -- the echoed sent time is the low 16 bits of our clock
   let sent := Time.fromWire now sentTime
   if Time.less now sent then
-    (p, #[]) -- acknowledges a send from the future: ignored (ENet)
+    (p, #[], true) -- acknowledges a send from the future: ignored (ENet)
   else
     let (p, acked?) := (p.updateRtt now (Time.difference now sent)).removeSentReliableCommand channelId seq
     let ackedNumber := acked?.map (·.body.commandNumber)
     match p.state with
     | .acknowledgingConnect =>
       if ackedNumber == some Constants.commandVerifyConnect then
-        ({ p with state := .connected }, #[.connect p.peerId p.eventData])
-      else (p, #[])
+        ({ p with state := .connected }, #[.connect p.peerId p.eventData], true)
+      else (p, #[], false)
     | .disconnecting =>
       if ackedNumber == some Constants.commandDisconnect then
         -- ENet's notify_disconnect: event (data = 0) + reset, so the slot is
         -- immediately reusable
-        (p.reset, #[.disconnect p.peerId 0])
-      else (p, #[])
+        (p.reset, #[.disconnect p.peerId 0], true)
+      else (p, #[], false)
     | .disconnectLater =>
       -- once everything is acknowledged, the deferred DISCONNECT goes out
       if p.outgoingCommands.isEmpty ∧ p.sentReliableCommands.isEmpty then
-        (p.queueDisconnect p.eventData, #[])
-      else (p, #[])
-    | _ => (p, #[])
+        (p.queueDisconnect p.eventData, #[], true)
+      else (p, #[], true)
+    | _ => (p, #[], true)
 
-/-- Handles a DISCONNECT (ENet handle_disconnect). A connected peer
-acknowledges it and resets once that ACK is out (`Host.pollPeer`). A server
+/-- Handles a DISCONNECT (ENet handle_disconnect). A connected peer drops
+everything queued or in flight (`resetQueues`), acknowledges the
+DISCONNECT and resets once that ACK is out (`Host.pollPeer`). A server
 peer still handshaking resets without an event: the application never saw
 it connect. A client still connecting, or a peer disconnecting itself,
 resets and reports the disconnect. -/
 def handleDisconnect (p : Peer) (data : UInt32) : Peer × Array Event :=
   match p.state with
   | .disconnected | .zombie | .acknowledgingDisconnect => (p, #[])
-  | .connected | .disconnectLater => ({ p with state := .acknowledgingDisconnect, eventData := data }, #[])
+  | .connected | .disconnectLater =>
+    ({ p.resetQueues with state := .acknowledgingDisconnect, eventData := data }, #[])
   | .acknowledgingConnect => (p.reset, #[])
   | _ => (p.reset, #[.disconnect p.peerId data])
 
 /-- Handles the server's VERIFY_CONNECT, completing the client's handshake
-(ENet handle_verify_connect). -/
-def handleVerifyConnect (p : Peer) (params : Protocol.ConnectParams) : Peer × Array Event :=
+(ENet handle_verify_connect). The flag is false for a VERIFY_CONNECT that
+does not answer our CONNECT, which ENet refuses. -/
+def handleVerifyConnect (p : Peer) (params : Protocol.ConnectParams) : Peer × Array Event × Bool :=
   if p.state != .connecting then
-    (p, #[])
+    (p, #[], true)
   else if params.channelCount.toNat < Constants.minimumChannelCount ∨
       params.channelCount.toNat > Constants.maximumChannelCount ∨
       params.packetThrottleInterval != p.packetThrottleInterval ∨
@@ -554,7 +567,7 @@ def handleVerifyConnect (p : Peer) (params : Protocol.ConnectParams) : Peer × A
       params.packetThrottleDeceleration != p.packetThrottleDeceleration ∨
       params.connectId != p.connectId then
     -- not an answer to our CONNECT: ENet dispatches ZOMBIE (event + reset)
-    (p.reset, #[.disconnect p.peerId 0])
+    (p.reset, #[.disconnect p.peerId 0], false)
   else
     -- the VERIFY_CONNECT stands in for the ACK of our CONNECT
     let (p, _) := p.removeSentReliableCommand 0xFF 1
@@ -573,51 +586,76 @@ def handleVerifyConnect (p : Peer) (params : Protocol.ConnectParams) : Peer × A
       incomingBandwidth := params.incomingBandwidth
       outgoingBandwidth := params.outgoingBandwidth
       state             := .connected }
-    (p, #[.connect p.peerId p.eventData])
+    (p, #[.connect p.peerId p.eventData], true)
 
-/-- Queues the ACK `cmd` asks for, echoing the datagram's `sentTime`. -/
-def ackCommand (p : Peer) (cmd : Protocol.Command) (sentTime : Option UInt16) : Peer :=
-  match cmd.acknowledge, sentTime with
-  | true, some sentTime =>
-    p.queueAck { channelId := cmd.channelId, reliableSequenceNumber := cmd.reliableSequenceNumber, sentTime }
-  | _, _ => p
-
-/-- Processes one incoming command from this peer: queues the ACK it asks
-for, then applies it. Returns the updated peer and the events produced. A
-reliable fragment that found no assembler is not acknowledged
-(`handleFragment`). -/
-def handleCommand (p : Peer) (now : UInt32) (cmd : Protocol.Command) (sentTime : Option UInt16) :
-    Peer × Array Event :=
-  let ack (p : Peer) : Peer := p.ackCommand cmd sentTime
-  let fragment (params : Protocol.FragmentParams) (unreliable : Bool) : Peer × Array Event :=
-    if p.isConnected then
-      let (p, events, accepted) := p.handleFragment cmd.channelId cmd.reliableSequenceNumber params unreliable
-      (if accepted then ack p else p, events)
-    else (ack p, #[])
+/-- ENet's handler for one incoming command (protocol.c
+handle_incoming_commands and the handle_* functions): the updated peer, the
+events, and whether ENet accepts the command. A refused command is not
+acknowledged and ENet reads no further in its datagram. Data, PING,
+BANDWIDTH_LIMIT and THROTTLE_CONFIGURE need a connected peer, data also an
+existing channel; a CONNECT for an existing peer is refused. -/
+def applyCommand (p : Peer) (now : UInt32) (cmd : Protocol.Command) : Peer × Array Event × Bool :=
+  let takesData := p.isConnected && cmd.channelId.toNat < p.channels.size
   match cmd.body with
-  | .sendFragment params => fragment params (unreliable := false)
-  | .sendUnreliableFragment params => fragment params (unreliable := true)
-  | body =>
-    let p := ack p
-    match body with
-    | .acknowledge seq sentTime => p.handleAcknowledge now cmd.channelId seq sentTime
-    | .disconnect data => p.handleDisconnect data
-    | .verifyConnect params => p.handleVerifyConnect params
-    | .bandwidthLimit inBw outBw =>
-      -- ENet also recomputes the window size here, which needs the host's
-      -- outgoing bandwidth: `Host.handleDatagram` does that
-      ({ p with incomingBandwidth := inBw, outgoingBandwidth := outBw }, #[])
-    | .throttleConfigure interval accel decel =>
+  | .acknowledge seq sentTime => p.handleAcknowledge now cmd.channelId seq sentTime
+  | .connect .. => (p, #[], false)
+  | .verifyConnect params => p.handleVerifyConnect params
+  | .disconnect data =>
+    let (p, events) := p.handleDisconnect data
+    (p, events, true)
+  | .ping => (p, #[], p.isConnected)
+  | .bandwidthLimit inBw outBw =>
+    -- ENet also recomputes the window size here, which needs the host's
+    -- outgoing bandwidth: `Host.handlePeerDatagram` does that
+    if p.isConnected then ({ p with incomingBandwidth := inBw, outgoingBandwidth := outBw }, #[], true)
+    else (p, #[], false)
+  | .throttleConfigure interval accel decel =>
+    if p.isConnected then
       ({ p with
         packetThrottleInterval     := interval
         packetThrottleAcceleration := accel
-        packetThrottleDeceleration := decel }, #[])
-    | .ping => (p, #[])
-    -- a CONNECT for an existing peer is ignored (ENet same)
-    | .connect .. => (p, #[])
-    | .sendReliable .. | .sendUnreliable .. | .sendUnsequenced .. =>
-      if p.isConnected then p.handleData cmd else (p, #[])
-    | .sendFragment .. | .sendUnreliableFragment .. => (p, #[])
+        packetThrottleDeceleration := decel }, #[], true)
+    else (p, #[], false)
+  | .sendReliable .. | .sendUnreliable .. | .sendUnsequenced .. =>
+    if takesData then
+      let (p, events) := p.handleData cmd
+      (p, events, true)
+    else (p, #[], false)
+  | .sendFragment params =>
+    if takesData then p.handleFragment cmd.channelId cmd.reliableSequenceNumber params false
+    else (p, #[], false)
+  | .sendUnreliableFragment params =>
+    if takesData then p.handleFragment cmd.channelId cmd.reliableSequenceNumber params true
+    else (p, #[], false)
+
+/-- Whether ENet acknowledges `cmd` for a peer that is in state `s` after
+handling it (handle_incoming_commands): not while disconnecting, still
+handshaking as the server, or gone, and only the DISCONNECT itself while
+acknowledging one. -/
+def acksIn (s : PeerState) (cmd : Protocol.Command) : Bool :=
+  match s with
+  | .disconnecting | .acknowledgingConnect | .disconnected | .zombie => false
+  | .acknowledgingDisconnect => (cmd.body matches .disconnect _)
+  | _ => true
+
+/-- Processes one incoming command from this peer (`applyCommand`), then
+queues the ACK it asks for when ENet would, echoing the datagram's
+`sentTime`. The flag says whether to read on in the datagram: not after a
+refused command, nor after one asking for an ACK in a datagram without a
+sent time (ENet same). -/
+def handleCommand (p : Peer) (now : UInt32) (cmd : Protocol.Command) (sentTime : Option UInt16) :
+    Peer × Array Event × Bool :=
+  let (p, events, accepted) := p.applyCommand now cmd
+  if !accepted then (p, events, false)
+  else if !cmd.acknowledge then (p, events, true)
+  else
+    match sentTime with
+    | none => (p, events, false)
+    | some sentTime =>
+      let p := if acksIn p.state cmd then
+        p.queueAck { channelId := cmd.channelId, reliableSequenceNumber := cmd.reliableSequenceNumber, sentTime }
+      else p
+      (p, events, true)
 
 end Peer
 
