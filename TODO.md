@@ -83,11 +83,11 @@ alive for an error branch, gets copied on its next change. To find such a
 copy, wrap the value in `dbgTraceIfShared "tag" x` for a moment and count
 the messages a bench run prints. Known costs left:
 
-- `Peer.enqueue` and `Peer.receiveOnChannel` read the channel out of
-  `Peer.channels` while the array still holds it, so each send and each
-  receive copies the channel record (and its window vector on the next
-  acquire). `Array.modifyM` in `StateM` fixes it (as `Host.withPeer`
-  does); the Resources proofs over both functions need redoing with it.
+- Tried and dropped: `Peer.enqueue` and `Peer.receiveOnChannel` copy the
+  channel record on each send and receive, and `Host.withPeer` copies the
+  peer record (see its comment). Removing those copies with an out-of-line
+  swap made the bench 1-4% slower, not faster. `Array.modifyM` does not
+  help: the compiler moves its slot-emptying step after the call.
 - Fragmented sends copy each fragment out of the packet (`extract`).
 - `Datagram.parseCommands` copies the rest of the datagram after every
   command, but that is 0.3% of the profile: not worth a cursor rewrite.

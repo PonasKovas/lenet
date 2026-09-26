@@ -98,9 +98,15 @@ copies the peer and its arrays. -/
 @[inline] def takePeers (h : Host) : Host × Array Peer :=
   ({ h with peers := #[] }, h.peers)
 
-/-- Runs `f` on peer slot `i` holding the only reference to the peer
-(`Array.modifyM` empties the slot meanwhile), so its arrays update in place.
-Returns `dflt` when there is no such slot. -/
+/-- Runs `f` on peer slot `i` and puts the result back. Returns `dflt` when
+there is no such slot.
+
+`Array.modifyM` is meant to empty the slot while `f` runs, but once it is
+specialized to `StateM` the compiler moves that step after the call, so
+`f` still gets a shared peer and its first change copies the record. Taking
+the peer out by hand (an out-of-line swap) removes the copy, yet measured
+no faster on the bench (2026-09-26): copying one record is cheap next to
+the rest of a datagram. `mapPeers` has no such problem. -/
 @[inline] def withPeer (h : Host) (i : Nat) (dflt : α) (f : Peer → Peer × α) : Host × α :=
   let (h, peers) := h.takePeers
   let (peers, a) := (peers.modifyM (m := StateM α) i fun p => do
