@@ -62,9 +62,6 @@ Worth adding there as they come up:
 - **Sender-side window span.** The in-flight reliable commands of a channel
   span fewer than seven windows (see the handoff note: the stronger "always
   in the receiver's window" is false, for ENet too).
-- **Array-level assembler invariant.** Every assembler in
-  `Peer.fragmentAssemblers` satisfies `Proofs.Reassembly.Inv`; the
-  per-assembler lemmas exist, the lift over the array does not.
 - **Event-level properties.** For example "a connection produces exactly
   one connect and at most one disconnect event", stated over
   `handleDatagram`/`service` traces.
