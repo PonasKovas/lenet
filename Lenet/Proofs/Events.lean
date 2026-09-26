@@ -216,9 +216,15 @@ theorem wf_of_state_receives {p q : Peer} {es : Array Event} (hs : q.state = p.s
   rw [hs, isConnected_up hup]
   exact .receives fun e h => he e (Array.mem_toList_iff.mp h)
 
-theorem takesData_connected {p : Peer} {c : Nat} (h : (p.isConnected && decide (c < p.channels.size)) = true) :
-    p.isConnected = true := by
-  simp only [Bool.and_eq_true] at h; exact h.1
+/-- The data branches of `applyCommand` run only for a connected peer. -/
+theorem connected_of_takesData {p : Peer} {c : Nat} {x : Bool}
+    (h : ¬((!(p.isConnected && decide (c < p.channels.size)) || x) = true)) : p.isConnected = true := by
+  simp only [Bool.or_eq_true, Bool.not_eq_true', Bool.and_eq_false_iff, not_or] at h
+  cases hc : p.isConnected <;> simp_all
+
+theorem connected_of_takesData' {p : Peer} {c : Nat}
+    (h : ¬((!(p.isConnected && decide (c < p.channels.size))) = true)) : p.isConnected = true :=
+  connected_of_takesData (x := false) (by simpa using h)
 
 /-- ENet's handler for any one command keeps the events well formed. -/
 theorem applyCommand_wf (p : Peer) (now cmd) :
@@ -226,19 +232,33 @@ theorem applyCommand_wf (p : Peer) (now cmd) :
   unfold applyCommand
   dsimp only
   split
+  · exact handleAcknowledge_wf _ _ _ _ _
+  · exact .nil
+  · exact handleVerifyConnect_wf _ _
+  · exact handleDisconnect_wf _ _
+  · exact .nil
+  · split <;> exact .nil
+  · split <;> exact .nil
+  -- reliable and unreliable data
   all_goals first
-    | exact handleAcknowledge_wf _ _ _ _ _
-    | exact handleVerifyConnect_wf _ _
-    | exact handleDisconnect_wf _ _
-    | exact .nil
     | (split
-       · next hc =>
-         first
-           | exact wf_of_state_receives (handleData_state _ _) (takesData_connected hc) (handleData_events _ _)
-           | exact wf_of_state_receives (handleFragment_state _ _ _ _ _) (takesData_connected hc)
-               (handleFragment_events _ _ _ _ _)
-           | exact .nil
-       · exact .nil)
+       · exact .nil
+       · next h =>
+         split
+         · exact .nil
+         · exact wf_of_state_receives (handleData_state _ _) (connected_of_takesData' h) (handleData_events _ _))
+    | (split
+       · exact .nil
+       · next h =>
+         refine wf_of_state_receives (handleData_state _ _) (connected_of_takesData' h) ?_
+         split
+         · intro e he; simp at he
+         · exact handleData_events _ _)
+    | (split
+       · exact .nil
+       · next h =>
+         exact wf_of_state_receives (handleFragment_state _ _ _ _ _) (connected_of_takesData h)
+           (handleFragment_events _ _ _ _ _))
 
 /-- **Every incoming command keeps its peer's events well formed.** -/
 theorem handleCommand_wf (p : Peer) (now cmd st) :

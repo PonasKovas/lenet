@@ -601,9 +601,20 @@ handle_incoming_commands and the handle_* functions): the updated peer, the
 events, and whether ENet accepts the command. A refused command is not
 acknowledged and ENet reads no further in its datagram. Data, PING,
 BANDWIDTH_LIMIT and THROTTLE_CONFIGURE need a connected peer, data also an
-existing channel; a CONNECT for an existing peer is refused. -/
+existing channel; a CONNECT for an existing peer is refused.
+
+A peer in `disconnectLater` accepts data but delivers none of it (ENet
+enet_peer_queue_incoming_command discards it): an unsequenced packet still
+marks its group, a fragment of a set already under way still completes it,
+and a fragment that would start a new set is refused. -/
 def applyCommand (p : Peer) (now : UInt32) (cmd : Protocol.Command) : Peer × Array Event × Bool :=
   let takesData := p.isConnected && cmd.channelId.toNat < p.channels.size
+  let draining := p.state == .disconnectLater
+  -- whether a fragment would start a set while draining
+  let startsSet (params : Protocol.FragmentParams) (unreliable : Bool) : Bool :=
+    let origin := fragmentOrigin cmd.channelId cmd.reliableSequenceNumber unreliable
+    draining && p.fragmentGateOk cmd.channelId cmd.reliableSequenceNumber params unreliable &&
+      !p.fragmentAssemblers.any fun a => a.origin == origin && a.startSequenceNumber == params.startSequenceNumber
   match cmd.body with
   | .acknowledge seq sentTime => p.handleAcknowledge now cmd.channelId seq sentTime
   | .connect .. => (p, #[], false)
@@ -624,17 +635,23 @@ def applyCommand (p : Peer) (now : UInt32) (cmd : Protocol.Command) : Peer × Ar
         packetThrottleAcceleration := accel
         packetThrottleDeceleration := decel }, #[], true)
     else (p, #[], false)
-  | .sendReliable .. | .sendUnreliable .. | .sendUnsequenced .. =>
-    if takesData then
+  | .sendReliable .. | .sendUnreliable .. =>
+    if !takesData then (p, #[], false)
+    else if draining then (p, #[], true)
+    else
       let (p, events) := p.handleData cmd
       (p, events, true)
-    else (p, #[], false)
+  | .sendUnsequenced .. =>
+    if !takesData then (p, #[], false)
+    else
+      let (p, events) := p.handleData cmd
+      (p, if draining then #[] else events, true)
   | .sendFragment params =>
-    if takesData then p.handleFragment cmd.channelId cmd.reliableSequenceNumber params false
-    else (p, #[], false)
+    if !takesData || startsSet params false then (p, #[], false)
+    else p.handleFragment cmd.channelId cmd.reliableSequenceNumber params false
   | .sendUnreliableFragment params =>
-    if takesData then p.handleFragment cmd.channelId cmd.reliableSequenceNumber params true
-    else (p, #[], false)
+    if !takesData || startsSet params true then (p, #[], false)
+    else p.handleFragment cmd.channelId cmd.reliableSequenceNumber params true
 
 /-- Whether ENet acknowledges `cmd` for a peer that is in state `s` after
 handling it (handle_incoming_commands): not while disconnecting, still

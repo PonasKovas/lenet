@@ -121,33 +121,25 @@ theorem handleVerifyConnect_named (p : Peer) (pr) : ∀ e ∈ (p.handleVerifyCon
 theorem applyCommand_peerId (p : Peer) (now cmd) : (p.applyCommand now cmd).1.peerId = p.peerId := by
   unfold applyCommand; dsimp only
   split
-  all_goals first
+  all_goals (repeat' split) <;> first
     | exact handleAcknowledge_peerId _ _ _ _ _
     | exact handleDisconnect_peerId _ _
     | exact handleVerifyConnect_peerId _ _
+    | exact handleData_peerId _ _
+    | exact handleFragment_peerId _ _ _ _ _
     | rfl
-    | (split
-       · first
-           | exact handleData_peerId _ _
-           | exact handleFragment_peerId _ _ _ _ _
-           | rfl
-       · rfl)
 
 theorem applyCommand_named (p : Peer) (now cmd) :
     ∀ e ∈ (p.applyCommand now cmd).2.1, eventPeer e = p.peerId := by
   unfold applyCommand; dsimp only
   split
-  all_goals first
+  all_goals (repeat' split) <;> first
     | exact handleAcknowledge_named _ _ _ _ _
     | exact handleDisconnect_named _ _
     | exact handleVerifyConnect_named _ _
+    | exact handleData_named _ _
+    | exact handleFragment_named _ _ _ _ _
     | (intro e he; simp at he; done)
-    | (split
-       · first
-           | exact handleData_named _ _
-           | exact handleFragment_named _ _ _ _ _
-           | (intro e he; simp at he; done)
-       · intro e he; simp at he)
 
 theorem handleCommand_peerId (p : Peer) (now cmd st) : (p.handleCommand now cmd st).1.peerId = p.peerId ∧
     ∀ e ∈ (p.handleCommand now cmd st).2.1, eventPeer e = p.peerId := by

@@ -399,6 +399,29 @@ def hostTests : List Test := [
       expect (p.serverEvents.any (· matches .disconnect ..)) "server saw no disconnect"
       -- ENet dispatches the ZOMBIE peer, which sets recalculateBandwidthLimits
       expect p.server.recalculateBandwidthLimits "no recalculation after the disconnect" },
+  { name := "a peer waiting to disconnect later takes data but delivers none"
+    run := fun _ => do
+      let p ← send (← connected) (pkt 100)
+      let p := { p with client := p.client.disconnectLater p.clientPeer }
+      let peer := p.clientP
+      expect (peer.state == .disconnectLater) "not waiting"
+      -- ENet enet_peer_queue_incoming_command discards data in this state:
+      -- acknowledged, never delivered
+      let (q, evs, reading) := peer.handleCommand p.now (reliableCmd 0 1 (bytes 10 1)) (some 0)
+      expect (evs.isEmpty && reading) "reliable packet delivered or refused"
+      expect (q.acknowledgements.size == peer.acknowledgements.size + 1) "reliable packet not acknowledged"
+      expect (q.channels[0]!.incomingReliableSequenceNumber == 0) "frontier moved"
+      let (_, evs, _) := peer.handleCommand p.now (unsequencedCmd 0 1 (bytes 10 2)) (some 0)
+      expect evs.isEmpty "unsequenced packet delivered"
+      -- a fragment that would start a set is refused (discarded with a
+      -- fragment count: notifyError)
+      let (q, evs, reading) := peer.handleCommand p.now (relFrag 0 1 5 2 0) (some 0)
+      expect (evs.isEmpty && !reading) "new fragment set taken"
+      expect (q.acknowledgements.size == peer.acknowledgements.size) "new fragment set acknowledged"
+      -- a set already under way still completes
+      let started := { (feed { peer with state := .connected } [relFrag 0 1 5 2 0]).1 with state := .disconnectLater }
+      let (_, evs, _) := started.handleCommand p.now (relFrag 0 1 5 2 1) (some 0)
+      expect (evs.size == 1) "a set under way did not complete" },
   { name := "a peer that never answers times out between the minimum and maximum"
     run := fun _ => do
       let p ← send (← connected) (pkt 100)

@@ -228,6 +228,13 @@ compatibility"). Open, undecided differences are listed in TODO.md.
   so a server application got disconnect events for connections it never
   heard of. `Host.checkPeerTimeouts` and `Peer.handleDisconnect` now reset
   such a peer without an event.
+- **Data while disconnecting later (lenet bug - fixed).** ENet's
+  enet_peer_queue_incoming_command discards everything for a peer in
+  DISCONNECT_LATER: data is acknowledged but never delivered, an
+  unsequenced packet still marks its group, and a fragment that would start
+  a set is refused (discarded with a fragment count: notifyError), while a
+  set already under way still completes. Lenet delivered it all.
+  `Peer.applyCommand` now drains as ENet does.
 - **Disconnects during service skip the bandwidth recalculation (lenet
   bug - fixed).** ENet sets `recalculateBandwidthLimits` for every
   disconnect it reports but a timeout of a client still connecting
