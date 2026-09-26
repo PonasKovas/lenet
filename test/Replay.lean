@@ -306,11 +306,11 @@ structure ReplayState where
   now : UInt32 := 0
   /-- Parse checksummed datagrams (checksum scenarios). -/
   decodeChecksummed : Bool := false
-  /-- The recorded client connectID. Lenet generates its own connectID from
-  its PRNG, but the checksum key on every datagram after the handshake is the
-  connectID the *recorded* client used, so the replay pins it to the trace
-  value right after connecting (mirrors what really happened). -/
-  connectIdOverride : Option UInt32 := none
+  /-- The connectIDs the recorded client used, one per connect, in order.
+  Lenet draws its own connectIDs, but the server echoes (and checksums with)
+  the *recorded* ones, so the replay pins each connection to its recorded
+  value right after connecting. -/
+  recordedConnectIds : List UInt32 := []
   /-- Address this role's client connects through (proxy or proxy2). -/
   connectAddr : Address := proxyAddr
 
@@ -383,8 +383,10 @@ private def applyApi (st : ReplayState) (ms : UInt32) : ApiCall → ReplayState
   | .connect channels data =>
     match st.host.connect st.connectAddr channels data with
     | .ok (h, pid) =>
-      -- Pin the peer's connectID to the recorded value (checksum key parity).
-      let h := match st.connectIdOverride with
+      -- Pin the peer's connectID to the recorded value.
+      let cid? := st.recordedConnectIds.head?
+      let st := { st with recordedConnectIds := st.recordedConnectIds.drop 1 }
+      let h := match cid? with
         | some cid =>
           let idx := pid.toNat
           if hIdx : idx < h.peers.size then
@@ -459,23 +461,21 @@ def initialHost (scenario : String) (role : Role) : Host :=
     | .server => Host.create serverAddr 16 chl inBw outBw 0x12345678 mtu
   { h with checksumEnabled := scenarioChecksum scenario }
 
-/-- The connectID the recorded client used, taken from its CONNECT datagram
-in the trace (needed as the checksum key on checksum scenarios). -/
-def traceConnectId (hasChecksum : Bool) (role : Role) (lines : Array Line) : Option UInt32 :=
-  let dir := role.connectDir
-  let connectIdOf := lines.filterMap fun
+/-- The connectIDs the recorded client used, in connect order, taken from
+its CONNECT datagrams in the trace (a retransmitted CONNECT repeats its
+predecessor's ID and is skipped). -/
+def traceConnectIds (hasChecksum : Bool) (role : Role) (lines : Array Line) : List UInt32 :=
+  let ids := lines.toList.filterMap fun
     | .dat _ d bytes =>
-      if d == dir then
+      if d == role.connectDir then
         match decodeDatagram hasChecksum bytes with
-        | .ok cmds => cmds.find? fun c => match c.body with | .connect _ _ => true | _ => false
+        | .ok cmds => cmds.findSome? fun c => match c.body with
+          | .connect params _ => some params.connectId
+          | _ => none
         | .error _ => none
       else none
     | _ => none
-  match connectIdOf[0]? with
-  | some cmd => match cmd.body with
-    | .connect params _ => some params.connectId
-    | _ => none
-  | none => none
+  ids.eraseReps
 
 /-- Tail service: the recording ran until the `T` end marker, but the replay
 only handles trace-line timestamps. Pending timers between the last line and
@@ -497,7 +497,7 @@ def replayRole (scenario : String) (role : Role) (lines : Array Line) : ReplayRe
   let st0 := lines.foldl (step role) {
     host := initialHost scenario role
     decodeChecksummed := hasChecksum
-    connectIdOverride := if role == .server then none else traceConnectId hasChecksum role lines
+    recordedConnectIds := if role == .server then [] else traceConnectIds hasChecksum role lines
     connectAddr := (roleAddrs role).1
   }
   -- Flush pending timers between the last trace line and the recording end.
