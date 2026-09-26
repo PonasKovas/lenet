@@ -10,12 +10,9 @@ roughly in priority order.
 
 Several bugs fixed recently were invisible to the corpus: RTT samples broke
 after 65 s of uptime, retransmissions leaked in-transit bytes, the sender's
-reliable windows were never occupied. They share causes worth fixing:
+reliable windows were never occupied. The benchmark's lossy link now covers
+loss (and found the fragment assembler leak); what is left:
 
-- **No loss.** A deterministic lossy link in the benchmark's in-process
-  pair (drop every n-th datagram) would exercise retransmission, backoff
-  and the window accounting, with the same "no packet lost or corrupted"
-  check the benchmark already does.
 - **No unit tests for the Lean API.** Small, targeted checks (a Lean test
   executable next to `replay`) would pin behavior the traces cannot reach.
 

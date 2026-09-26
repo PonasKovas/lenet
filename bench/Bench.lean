@@ -13,13 +13,20 @@ Measures, through the pure sans-I/O core only (no sockets, no FFI):
    hosts + route the emitted datagrams), in the idle connected state and
    under a per-round send load.
 
+3. A lossy link: the same pair with every n-th datagram dropped, so
+   retransmission, backoff and the in-transit and window accounting run.
+   Reliable packets must all arrive, once and in order; unreliable ones
+   may be lost but never duplicated or reordered; and afterwards both
+   peers must still be connected with nothing left in transit.
+
 Methodology: wall clock via IO.monoNanosNow around each pure run,
 median of 5 runs, one untimed warmup run first. Each timed run gets a
 seed derived from the starting clock read (it only offsets the simulated
 clock origin) so the optimizer cannot hoist the pure computation out of
 the timed region. Payloads are Deterministic (index-derived); no
 randomness. The bench FAILs (exit 1) if any scenario loses or corrupts a
-packet, so the numbers are only printed when they mean something.
+packet it must deliver, so the numbers are only printed when they mean
+something.
 
 Run: lake build bench && ./.lake/build/bin/bench
 -/
@@ -199,6 +206,162 @@ where
       let (p1, st1) := pump { p with client } now (mkPayload 1200) st
       go b p1 (now + 50) st1 (sent + sentNow) (failed ∨ sentNow ≠ batchSize)
 
+/-! ## Lossy-link scenarios
+
+The pair above never loses a datagram, so retransmission, backoff and the
+in-transit/window accounting never run. Here the link between the hosts
+drops every `dropEvery`-th datagram (counted over both directions), which
+is deterministic but hits data, acks and pings alike. Each packet carries
+its index, so the receiver can check order and duplicates, not just the
+count. -/
+
+/-- Packet `k` of a lossy run: its index (big-endian) in the first four
+bytes, the deterministic pattern after it. -/
+private def taggedPayload (template : ByteArray) (k : Nat) : ByteArray :=
+  (template.set! 0 (k >>> 24).toUInt8).set! 1 (k >>> 16).toUInt8
+    |>.set! 2 (k >>> 8).toUInt8 |>.set! 3 k.toUInt8
+
+private def payloadTag (data : ByteArray) : Nat :=
+  (data.get! 0).toNat <<< 24 ||| (data.get! 1).toNat <<< 16 |||
+    (data.get! 2).toNat <<< 8 ||| (data.get! 3).toNat
+
+structure LossyStats where
+  /-- Datagrams offered to the link so far, both directions. -/
+  offered : Nat := 0
+  dropped : Nat := 0
+  /-- Indices of the packets the server received, in delivery order. -/
+  received : Array Nat := #[]
+  bad : Nat := 0
+  /-- Disconnect events on either side (a timeout under loss). -/
+  disconnects : Nat := 0
+
+private def countLossyEvs (template : ByteArray) (evs : Array Event) (st : LossyStats) : LossyStats :=
+  evs.foldl (init := st) fun acc ev =>
+    match ev with
+    | .receive _ _ pkt =>
+      let k := payloadTag pkt.data
+      { acc with
+        received := acc.received.push k
+        bad := if pkt.data == taggedPayload template k then acc.bad else acc.bad + 1 }
+    | .disconnect .. => { acc with disconnects := acc.disconnects + 1 }
+    | .connect .. => acc
+
+/-- Feeds one side's datagrams through the lossy link into host `h`. -/
+private def feedLossy (dropEvery : Nat) (template : ByteArray) (h : Host) (now : UInt32)
+    (fromAddr : Address) (outs : Array (Address × ByteArray)) (st : LossyStats) :
+    Host × LossyStats :=
+  outs.foldl (init := (h, st)) fun (h, st) d =>
+    let st := { st with offered := st.offered + 1 }
+    if st.offered % dropEvery == 0 then (h, { st with dropped := st.dropped + 1 })
+    else
+      let (h, evs) := h.handleDatagram now fromAddr d.2
+      (h, countLossyEvs template evs st)
+
+/-- Whether nothing is left to (re)send or acknowledge between the pair. -/
+private def drained (p : BenchPair) : Bool :=
+  let settled (h : Host) (id : UInt16) :=
+    match h.peers[id.toNat]? with
+    | some peer => peer.outgoingCommands.isEmpty && peer.sentReliableCommands.isEmpty &&
+        peer.acknowledgements.isEmpty
+    | none => false
+  settled p.client p.clientPeer && settled p.server p.serverPeer
+
+/-- Whether a peer is still connected and holds nothing in transit: no
+bytes counted in flight and every reliable window slot released. -/
+private def clean (h : Host) (id : UInt16) : Bool :=
+  match h.peers[id.toNat]? with
+  | some peer =>
+    peer.state == .connected ∧ peer.reliableDataInTransit == 0 ∧
+      peer.channels.all (·.reliableWindows.all (· == 0))
+  | none => false
+
+/-- Runs the pair over the lossy link until it drains. A round in which
+something was sent advances the clock by 1 ms (the link's latency); a
+silent round jumps to the earlier of the two hosts' deadlines, so waiting
+for a retransmit timeout costs one round. `fuel` bounds the rounds. -/
+private def settleLossy (dropEvery : Nat) (template : ByteArray) :
+    Nat → BenchPair → UInt32 → LossyStats → BenchPair × UInt32 × LossyStats
+  | 0, p, now, st => (p, now, st)
+  | fuel + 1, p, now, st =>
+    let (c, couts, cevs) := p.client.service now
+    let (s, souts, sevs) := p.server.service now
+    let st := countLossyEvs template (cevs ++ sevs) st
+    let (s, st) := feedLossy dropEvery template s now clientAddr couts st
+    let (c, st) := feedLossy dropEvery template c now serverAddr souts st
+    let p := { p with client := c, server := s }
+    if st.disconnects > 0 then (p, now, st)
+    else if couts.size + souts.size > 0 then settleLossy dropEvery template fuel p (now + 1) st
+    else if drained p then (p, now, st)
+    else
+      let next := match c.nextDeadline, s.nextDeadline with
+        | some a, some b => Time.earliest a b
+        | some a, none | none, some a => a
+        | none, none => now + 1
+      let next := if Time.less now next then next else now + 1
+      settleLossy dropEvery template fuel p next st
+
+structure LossyResult where
+  sent : Nat := 0
+  stats : LossyStats := {}
+  /-- Both peers connected with nothing left in transit afterwards. -/
+  clean : Bool := false
+  /-- Simulated milliseconds the whole run took. -/
+  elapsed : Nat := 0
+
+/-- One lossy run: `batches` batches of `batchSize` tagged packets from the
+client, each settled over the lossy link before the next is sent. -/
+private def lossyRun (mode : DeliveryMode) (template : ByteArray) (batches batchSize dropEvery : Nat)
+    (seed : Nat) : LossyResult :=
+  match handshake with
+  | none => {}
+  | some p0 =>
+    let now0 := (1000 + seed % 1000).toUInt32
+    let (p, now, sent, st) := (List.range batches).foldl (init := (p0, now0, 0, ({} : LossyStats)))
+      fun (p, now, sent, st) b =>
+        if st.disconnects > 0 then (p, now, sent, st)
+        else
+          let (client, sentNow) := (List.range batchSize).foldl (init := (p.client, 0))
+            fun (h, n) i =>
+              let pkt := { data := taggedPayload template (b * batchSize + i), delivery := mode }
+              match h.send p.clientPeer 0 pkt with
+              | .ok h => (h, n + 1)
+              | .error _ => (h, n)
+          let (p, now, st) := settleLossy dropEvery template 100000 { p with client } now st
+          (p, now, sent + sentNow, st)
+    { sent, stats := st, elapsed := (now - now0).toNat
+      clean := drained p ∧ clean p.client p.clientPeer ∧ clean p.server p.serverPeer }
+
+/-- What a lossy run must deliver: reliable modes every packet exactly once
+and in order; unreliable modes a strictly increasing subset (sequenced,
+so nothing late or duplicated); unsequenced a duplicate-free subset. -/
+private def lossyOk (mode : DeliveryMode) (total : Nat) (r : LossyResult) : Bool :=
+  let rcv := r.stats.received
+  let increasing := (List.range (rcv.size - 1)).all fun i => rcv[i]! < rcv[i + 1]!
+  let delivery := match mode with
+    | .reliable => rcv == Array.range total
+    | .unreliable | .unreliableFragment => increasing ∧ rcv.all (· < total)
+    | .unsequenced => (rcv.qsort (· < ·)).toList.eraseDups.length == rcv.size ∧ rcv.all (· < total)
+  r.sent == total && r.stats.bad == 0 && r.stats.disconnects == 0 && r.stats.dropped > 0 &&
+    r.clean && delivery
+
+structure LossyCase where
+  label : String
+  mode : DeliveryMode
+  payloadSize : Nat
+  batches : Nat
+  batchSize : Nat
+  dropEvery : Nat
+
+/-- Drop rates of 1 in 5 and 1 in 13, one fragmented case each way. The
+fragmented reliable case also loses single fragments of a packet. -/
+private def lossyCases : List LossyCase :=
+  [ { label := "reliable 1200B 1/5",      mode := .reliable,           payloadSize := 1200, batches := 32, batchSize := 64, dropEvery := 5 }
+  , { label := "reliable 1200B 1/13",     mode := .reliable,           payloadSize := 1200, batches := 32, batchSize := 64, dropEvery := 13 }
+  , { label := "reliable 4096B 1/5",      mode := .reliable,           payloadSize := 4096, batches := 32, batchSize := 16, dropEvery := 5 }
+  , { label := "unreliable 1200B 1/5",    mode := .unreliable,         payloadSize := 1200, batches := 32, batchSize := 64, dropEvery := 5 }
+  , { label := "unsequenced 1200B 1/5",   mode := .unsequenced,        payloadSize := 1200, batches := 32, batchSize := 64, dropEvery := 5 }
+  , { label := "unrelfrag 4096B 1/13",    mode := .unreliableFragment, payloadSize := 4096, batches := 32, batchSize := 16, dropEvery := 13 } ]
+
 /-! ## Timing + reporting -/
 
 private def median (xs : Array Nat) : Nat :=
@@ -277,6 +440,27 @@ def runBench : IO UInt32 := do
   unless saneLoad do failures := failures + 1
   let okLoad := if saneLoad then "ok" else "FAIL"
   IO.println s!"loaded, {perRound} reliable 1200 B sends + pump per round      : {fmtUs (nsLoad / rounds)} us/tick, {nsLoad / (rounds * perRound)} ns/packet  {okLoad}"
+  IO.println ""
+
+  IO.println "lossy link (every n-th datagram dropped; reliable: all delivered once, in order)"
+  IO.println
+    (padRight "scenario" 27 ++ padRight "packets" 9 ++ padRight "received" 10 ++
+      padRight "dropped" 9 ++ padRight "sim ms" 8 ++ padRight "ns/pkt" 8 ++ "sanity")
+  for tc in lossyCases do
+    let template := mkPayload tc.payloadSize
+    let total := tc.batches * tc.batchSize
+    let (ns, sane) ← measure 5
+      (fun seed => lossyRun tc.mode template tc.batches tc.batchSize tc.dropEvery seed)
+      (lossyOk tc.mode total)
+    unless sane do failures := failures + 1
+    let r := lossyRun tc.mode template tc.batches tc.batchSize tc.dropEvery 0
+    unless sane do
+      IO.println s!"  FAIL {tc.label}: sent={r.sent} received={r.stats.received.size} bad={r.stats.bad} disconnects={r.stats.disconnects} clean={r.clean}"
+    IO.println
+      (padRight tc.label 27 ++ padRight (toString total) 9 ++
+        padRight (toString r.stats.received.size) 10 ++ padRight (toString r.stats.dropped) 9 ++
+        padRight (toString r.elapsed) 8 ++ padRight (toString (ns / total)) 8 ++
+        (if sane then "ok" else "FAIL"))
   IO.println ""
 
   if failures > 0 then
