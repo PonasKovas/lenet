@@ -18,11 +18,9 @@ and after, and every per-peer step of the host keeps it:
 `checkPeerPing_state`. Writing these found two bugs (test/README.md,
 "Disconnect events for peers never reported").
 
-Not yet lifted to the host: `Host.handleDatagram` folds `handleCommand`
-over one peer's commands (`EventsWf.append` composes them), and
-`Host.service` runs the timeout and poll steps on every peer; the missing
-piece is a per-slot projection of the host's event array (events carry
-the peer ID, and a slot's peer ID never changes).
+`EventsWf.disconnect_between` spells out what it rules out.
+`Proofs/HostEvents.lean` lifts it to the host: `Host.handleDatagram`,
+`Host.service`, the application's calls and whole runs.
 -/
 
 namespace Lenet.Proofs
@@ -69,6 +67,34 @@ theorem EventsWf.receives {es : List Event} (h : ∀ e ∈ es, isReceive e) : Ev
     | receive => exact .receive (ih fun x hx => h x (List.mem_cons_of_mem _ hx))
     | connect => simp [isReceive] at he
     | disconnect => simp [isReceive] at he
+
+theorem EventsWf.split {a b : Phase} : ∀ {xs ys : List Event}, EventsWf a (xs ++ ys) b →
+    ∃ m, EventsWf a xs m ∧ EventsWf m ys b
+  | [], _, h => ⟨a, .nil, h⟩
+  | x :: xs, ys, h => by
+    cases h with
+    | connect h => obtain ⟨m, h1, h2⟩ := EventsWf.split h; exact ⟨m, .connect h1, h2⟩
+    | disconnect h => obtain ⟨m, h1, h2⟩ := EventsWf.split h; exact ⟨m, .disconnect h1, h2⟩
+    | receive h => obtain ⟨m, h1, h2⟩ := EventsWf.split h; exact ⟨m, .receive h1, h2⟩
+
+def isDisconnect : Event → Bool | .disconnect .. => true | _ => false
+
+theorem EventsWf.stays_up {b : Phase} : ∀ {es : List Event}, EventsWf .up es b → (∀ e ∈ es, isDisconnect e = false) → b = .up
+  | [], .nil, _ => rfl
+  | _ :: _, .receive h, hd => h.stays_up fun e he => hd e (List.mem_cons_of_mem _ he)
+  | _ :: _, .disconnect _, hd => by simp [isDisconnect] at hd
+
+/-- **Between two connects of a peer there is a disconnect.** -/
+theorem EventsWf.disconnect_between {a b : Phase} {xs ys zs : List Event} {id id' : UInt16} {d d' : UInt32}
+    (h : EventsWf a (xs ++ .connect id d :: ys ++ .connect id' d' :: zs) b) : ∃ e ∈ ys, isDisconnect e := by
+  obtain ⟨m, _, h⟩ := EventsWf.split (xs := xs) (by simpa using h)
+  cases h with
+  | connect h =>
+    obtain ⟨m', h1, h2⟩ := EventsWf.split h
+    refine Classical.byContradiction fun hno => ?_
+    have := h1.stays_up fun e he => by simpa using fun hd => hno ⟨e, he, hd⟩
+    subst this
+    cases h2
 
 theorem peerState_beq {a b : PeerState} : (a == b) = true ↔ a = b := by
   cases a <;> cases b <;> decide

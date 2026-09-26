@@ -6,34 +6,38 @@ scenarios pass), unit tests, a lossy-link benchmark, the C distribution,
 and the proofs listed in [DESIGN.md](DESIGN.md#what-is-proven). What
 follows is what is left, roughly in priority order.
 
-## Next step (handoff, 2026-09-26, second session)
+## Next step (handoff, 2026-09-26, third session)
 
 Done this session:
 
-- **Staging bound, proven.** It did not follow from the receiver: a
-  reliable set's span could jump the frontier over a staged plain packet
-  and strand it (test/README.md "Reliable packets staged inside a span").
-  Fixed; `Proofs.stagedReliableInv_size` bounds every channel at
-  `(freeReliableWindows - 1) * reliableWindowSize`, and `PeerStagedInv`
-  lifts it over every writer of `Peer.channels`.
-- **Array-level assembler invariant, proven** (`AssemblersOk`,
-  `handleFragment_assemblersOk`, `assemblerOk_footprint`).
-- **Sender-side window invariant: false as stated**, for ENet too.
-  `canSendReliable` at the start of window `w` only asks windows
-  `w .. w+9` to be empty, so in-flight commands may sit in `w-6 .. w-1`,
-  while the receiver admits its frontier's window and the next six.
-  Reachable: 1..4095 acked, 4096 lost, 4097..28671 in flight but for one
-  acked number in window 6; the sender may send 28672, the receiver
-  (frontier 4095) refuses it. It is not acked and is resent once 4096 gets
-  through, so nothing breaks and there is nothing to fix. What does hold is
-  the sender-only span item under Proofs.
-- **In-place updates** (Performance): 15-35% faster across the bench.
-  The C API's send no longer copies the host.
+- **Host-level event proof** (`Proofs/HostEvents.lean`). `run_wf`: from
+  `Host.create`, after any sequence of datagrams, `service` calls and
+  application calls (`Op`), every slot's events are well formed and name
+  an existing slot; `EventsWf.disconnect_between` says what that rules
+  out. The per-slot projection works because slot `i` holds peer ID `i`
+  (`IdsOk`). The command fold of `handleDatagram` is now its own function,
+  `Host.handlePeerDatagram`, so the proof can name it (bench unchanged).
+- **Peer count capped at 4095** (test/README.md): found by that proof.
+- **Reliable send order follows ENet** (test/README.md, two entries): a
+  reliable packet held back by congestion or its window now holds back
+  every later one for the pass, and empty ones get the congestion check.
+  This matters for the sender-side span proof below: first sends of a
+  channel's reliable commands now happen strictly in sequence order,
+  which is the fact that argument needs.
+- **Incoming commands follow ENet's refusals** (test/README.md, "Refused
+  commands" and "Remote DISCONNECT keeps the queues"): a refused command
+  gets no ACK and ends its datagram, ACKs depend on the state after the
+  command, and both disconnects drop the queues and channels.
+- A proof hazard worth knowing: never let the kernel compare `h` with a
+  host whose `randomSeed` was advanced (`h.randomSeed + 0x6D2B79F5`). It
+  unfolds the addition one successor at a time, with no heartbeat limit,
+  and the build just gets killed. Go through `random_peers` instead.
 
-Also since: disconnect handling now follows ENet (two event bugs fixed,
-test/README.md), and `Proofs/Events.lean` proves the per-peer event rules.
+The bench ran about 25% under the baseline below all session, old code
+included (tested with the change stashed): the machine was slower, not
+the code. Re-measure before trusting a regression.
 
-Suggested next: the host-level lift of the event proof.
+Suggested next: the sender-side window span proof, or the typed Lean API.
 
 Checks before each commit: `lake build` (library and proofs, including the
 no-panic audit in `Proofs/Panic.lean`), `./.lake/build/bin/unit`,
@@ -55,12 +59,14 @@ as bugs show where the corpus is blind.
 ## Proofs
 
 - **Sender-side window span.** The in-flight reliable commands of a channel
-  span fewer than seven windows (see the handoff note: the stronger "always
-  in the receiver's window" is false, for ENet too).
-- **Event-level properties, host level.** `Proofs/Events.lean` proves the
-  per-peer steps keep a peer's events well formed (`EventsWf`); lift it to
-  `Host.handleDatagram` and `Host.service` with a per-slot projection of
-  the event array (events carry the peer ID; a slot's ID never changes).
+  span at most seven windows (the stronger "always in the receiver's
+  window" is false, for ENet too). The argument: first sends go in sequence
+  order (`PackState.reliableHeld`), and the first command of window `w`
+  only goes when windows `w .. w+9` are empty, so what is in flight sits in
+  `w-6 .. w`. The proof needs an invariant tying each channel's
+  `reliableWindows` counts to the peer's in-flight and queued commands,
+  kept by enqueue, packing, ACKs, timeouts and the two disconnects (which
+  now drop the channels, `Peer.resetQueues`).
 
 ## Performance
 
