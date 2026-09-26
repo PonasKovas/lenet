@@ -144,7 +144,9 @@ int32_t lenet_host_send(lenet_host *host, uint16_t peer_id, uint8_t channel,
     lean_inc((lean_object *)host);
     lean_object *r = lenet_ffi_host_send((lean_object *)host, peer_id, channel,
                                          flags, arr);
-    int32_t v = lean_io_result_is_ok(r) ? 0 : -1;
+    /* the export reports a rejected send as -1 inside a successful IO */
+    int32_t v = lean_io_result_is_ok(r)
+        ? (int32_t)lean_unbox_uint32(lean_ctor_get(r, 0)) : -1;
     lean_dec(r);
     return v;
 }
