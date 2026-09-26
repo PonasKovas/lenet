@@ -418,118 +418,105 @@ def handleDatagram (h : Host) (now : UInt32) (fromAddr : Address) (bytes : ByteA
       else
         (h, #[])
 
-/-- Formats queued pending ACKs into outgoing acknowledge commands. -/
-def formatAcks (acks : Array (UInt8 × UInt16 × UInt16)) : Array Protocol.Command :=
-  acks.map fun (chId, seq, st) => {
-    channelId              := chId
-    reliableSequenceNumber := seq
-    acknowledge            := false
-    unsequenced            := false
-    body                   := .acknowledge seq st
-  }
-
+/-- State of `packOutgoingCommands` while it fills one datagram. -/
 structure PackState where
-  packedAcks        : Array (UInt8 × UInt16 × UInt16) := #[]
+  packedAcks        : Nat := 0
   commandsToPack    : Array Protocol.Command := #[]
   remainingOutgoing : Array OutgoingCommand := #[]
   sentReliables     : Array OutgoingCommand
+  channels          : Array Channel
   inTransitAdd      : Nat := 0
   packetSize        : Nat := 0
-  commandCount      : Nat := 0
+  /-- The datagram is full: every later command waits for the next one. -/
+  full              : Bool := false
+  /-- A reliable command hit a still-occupied sequence window: later reliable
+  channel commands wait too, so none overtakes it (ENet's `windowWrap`). -/
+  windowWrap        : Bool := false
 
-/-- Size of a serialized command's fixed part (4-byte command header +
-body fields, excluding any packet payload). The payload is accounted for
-separately via `fragmentLength`, matching ENet's packetSize arithmetic.
-Delegates to `CommandBody.fixedWireSize` - the single source of truth shared
-with the datagram parser's command-advance logic. -/
-def commandWireSize (body : Protocol.CommandBody) : Nat :=
-  4 + body.fixedWireSize
+namespace PackState
 
-/-- Packs pending ACKs and outgoing commands for a peer, honoring the
-32-command cap and the peer MTU (ENet's packing rules: ACKs first, then
-queued commands; window-blocked and over-budget commands stay queued).
-Returns the updated peer and the commands to place in one datagram. -/
+/-- Whether `cmd` still fits the datagram under construction for a peer with
+MTU `mtu`. -/
+@[inline] def fits (st : PackState) (mtu : UInt32) (cmd : Protocol.Command) : Bool :=
+  st.commandsToPack.size < Constants.maximumPacketCommands ∧
+    st.packetSize + cmd.wireSize ≤ mtu.toNat
+
+/-- Adds `cmd` to the datagram. -/
+@[inline] def pack (st : PackState) (cmd : Protocol.Command) : PackState :=
+  { st with commandsToPack := st.commandsToPack.push cmd, packetSize := st.packetSize + cmd.wireSize }
+
+/-- Leaves `outCmd` queued for a later datagram. -/
+@[inline] def defer (st : PackState) (outCmd : OutgoingCommand) : PackState :=
+  { st with remainingOutgoing := st.remainingOutgoing.push outCmd }
+
+/-- Packs one queued ACK (ENet send_acknowledgements). -/
+def packAck (mtu : UInt32) (st : PackState) : UInt8 × UInt16 × UInt16 → PackState
+  | (channelId, seq, sentTime) =>
+    let ack : Protocol.Command :=
+      { channelId, reliableSequenceNumber := seq, body := .acknowledge seq sentTime }
+    if st.full ∨ !st.fits mtu ack then { st with full := true }
+    else { st.pack ack with packedAcks := st.packedAcks + 1 }
+
+/-- Packs one queued command for peer `p` (ENet check_outgoing_commands). A
+reliable command stays queued while its sequence window is not free or while
+the congestion window is exhausted. -/
+def packCommand (p : Peer) (now : UInt32) (st : PackState) (outCmd : OutgoingCommand) : PackState :=
+  let cmd := outCmd.command
+  -- the command's data channel; control commands (channel 0xFF) have none
+  let channel? := if cmd.acknowledge then st.channels[cmd.channelId.toNat]? else none
+  let firstSend := outCmd.sendAttempts == 0
+  if st.full then st.defer outCmd
+  else if channel?.isSome && st.windowWrap then st.defer outCmd
+  else if channel?.any (fun ch => firstSend && !ch.canSendReliable cmd.reliableSequenceNumber) then
+    { st with windowWrap := true }.defer outCmd
+  -- congestion: reliable payload in flight may not exceed the throttle-scaled
+  -- receive window (but always admits one MTU)
+  else if cmd.acknowledge && outCmd.fragmentLength > 0 &&
+      p.reliableDataInTransit + st.inTransitAdd + outCmd.fragmentLength >
+        Nat.max ((p.packetThrottle * p.windowSize) / Constants.packetThrottleScale).toNat p.mtu.toNat then
+    st.defer outCmd
+  else if !st.fits p.mtu cmd then { st with full := true }.defer outCmd
+  else if !cmd.acknowledge then st.pack cmd -- fire-and-forget
+  else
+    -- reliable: occupy its sequence window on first send, and track it for
+    -- acknowledgement and retransmission
+    let channels :=
+      if firstSend then
+        st.channels.modify cmd.channelId.toNat (·.acquireReliableWindow cmd.reliableSequenceNumber)
+      else st.channels
+    let inFlight := { outCmd with
+      sendAttempts     := outCmd.sendAttempts + 1
+      sentTime         := now
+      roundTripTimeout :=
+        if outCmd.roundTripTimeout == 0 then p.roundTripTime + 4 * p.roundTripTimeVariance
+        else outCmd.roundTripTimeout }
+    { st.pack cmd with
+      channels      := channels
+      sentReliables := st.sentReliables.push inFlight
+      inTransitAdd  := st.inTransitAdd + outCmd.fragmentLength }
+
+end PackState
+
+/-- Packs pending ACKs and outgoing commands for a peer into one datagram,
+following ENet's rules: ACKs first, then queued commands in order, at most
+`maximumPacketCommands` within the peer MTU. Returns the updated peer and
+the commands to send. -/
 def packOutgoingCommands (p : Peer) (now : UInt32) : Peer × Array Protocol.Command :=
-  let ackSize := commandWireSize (.acknowledge 0 0)
   let initial : PackState := {
-    packetSize    := 4 -- ENetProtocolHeader, always budgeted first
+    packetSize    := 4 -- ENetProtocolHeader (peer ID + sent time)
     sentReliables := p.sentReliableCommands
+    channels      := p.channels
   }
-  -- 1. ACKs first (ENet: enet_protocol_send_acknowledgements).
-  let withAcks := p.acknowledgements.foldl (init := initial) fun acc ack =>
-    if acc.commandCount ≥ Constants.maximumPacketCommands ∨
-       acc.packetSize + ackSize > p.mtu.toNat then
-      acc -- over budget; ENet flags CONTINUE_SENDING and stops
-    else
-      { acc with
-        packedAcks   := acc.packedAcks.push ack
-        packetSize   := acc.packetSize + ackSize
-        commandCount := acc.commandCount + 1 }
-  -- 2. Outgoing commands (ENet: enet_protocol_check_outgoing_commands).
-  let finalState := p.outgoingCommands.foldl (init := withAcks) fun acc outCmd =>
-    let cmdSize := commandWireSize outCmd.command.body
-    if acc.commandCount ≥ Constants.maximumPacketCommands ∨
-       acc.packetSize + cmdSize + outCmd.fragmentLength > p.mtu.toNat then
-      { acc with remainingOutgoing := acc.remainingOutgoing.push outCmd }
-    else
-      let isWindowAvail :=
-        if outCmd.command.acknowledge then
-          if outCmd.command.channelId == 0xFF then
-            true
-          else
-            let chIdx := outCmd.command.channelId.toNat
-            if chH : chIdx < p.channels.size then
-              p.channels[chIdx].canSendReliable outCmd.command.reliableSequenceNumber
-            else
-              true
-        else
-          true
-      if outCmd.command.acknowledge && !isWindowAvail then
-        { acc with remainingOutgoing := acc.remainingOutgoing.push outCmd }
-      else
-        -- ENet (check_outgoing_commands): reliable commands carrying a packet
-        -- are blocked while the reliable data in flight exceeds the
-        -- throttle-scaled receive window (`reliableDataInTransit +
-        -- fragmentLength > max(throttle * windowSize, mtu)`). Blocked
-        -- commands stay queued; they don't add to in-transit, so every
-        -- further payload command is blocked the same way within the pass.
-        let isCongested :=
-          outCmd.command.acknowledge ∧ outCmd.fragmentLength > 0 ∧
-            p.reliableDataInTransit + acc.inTransitAdd + outCmd.fragmentLength >
-              Nat.max ((p.packetThrottle * p.windowSize) / Constants.packetThrottleScale).toNat p.mtu.toNat
-        if isCongested then
-          { acc with remainingOutgoing := acc.remainingOutgoing.push outCmd }
-        else
-          let inFlightCmd := { outCmd with
-            sendAttempts := outCmd.sendAttempts + 1
-            sentTime     := now
-            roundTripTimeout :=
-              -- ENet: initialize on first send from the peer's RTT estimate.
-              if outCmd.roundTripTimeout == 0 then
-                p.roundTripTime + 4 * p.roundTripTimeVariance
-              else
-                outCmd.roundTripTimeout
-          }
-          -- Only reliable (ack-flagged) commands are tracked in-flight for
-          -- retransmission; others are fire-and-forget (ENet semantics).
-          let acc :=
-            if outCmd.command.acknowledge then
-              { acc with
-                sentReliables := acc.sentReliables.push inFlightCmd
-                inTransitAdd  := acc.inTransitAdd + outCmd.fragmentLength }
-            else acc
-          { acc with
-            commandsToPack := acc.commandsToPack.push outCmd.command
-            packetSize     := acc.packetSize + cmdSize + outCmd.fragmentLength
-            commandCount   := acc.commandCount + 1 }
-
+  let withAcks := p.acknowledgements.foldl (PackState.packAck p.mtu) initial
+  let final := p.outgoingCommands.foldl (PackState.packCommand p now) withAcks
   let updatedPeer := { p with
-    acknowledgements      := p.acknowledgements.drop withAcks.packedAcks.size
-    outgoingCommands      := finalState.remainingOutgoing
-    sentReliableCommands  := finalState.sentReliables
-    reliableDataInTransit := p.reliableDataInTransit + finalState.inTransitAdd
+    acknowledgements      := p.acknowledgements.drop withAcks.packedAcks
+    outgoingCommands      := final.remainingOutgoing
+    sentReliableCommands  := final.sentReliables
+    channels              := final.channels
+    reliableDataInTransit := p.reliableDataInTransit + final.inTransitAdd
   }
-  (updatedPeer, formatAcks withAcks.packedAcks ++ finalState.commandsToPack)
+  (updatedPeer, final.commandsToPack)
 
 /-- Polls a single peer for outgoing datagrams. Loops until no further
 progress is possible, mirroring ENet's CONTINUE_SENDING multi-pass packing:

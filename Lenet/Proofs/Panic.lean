@@ -30,7 +30,7 @@ sites (all divisors are compile-time constants or guarded):
    - divisors `reliableWindowSize` (4096) and `reliableWindows` (16).
 2. `Host.windowSizeFor` - divisor `windowSizeScale` (65536).
 3. `Host.handleDatagram` (hostInWindow) - divisor `windowSizeScale` (65536).
-4. `Host.packOutgoingCommands` (congestion) - divisor `packetThrottleScale` (32).
+4. `Host.PackState.packCommand` (congestion) - divisor `packetThrottleScale` (32).
 5. `Host.bandwidthThrottle` - `connectedPeers.size` (guarded by the
    `isEmpty` check) and `totalData` (guarded by the `== 0` fallback).
 6. `Peer.send` - divisor `fragmentLength` (guarded: `maxPayload` is
