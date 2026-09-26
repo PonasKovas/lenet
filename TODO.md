@@ -48,9 +48,8 @@ loss (and found the fragment assembler leak), and `test/Unit.lean` pins the
 fragment-assembler rules, retransmission, timeouts and disconnect-later.
 Worth adding there as they come up:
 
-- **More unit tests.** Candidates: the packet throttle under RTT swings,
-  bandwidth limits across several peers, `nextDeadline` against what
-  `service` actually does, and the unsequenced window.
+- **More unit tests.** Candidates: the packet throttle under RTT swings
+  and bandwidth limits across several peers.
 
 ## Proofs
 

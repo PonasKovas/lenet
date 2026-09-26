@@ -219,6 +219,16 @@ compatibility"). Open, undecided differences are listed in TODO.md.
   packets all carry (0, 0), so one dropped unsequenced packet takes every
   unsequenced packet queued right behind it along. Lenet drops only the
   packet the counter picked. Sender-side only, so invisible to interop.
+- **Unsequenced window (enet quirk - not copied).** ENet deduplicates
+  unsequenced packets in aligned blocks of 1024 groups
+  (`protocol.c` handle_send_unsequenced): a group in a newer block moves
+  the block there and forgets the old bitmap, and every group below the
+  current block is dropped, seen or not. So when 1024 overtakes 1023,
+  ENet delivers 1024 and drops 1023. Lenet slides the window behind the
+  highest group (`UnsequencedWindow.checkAndAdd`) and delivers any unseen
+  group less than 1024 behind it. Both drop every duplicate; Lenet only
+  delivers some reordered packets ENet loses. Invisible to the corpus,
+  which never reorders; pinned by `test/Unit.lean`.
 - **Receive window gate on unreliable commands (lenet bug - fixed).** ENet
   gates unreliable and unreliable-fragment commands by the reliable sequence
   number they were sent after (`peer.c` queue_incoming_command,

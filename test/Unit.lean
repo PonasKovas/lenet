@@ -109,6 +109,9 @@ def reliableCmd (ch : UInt8) (seq : UInt16) (data : ByteArray) : Protocol.Comman
 def unreliableCmd (ch : UInt8) (relSeq seq : UInt16) (data : ByteArray) : Protocol.Command :=
   { channelId := ch, reliableSequenceNumber := relSeq, body := .sendUnreliable seq data }
 
+def unsequencedCmd (ch : UInt8) (group : UInt16) (data : ByteArray) : Protocol.Command :=
+  { channelId := ch, reliableSequenceNumber := 0, unsequenced := true, body := .sendUnsequenced group data }
+
 /-- Feeds `cmds` to peer `p` in order, collecting the events. -/
 def feed (p : Peer) (cmds : List Protocol.Command) : Peer × Array Event :=
   cmds.foldl (init := (p, #[])) fun (p, evs) cmd =>
@@ -186,6 +189,33 @@ def fragmentTests : List Test := [
       expect (p.acknowledgements.size == acks + 1) "fragment of a known set not acked"
       expect (received evs == #[(0, whole 10 2)]) "known set not delivered" } ]
 
+/-! ## Unsequenced window
+
+Lenet slides a 1024-group window behind the highest group seen; ENet keeps
+aligned blocks of 1024 and drops everything below the current block (see
+test/README.md, "Unsequenced window"). -/
+
+/-- The groups of `groups` that `feed` delivers, one packet per group. -/
+def deliveredGroups (p : Peer) (groups : List UInt16) : List UInt16 :=
+  let (_, delivered) := groups.foldl (init := (p, [])) fun (p, acc) g =>
+    let (p, evs) := feed p [unsequencedCmd 0 g (bytes 3 g.toNat)]
+    (p, if evs.isEmpty then acc else acc ++ [g])
+  delivered
+
+def unsequencedTests : List Test := [
+  { name := "unsequenced: duplicates are dropped, unseen groups within 1024 delivered"
+    run := fun _ => do
+      let got := deliveredGroups (← serverPeer) [1024, 1023, 1023, 1024, 1030, 1025]
+      expect (got == [1024, 1023, 1030, 1025]) s!"delivered {got}" },
+  { name := "unsequenced: a group 1024 or more behind the highest is dropped"
+    run := fun _ => do
+      let got := deliveredGroups (← serverPeer) [1024, 3000, 1500, 1976, 1977, 1977]
+      expect (got == [1024, 3000, 1977]) s!"delivered {got}" },
+  { name := "unsequenced: the window follows the groups across the 16-bit wrap"
+    run := fun _ => do
+      let got := deliveredGroups (← serverPeer) [65530, 3, 65534, 3, 65534]
+      expect (got == [65530, 3, 65534]) s!"delivered {got}" } ]
+
 /-! ## Host behavior under loss -/
 
 def pkt (n : Nat) (mode : DeliveryMode := .reliable) : Packet := { data := bytes n 3, delivery := mode }
@@ -256,9 +286,29 @@ def hostTests : List Test := [
       let p := p.rounds 20
       expect (received p.serverEvents == #[(0, bytes 100 3)]) "queued packet not delivered first"
       expect (p.serverEvents.back? == some (.disconnect p.serverPeer 7)) "server saw no disconnect"
-      expect (p.clientEvents.any (· matches .disconnect ..)) "client saw no disconnect" } ]
+      expect (p.clientEvents.any (· matches .disconnect ..)) "client saw no disconnect" },
+  { name := "service before nextDeadline does nothing; at it, the resend goes out"
+    run := fun _ => do
+      let p := (← send (← connected) (pkt 100)).round dropAll
+      let h := p.client
+      let some d := h.nextDeadline | throw "no deadline with a command in flight"
+      expect (Time.less p.now d) "deadline not in the future"
+      for t in [p.now, p.now + (d - p.now) / 2, d - 1] do
+        let (h', outs, evs) := h.service t
+        expect (outs.isEmpty && evs.isEmpty) s!"service at {t} (deadline {d}) sent something"
+        expect (h'.peers == h.peers) s!"service at {t} (deadline {d}) changed a peer"
+      let (_, outs, _) := h.service d
+      expect (!outs.isEmpty) "nothing resent at the deadline" },
+  { name := "an idle pair's service before nextDeadline does nothing"
+    run := fun _ => do
+      let p := (← connected).rounds 50
+      for h in [p.client, p.server] do
+        let some d := h.nextDeadline | throw "no deadline"
+        let (h', outs, evs) := h.service (d - 1)
+        expect (outs.isEmpty && evs.isEmpty) "service before the deadline sent something"
+        expect (h'.peers == h.peers) "service before the deadline changed a peer" } ]
 
-def tests : List Test := fragmentTests ++ hostTests
+def tests : List Test := fragmentTests ++ unsequencedTests ++ hostTests
 
 end Unit
 
