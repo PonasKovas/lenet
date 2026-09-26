@@ -793,11 +793,20 @@ def bandwidthThrottle (h : Host) (now : UInt32) : Host :=
 /-- The host's periodic step at time `now` (ENet enet_host_service without
 the socket): the bandwidth throttle, retransmissions, timeouts and pings,
 then packing everything queued into datagrams. Returns the updated host, the
-datagrams to transmit and the application events. -/
+datagrams to transmit and the application events.
+
+Disconnects trigger a bandwidth recalculation (ENet: notify_disconnect and
+the ZOMBIE dispatch), except the timeout of a client still connecting. -/
 def service (h : Host) (now : UInt32) : Host × Array (Address × ByteArray) × Array Event :=
+  let before := h
   let (h, timeoutEvents) := (h.bandwidthThrottle now).checkTimeoutsAndPings now
   let (h, datagrams, disconnectEvents) := h.pollOutgoing now
-  (h, datagrams, timeoutEvents ++ disconnectEvents)
+  -- a timed-out peer is reset by now: its state before the timeout decides
+  let connectionChanged := !disconnectEvents.isEmpty || timeoutEvents.any fun
+    | .disconnect peerId _ => before.peers[peerId.toNat]?.any (·.state != .connecting)
+    | _ => false
+  ({ h with recalculateBandwidthLimits := h.recalculateBandwidthLimits || connectionChanged },
+    datagrams, timeoutEvents ++ disconnectEvents)
 
 /--
 The next time at which this host's state can change, so a driver can sleep

@@ -389,6 +389,16 @@ def hostTests : List Test := [
       let (server, _) := server.handleDatagram 1600 clientAddr connect
       let taken := server.peers.filter (·.state != .disconnected) |>.size
       expect (taken == 1) s!"{taken} slots taken" },
+  { name := "a disconnect reported by service triggers a bandwidth recalculation"
+    run := fun _ => do
+      -- past the first throttle epoch, which clears the connect's recalculation
+      let p := (← connected).rounds (Constants.bandwidthThrottleInterval.toNat + 10)
+      expect (!p.server.recalculateBandwidthLimits) "recalculation still pending"
+      let p := { p with client := p.client.disconnect p.clientPeer }
+      let p := p.rounds 5
+      expect (p.serverEvents.any (· matches .disconnect ..)) "server saw no disconnect"
+      -- ENet dispatches the ZOMBIE peer, which sets recalculateBandwidthLimits
+      expect p.server.recalculateBandwidthLimits "no recalculation after the disconnect" },
   { name := "a peer that never answers times out between the minimum and maximum"
     run := fun _ => do
       let p ← send (← connected) (pkt 100)

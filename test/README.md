@@ -228,6 +228,14 @@ compatibility"). Open, undecided differences are listed in TODO.md.
   so a server application got disconnect events for connections it never
   heard of. `Host.checkPeerTimeouts` and `Peer.handleDisconnect` now reset
   such a peer without an event.
+- **Disconnects during service skip the bandwidth recalculation (lenet
+  bug - fixed).** ENet sets `recalculateBandwidthLimits` for every
+  disconnect it reports but a timeout of a client still connecting
+  (notify_disconnect, the ZOMBIE dispatch), so the next throttle epoch
+  sends the remaining peers their new BANDWIDTH_LIMIT. Lenet set it only
+  for events from a received datagram, missing timeouts and the remote
+  DISCONNECT that completes once its ACK is out. `Host.service` now sets
+  it too.
 - **Retransmitted CONNECT (lenet bug - fixed).** ENet's handle_connect
   ignores a CONNECT when a peer that is not a client still connecting
   already has its address, port and connect ID: the client resent it
