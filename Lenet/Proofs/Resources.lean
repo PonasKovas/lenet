@@ -575,13 +575,19 @@ theorem handleFragment_peerStagedInv {p : Peer} (h : PeerStagedInv p) (channelId
 theorem removeSentReliableCommand_peerStagedInv {p : Peer} (h : PeerStagedInv p) (channelId : UInt8)
     (seq : UInt16) : PeerStagedInv (p.removeSentReliableCommand channelId seq).1 := by
   unfold Peer.removeSentReliableCommand
-  split
-  · exact h
-  · intro ch hch
-    simp only at hch
+  dsimp only
+  have released : ∀ ch ∈ p.channels.modify channelId.toNat (·.releaseReliableWindow seq), StagedReliableInv ch := by
+    intro ch hch
     rcases mem_modify_or hch with hch | ⟨c, hc, rfl⟩
     · exact h ch hch
     · exact releaseReliableWindow_stagedReliableInv (h c hc) seq
+  split
+  · exact released
+  · split
+    · split
+      · exact h
+      · exact released
+    · exact h
 
 theorem queueOutgoingCommand_channels (p : Peer) (cmd : OutgoingCommand) :
     (p.queueOutgoingCommand cmd).channels = p.channels := rfl

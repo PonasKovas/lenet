@@ -422,6 +422,20 @@ def hostTests : List Test := [
       let started := { (feed { peer with state := .connected } [relFrag 0 1 5 2 0]).1 with state := .disconnectLater }
       let (_, evs, _) := started.handleCommand p.now (relFrag 0 1 5 2 1) (some 0)
       expect (evs.size == 1) "a set under way did not complete" },
+  { name := "an ACK for a command queued for resend retires it"
+    run := fun _ => do
+      let p := (← send (← connected) (pkt 100)).round dropAll
+      let some cmd := p.clientP.sentReliableCommands[0]? | throw "nothing in flight"
+      let now := p.now + cmd.roundTripTimeout + 1
+      let (peer, _) := Host.checkPeerTimeouts p.clientP now
+      expect (peer.sentReliableCommands.isEmpty && peer.outgoingCommands.size == 1) "not queued for resend"
+      -- the late ACK of the first send arrives before the resend goes out:
+      -- ENet's remove_sent_reliable_command also looks in the queue
+      let (q, _, _) := peer.handleCommand now
+        (ackOf 0 cmd.command.reliableSequenceNumber cmd.sentTime.toUInt16) (some 0)
+      expect q.outgoingCommands.isEmpty "acknowledged command still queued"
+      expect (q.channels[0]!.reliableWindows.all (· == 0)) "window slot kept"
+      expect (q.reliableDataInTransit == 0) "in-transit bytes wrong" },
   { name := "a peer that never answers times out between the minimum and maximum"
     run := fun _ => do
       let p ← send (← connected) (pkt 100)

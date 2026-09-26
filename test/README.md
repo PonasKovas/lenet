@@ -228,6 +228,14 @@ compatibility"). Open, undecided differences are listed in TODO.md.
   so a server application got disconnect events for connections it never
   heard of. `Host.checkPeerTimeouts` and `Peer.handleDisconnect` now reset
   such a peer without an event.
+- **ACK of a command queued for resend (lenet bug - fixed).** A timed-out
+  command goes back into the queue; when a late ACK of its first send
+  arrives before the resend goes out, ENet's remove_sent_reliable_command
+  finds it there (among the reliable commands up to the first one never
+  sent), drops it and frees its window slot. Lenet searched only the
+  in-flight list, so it sent the command again and kept its window slot
+  until that resend was acknowledged. `Peer.removeSentReliableCommand`
+  now looks in the queue too.
 - **Data while disconnecting later (lenet bug - fixed).** ENet's
   enet_peer_queue_incoming_command discards everything for a peer in
   DISCONNECT_LATER: data is acknowledged but never delivered, an

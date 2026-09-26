@@ -162,11 +162,15 @@ def queueAck (p : Peer) (ack : Acknowledgement) : Peer :=
 
 /-- Removes the in-flight reliable command `(channelId, seq)` once it is
 acknowledged: releases its channel window slot and its in-transit bytes.
-Returns the removed command, if there was one. -/
+A command queued again for retransmission (`Host.checkPeerTimeouts`) is
+still found, as ENet's remove_sent_reliable_command finds it: among the
+queue's reliable commands up to the first one never sent. Its bytes left
+the in-transit count when it was queued again. Returns the removed
+command, if there was one. -/
 def removeSentReliableCommand (p : Peer) (channelId : UInt8) (seq : UInt16) : Peer × Option Protocol.Command :=
-  match p.sentReliableCommands.find? fun outCmd =>
-      outCmd.command.channelId == channelId && outCmd.command.reliableSequenceNumber == seq with
-  | none => (p, none)
+  let isIt (outCmd : OutgoingCommand) : Bool :=
+    outCmd.command.channelId == channelId && outCmd.command.reliableSequenceNumber == seq
+  match p.sentReliableCommands.find? isIt with
   | some outCmd =>
     ({ p with
       sentReliableCommands  := p.sentReliableCommands.erase outCmd
@@ -174,6 +178,18 @@ def removeSentReliableCommand (p : Peer) (channelId : UInt8) (seq : UInt16) : Pe
       -- no underflow: these bytes were added when the command was sent
       reliableDataInTransit := p.reliableDataInTransit - outCmd.fragmentLength
     }, some outCmd.command)
+  | none =>
+    -- the first reliable command that is either it or never sent
+    match p.outgoingCommands.findFinIdx? fun outCmd =>
+        outCmd.command.acknowledge && (outCmd.sendAttempts == 0 || isIt outCmd) with
+    | some i =>
+      if p.outgoingCommands[i].sendAttempts == 0 then (p, none)
+      else
+        ({ p with
+          outgoingCommands := p.outgoingCommands.eraseIdx i
+          channels         := p.channels.modify channelId.toNat (·.releaseReliableWindow seq)
+        }, some p.outgoingCommands[i].command)
+    | none => (p, none)
 
 /-- Largest payload a single command may carry at this peer's MTU before
 the packet is fragmented (ENet enet_peer_send: MTU minus the protocol header,

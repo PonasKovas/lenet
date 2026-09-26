@@ -109,7 +109,7 @@ theorem updateRtt_state (p : Peer) (n r) : (p.updateRtt n r).state = p.state := 
   unfold updateRtt; dsimp only
   split <;> (try split) <;> (try split) <;> (try split) <;> simp [throttle_state]
 theorem removeSent_state (p : Peer) (c s) : (p.removeSentReliableCommand c s).1.state = p.state := by
-  unfold removeSentReliableCommand; split <;> rfl
+  unfold removeSentReliableCommand; dsimp only; split <;> (repeat' split) <;> rfl
 theorem pruneAssemblers_state (p : Peer) (c) : (p.pruneAssemblers c).state = p.state := by
   unfold pruneAssemblers; split; split <;> rfl; rfl
 theorem receiveOnChannel_state (p : Peer) (c r) : (p.receiveOnChannel c r).1.state = p.state := by

@@ -36,7 +36,7 @@ theorem updateRtt_peerId (p : Peer) (n r) : (p.updateRtt n r).peerId = p.peerId 
   unfold updateRtt; dsimp only
   split <;> (try split) <;> (try split) <;> (try split) <;> simp [throttle_peerId]
 theorem removeSent_peerId (p : Peer) (c s) : (p.removeSentReliableCommand c s).1.peerId = p.peerId := by
-  unfold removeSentReliableCommand; split <;> rfl
+  unfold removeSentReliableCommand; dsimp only; split <;> (repeat' split) <;> rfl
 theorem pruneAssemblers_peerId (p : Peer) (c) : (p.pruneAssemblers c).peerId = p.peerId := by
   unfold pruneAssemblers; split; split <;> rfl; rfl
 theorem queueDisconnect_peerId (p : Peer) (d) : (p.queueDisconnect d).peerId = p.peerId := by
