@@ -32,6 +32,15 @@ jobs:
       - run: lake build replay
       - run: ./.lake/build/bin/replay test/traces
 
+  # Targeted checks of what the traces cannot reach (loss, caps, timeouts).
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: leanprover/lean-action@v1
+      - run: lake build unit
+      - run: ./.lake/build/bin/unit
+
   # The C distribution builds and works from a C program that sees only
   # include/lenet.h.
   c-api:

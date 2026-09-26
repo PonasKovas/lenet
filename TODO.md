@@ -2,8 +2,8 @@
 
 Done so far: full ENet 1.3.x interop except compression (21 golden-trace
 scenarios, each recorded at three clock starts, and 12 live interop
-scenarios pass), the C distribution, and the proofs listed in
-[DESIGN.md](DESIGN.md#what-is-proven). What follows is what is left,
+scenarios pass), unit tests, a lossy-link benchmark, the C distribution,
+and the proofs listed in [DESIGN.md](DESIGN.md#what-is-proven). What follows is what is left,
 roughly in priority order.
 
 ## Testing gaps
@@ -11,10 +11,13 @@ roughly in priority order.
 Several bugs fixed recently were invisible to the corpus: RTT samples broke
 after 65 s of uptime, retransmissions leaked in-transit bytes, the sender's
 reliable windows were never occupied. The benchmark's lossy link now covers
-loss (and found the fragment assembler leak); what is left:
+loss (and found the fragment assembler leak), and `test/Unit.lean` pins the
+fragment-assembler rules, retransmission, timeouts and disconnect-later.
+Worth adding there as they come up:
 
-- **No unit tests for the Lean API.** Small, targeted checks (a Lean test
-  executable next to `replay`) would pin behavior the traces cannot reach.
+- **More unit tests.** Candidates: the packet throttle under RTT swings,
+  bandwidth limits across several peers, `nextDeadline` against what
+  `service` actually does, and the unsequenced window.
 
 ## Proofs
 

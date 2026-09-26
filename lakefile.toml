@@ -17,6 +17,12 @@ name = "replay"
 root = "Replay"
 srcDir = "test"
 
+# Unit tests: targeted checks of what the golden traces cannot reach.
+[[lean_exe]]
+name = "unit"
+root = "Unit"
+srcDir = "test"
+
 # Benchmark: built in CI, run locally (baseline numbers in TODO.md).
 [[lean_exe]]
 name = "bench"

@@ -70,6 +70,7 @@ separate repository (`lenet-rs`).
 
 ```sh
 lake build replay && ./.lake/build/bin/replay test/traces   # golden-trace replay
+lake build unit && ./.lake/build/bin/unit                   # unit tests
 make -C csrc check                                          # C API smoke test
 make -C test interop                                        # live interop (needs ENet in ../enet)
 lake build bench && ./.lake/build/bin/bench                 # benchmark
