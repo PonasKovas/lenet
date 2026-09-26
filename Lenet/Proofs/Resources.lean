@@ -32,8 +32,9 @@ The attacker-controlled memory surfaces and their bounds:
    staged keys stay distinct and inside the window
    (`StagedReliableInv`, kept by every receive:
    `receiveReliableAndRelease_stagedReliableInv`,
-   `receiveUnreliable_stagedReliableInv`). The replay corpus asserts the
-   bound too.
+   `receiveUnreliable_stagedReliableInv`), and lifted to every channel of
+   a peer through each writer of `Peer.channels` (`PeerStagedInv`,
+   `peerStagedInv_size`). The replay corpus asserts the bound too.
 3. **Staged unreliable packets** (`Channel.stagedUnreliable`): capped at
    `maximumStagedUnreliable` by `Channel.receiveUnreliable`, the only place
    that grows it; asserted by the replay corpus.
@@ -441,5 +442,243 @@ theorem receiveUnreliable_stagedReliableInv {c : Channel} (h : StagedReliableInv
   unfold receiveUnreliable
   repeat' split
   all_goals exact h
+
+/-! ## The staging bound, per peer
+
+The writers of `Peer.channels`: `Peer.receiveOnChannel` (every receive),
+`Peer.send`, `Peer.removeSentReliableCommand`, `Host.packOutgoingCommands`,
+the VERIFY_CONNECT handler (`take`), new connections (`replicate {}`) and
+`Peer.reset`. Each keeps `PeerStagedInv`. -/
+
+private theorem mem_set_or {α} {xs : Array α} {i : Nat} {h : i < xs.size} {v x : α}
+    (hx : x ∈ xs.set i v h) : x ∈ xs ∨ x = v := by
+  obtain ⟨j, hj, rfl⟩ := Array.mem_iff_getElem.mp hx
+  rw [Array.getElem_set]
+  split
+  · exact .inr rfl
+  · exact .inl (Array.getElem_mem _)
+
+private theorem mem_setIfInBounds_or {α} {xs : Array α} {i : Nat} {v x : α}
+    (hx : x ∈ xs.setIfInBounds i v) : x ∈ xs ∨ x = v := by
+  obtain ⟨j, hj, rfl⟩ := Array.mem_iff_getElem.mp hx
+  have hj' : j < xs.size := by simpa using hj
+  rw [Array.getElem_setIfInBounds hj']
+  split
+  · exact .inr rfl
+  · exact .inl (Array.getElem_mem (by simpa using hj))
+
+private theorem mem_modify_or {α} {xs : Array α} {i : Nat} {f : α → α} {x : α}
+    (hx : x ∈ xs.modify i f) : x ∈ xs ∨ ∃ y ∈ xs, x = f y := by
+  obtain ⟨j, hj, rfl⟩ := Array.mem_iff_getElem.mp hx
+  rw [Array.getElem_modify]
+  split
+  · next he => subst he; exact .inr ⟨_, Array.getElem_mem (by simpa using hj), rfl⟩
+  · exact .inl (Array.getElem_mem _)
+
+/-- The staging invariant reads only the staged array and the frontier. -/
+theorem stagedReliableInv_of_same {c d : Channel} (hs : d.stagedReliable = c.stagedReliable)
+    (hf : d.incomingReliableSequenceNumber = c.incomingReliableSequenceNumber)
+    (h : StagedReliableInv c) : StagedReliableInv d := by
+  obtain ⟨hnd, hahead⟩ := h
+  refine ⟨hs ▸ hnd, fun e he => ?_⟩
+  rw [isReliableAhead_congr hf]
+  exact hahead e (hs ▸ he)
+
+/-- Sender-side window accounting never touches reliable staging. -/
+theorem acquireReliableWindow_stagedReliableInv {c : Channel} (h : StagedReliableInv c) (seq : UInt16) :
+    StagedReliableInv (c.acquireReliableWindow seq) :=
+  stagedReliableInv_of_same rfl rfl h
+
+theorem releaseReliableWindow_stagedReliableInv {c : Channel} (h : StagedReliableInv c) (seq : UInt16) :
+    StagedReliableInv (c.releaseReliableWindow seq) := by
+  unfold releaseReliableWindow
+  dsimp only
+  split
+  · exact h
+  · exact stagedReliableInv_of_same rfl rfl h
+
+/-- Every channel of the peer keeps the staging invariant. -/
+def PeerStagedInv (p : Peer) : Prop := ∀ ch ∈ p.channels, StagedReliableInv ch
+
+theorem peerStagedInv_of_channels {p q : Peer} (hc : q.channels = p.channels) (h : PeerStagedInv p) :
+    PeerStagedInv q := fun ch hch => h ch (hc ▸ hch)
+
+/-- The channels of a new connection (`Host.connect`, incoming CONNECT). -/
+theorem peerStagedInv_replicate (n : Nat) : ∀ ch ∈ Array.replicate n ({} : Channel), StagedReliableInv ch := by
+  intro ch hch
+  rw [(Array.mem_replicate.mp hch).2]
+  exact stagedReliableInv_default
+
+/-- VERIFY_CONNECT keeps a prefix of the channels. -/
+theorem peerStagedInv_take {xs : Array Channel} (h : ∀ ch ∈ xs, StagedReliableInv ch) (n : Nat) :
+    ∀ ch ∈ xs.take n, StagedReliableInv ch := by
+  intro ch hch
+  obtain ⟨k, hk, rfl⟩ := Array.mem_iff_getElem.mp hch
+  simp only [Array.take_eq_extract, Array.getElem_extract, Nat.zero_add]
+  exact h _ (Array.getElem_mem (by simp at hk; omega))
+
+theorem peerStagedInv_reset (p : Peer) : PeerStagedInv p.reset := by
+  intro ch hch
+  simp [Peer.reset] at hch
+
+theorem pruneAssemblers_channels (p : Peer) (channelId : UInt8) :
+    (p.pruneAssemblers channelId).channels = p.channels := by
+  unfold Peer.pruneAssemblers
+  split
+  · split <;> rfl
+  · rfl
+
+/-- A receive step that keeps the invariant keeps it for the whole peer. -/
+theorem receiveOnChannel_peerStagedInv {p : Peer} (h : PeerStagedInv p) (channelId : UInt8)
+    (receive : Channel → Channel × Array Packet)
+    (hr : ∀ c, StagedReliableInv c → StagedReliableInv (receive c).1) :
+    PeerStagedInv (p.receiveOnChannel channelId receive).1 := by
+  unfold Peer.receiveOnChannel
+  split
+  · next hlt =>
+    intro ch hch
+    simp only [pruneAssemblers_channels] at hch
+    rcases mem_set_or hch with hch | rfl
+    · exact h ch hch
+    · exact hr _ (h _ (Array.getElem_mem hlt))
+  · exact h
+
+theorem handleData_peerStagedInv {p : Peer} (h : PeerStagedInv p) (cmd : Protocol.Command) :
+    PeerStagedInv (p.handleData cmd).1 := by
+  unfold Peer.handleData
+  split
+  · exact receiveOnChannel_peerStagedInv h _ _ fun c hc => receiveReliableAndRelease_stagedReliableInv hc _ _ _
+  · exact receiveOnChannel_peerStagedInv h _ _ fun c hc => receiveUnreliable_stagedReliableInv hc _ _ _
+  · split
+    · exact peerStagedInv_of_channels rfl h
+    · exact h
+  · exact h
+
+theorem handleFragment_peerStagedInv {p : Peer} (h : PeerStagedInv p) (channelId : UInt8)
+    (reliableSeq : UInt16) (params : Protocol.FragmentParams) (unreliable : Bool) :
+    PeerStagedInv (p.handleFragment channelId reliableSeq params unreliable).1 := by
+  unfold Peer.handleFragment
+  split
+  · exact h
+  · dsimp only
+    split
+    · dsimp only
+      refine receiveOnChannel_peerStagedInv ?_ _ _ fun c hc => ?_
+      · exact h
+      split
+      · exact receiveUnreliable_stagedReliableInv hc _ _ _
+      · exact receiveReliableAndRelease_stagedReliableInv hc _ _ _
+    · exact peerStagedInv_of_channels rfl h
+
+theorem removeSentReliableCommand_peerStagedInv {p : Peer} (h : PeerStagedInv p) (channelId : UInt8)
+    (seq : UInt16) : PeerStagedInv (p.removeSentReliableCommand channelId seq).1 := by
+  unfold Peer.removeSentReliableCommand
+  split
+  · exact h
+  · intro ch hch
+    simp only at hch
+    rcases mem_modify_or hch with hch | ⟨c, hc, rfl⟩
+    · exact h ch hch
+    · exact releaseReliableWindow_stagedReliableInv (h c hc) seq
+
+theorem queueOutgoingCommand_channels (p : Peer) (cmd : OutgoingCommand) :
+    (p.queueOutgoingCommand cmd).channels = p.channels := rfl
+
+theorem fragmentCommands_stagedReliableInv {c : Channel} (h : StagedReliableInv c) (channelId : UInt8)
+    (packet : Packet) (fragmentLength fragmentCount : Nat) :
+    StagedReliableInv (Peer.fragmentCommands c channelId packet fragmentLength fragmentCount).1 := by
+  unfold Peer.fragmentCommands
+  dsimp only
+  split <;> exact stagedReliableInv_of_same rfl rfl h
+
+theorem packetCommand_stagedReliableInv (p : Peer) {c : Channel} (h : StagedReliableInv c)
+    (channelId : UInt8) (packet : Packet) :
+    StagedReliableInv (p.packetCommand c channelId packet).2.1 := by
+  unfold Peer.packetCommand
+  split <;> exact stagedReliableInv_of_same rfl rfl h
+
+theorem foldl_queueOutgoingCommand_channels (q : Peer) (xs : Array OutgoingCommand) :
+    (xs.foldl Peer.queueOutgoingCommand q).channels = q.channels :=
+  Array.foldl_induction (motive := fun _ (r : Peer) => r.channels = q.channels) rfl
+    (fun _ _ h => h)
+
+theorem setIfInBounds_stagedReliableInv {xs : Array Channel} (h : ∀ ch ∈ xs, StagedReliableInv ch)
+    (i : Nat) {c : Channel} (hc : StagedReliableInv c) :
+    ∀ ch ∈ xs.setIfInBounds i c, StagedReliableInv ch := by
+  intro ch hch
+  rcases mem_setIfInBounds_or hch with hch | rfl
+  · exact h ch hch
+  · exact hc
+
+theorem packetCommand_channels (p : Peer) (c : Channel) (channelId : UInt8) (packet : Packet) :
+    (p.packetCommand c channelId packet).1.channels = p.channels := by
+  unfold Peer.packetCommand
+  split <;> rfl
+
+/-- Queuing a packet only renumbers the channel's outgoing side. -/
+theorem send_peerStagedInv {p p' : Peer} (h : PeerStagedInv p) {channelId : UInt8} {packet : Packet}
+    {hasChecksum : Bool} (hs : p.send channelId packet hasChecksum = .ok p') : PeerStagedInv p' := by
+  unfold Peer.send at hs
+  simp only [bind, Except.bind, pure, Except.pure] at hs
+  repeat' split at hs
+  all_goals cases hs
+  all_goals
+    intro ch hch
+    simp only [foldl_queueOutgoingCommand_channels, queueOutgoingCommand_channels,
+      packetCommand_channels] at hch
+    have hmem := Array.mem_of_getElem? ‹p.channels[channelId.toNat]? = some _›
+    refine setIfInBounds_stagedReliableInv h _ ?_ ch hch
+    first
+      | exact fragmentCommands_stagedReliableInv (h _ hmem) ..
+      | exact packetCommand_stagedReliableInv _ (h _ hmem) ..
+
+theorem packAck_channels (mtu : UInt32) (st : Host.PackState) (ack : Acknowledgement) :
+    (Host.PackState.packAck mtu st ack).channels = st.channels := by
+  unfold Host.PackState.packAck
+  dsimp only
+  split <;> rfl
+
+theorem packUnreliable_channels (p : Peer) (st : Host.PackState) (cmd : Protocol.Command) :
+    (st.packUnreliable p cmd).channels = st.channels := by
+  unfold Host.PackState.packUnreliable
+  split
+  · rfl
+  · dsimp only
+    split <;> rfl
+
+theorem packCommand_stagedReliableInv (p : Peer) (now : UInt32) (st : Host.PackState)
+    (outCmd : OutgoingCommand) (h : ∀ ch ∈ st.channels, StagedReliableInv ch) :
+    ∀ ch ∈ (st.packCommand p now outCmd).channels, StagedReliableInv ch := by
+  unfold Host.PackState.packCommand
+  dsimp only
+  repeat' split
+  all_goals first
+    | exact h
+    | (rw [packUnreliable_channels]; exact h)
+    | (intro ch hch
+       simp only at hch
+       rcases mem_modify_or hch with hch | ⟨c, hc, rfl⟩
+       · exact h ch hch
+       · exact acquireReliableWindow_stagedReliableInv (h c hc) _)
+
+/-- Packing a datagram only occupies sender-side windows. -/
+theorem packOutgoingCommands_peerStagedInv {p : Peer} (h : PeerStagedInv p) (now : UInt32) :
+    PeerStagedInv (Host.packOutgoingCommands p now).1 := by
+  unfold Host.packOutgoingCommands
+  intro ch hch
+  simp only at hch
+  refine Array.foldl_induction (motive := fun _ (st : Host.PackState) => ∀ ch ∈ st.channels, StagedReliableInv ch)
+    ?_ (fun _ st hst => packCommand_stagedReliableInv p now st _ hst) ch hch
+  refine Array.foldl_induction (motive := fun _ (st : Host.PackState) => ∀ ch ∈ st.channels, StagedReliableInv ch)
+    ?_ (fun _ st hst => ?_)
+  · exact h
+  · rw [packAck_channels]
+    exact hst
+
+/-- The per-peer staging bound. -/
+theorem peerStagedInv_size {p : Peer} (h : PeerStagedInv p) :
+    ∀ ch ∈ p.channels,
+      ch.stagedReliable.size ≤ (Constants.freeReliableWindows - 1) * Constants.reliableWindowSize :=
+  fun ch hch => stagedReliableInv_size (h ch hch)
 
 end Lenet.Proofs

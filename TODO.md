@@ -62,9 +62,6 @@ Worth adding there as they come up:
 - **Sender-side window span.** The in-flight reliable commands of a channel
   span fewer than seven windows (see the handoff note: the stronger "always
   in the receiver's window" is false, for ENet too).
-- **Peer-level staging bound.** `stagedReliableInv_size` is per channel;
-  lift `StagedReliableInv` to every channel of a peer through
-  `Peer.receiveOnChannel` and connect.
 - **Array-level assembler invariant.** Every assembler in
   `Peer.fragmentAssemblers` satisfies `Proofs.Reassembly.Inv`; the
   per-assembler lemmas exist, the lift over the array does not.
