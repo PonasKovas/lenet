@@ -1,52 +1,76 @@
 # ENet compatibility tests
 
-Verifies that Lenet interoperates with real [ENet](https://github.com/lsalzman/enet)
-(1.3.x) by comparing it against the actual C library — not against a spec.
+Lenet is tested against the real [ENet](https://github.com/lsalzman/enet)
+C library, not against a spec. There are three parts:
 
-Two parts:
+1. **Recorder** (`c/harness.c`). Runs real ENet hosts (a server and up to
+   two clients) in one process and routes their UDP traffic through logging
+   proxy sockets. Each scripted scenario is saved as a readable trace in
+   `traces/`: the API calls (with the peer they act on), ENet's events, and
+   every datagram's bytes.
+2. **Replayer** (`Replay.lean`, the `replay` executable). Feeds each trace
+   into Lenet's `Host`, once per role, at the recorded times, applying the
+   recorded API calls, and compares Lenet's events and outgoing commands
+   with ENet's. Time advances by Lenet's own timer deadlines
+   (`Host.nextDeadline`) between trace lines, so retransmits, pings and
+   timeouts fire where Lenet's clock says, regardless of how the recording's
+   pump happened to line up.
+3. **Live interop** (`c/interop.c`). A real ENet host and a Lenet host talk
+   over real UDP sockets in one process, in both directions and every
+   delivery mode. Lenet is used only through the public C API. ENet's
+   decoder is the strictest check of Lenet's encoder, and the other way
+   round.
 
-1. **Recorder** (`c/harness.c`) — runs *real* ENet hosts (up to two clients +
-   one server) inside one process, with all UDP traffic routed through
-   in-process logging proxy sockets. Records scripted scenarios into
-   human-readable trace files: application calls (with the acting peer for
-   sends/disconnects), ENet events, and the raw datagram bytes on the wire.
-2. **Replayer** (`Replay.lean`, built as the `replay` lake exe) — feeds
-   each trace into the Lenet sans-I/O core (`Host.handleDatagram` /
-   `Host.service`) per role, at the recorded timestamps, applying the recorded
-   API calls. Compares Lenet's emitted event stream and outgoing commands
-   against ENet's.
-3. **Live interop** (`c/interop.c`) — a real ENet host and a Lenet host
-   (via the Lean FFI) talk over actual UDP sockets in one process, in both
-   directions, across every delivery mode. This is the strongest check:
-   ENet's decoder is the strictest validator of Lenet's encoder, and vice
-   versa.
-
-Real ENet sources are built out-of-tree; the ENet checkout is never modified.
+ENet is built out of tree from a checkout at `../enet` (next to this
+repository); the checkout is never modified. CI clones it at the pinned
+revision the traces were recorded with (`5a9c537`, v1.3.18-17).
 
 ## Usage
 
 ```sh
-# record golden traces from real ENet (requires gcc; see test/Makefile)
-make -C test traces
-
-# replay every trace through Lenet and diff against ENet's behavior
+# replay every trace (no ENet needed: traces are committed)
 lake build replay
 ./.lake/build/bin/replay test/traces
 
-# single scenario, with a full command-stream diff on failure
+# one scenario, with a full command-stream dump on failure
 LENET_DEBUG=1 ./.lake/build/bin/replay test/traces frag
 
-# live interop: Lenet (Lean FFI) <-> real ENet over real UDP
-lake build Lenet:static
-make -C test c/interop
-make -C test interop        # runs all 7 scenarios
-./test/c/interop connect    # single scenario
+# live interop
+make -C test interop           # builds everything, runs all scenarios
+./test/c/interop connect       # one scenario
+
+# re-record the traces (only when scenarios change; not byte-reproducible,
+# since recording uses the real clock and ENet's randomness)
+make -C test traces
 ```
 
-Output is one PASS/FAIL line per scenario/role (client + server per scenario
-for replay; one line per scenario for interop); exit code 0 iff all pass.
-The recording step is only needed when scenarios change — traces are committed
-and the replay is fully deterministic (no sockets, no real time).
+Each scenario prints one PASS/FAIL line (per role for the replay); the exit
+code is 0 only if all pass. The replay is fully deterministic: no sockets,
+no real time.
+
+## What is compared
+
+- **Events** (connect, receive, disconnect, with payload bytes) must match
+  exactly, in order.
+- **Outgoing commands.** Lenet's datagrams are decoded and the resulting
+  command stream is compared with ENet's as a multiset. The order of
+  independent control commands within one millisecond depends on how the two
+  hosts' service calls interleave and is not compared; ordering that matters
+  is still checked through the events and the per-channel sequence numbers.
+  One field is masked: `connectID`, which ENet draws at random. The replay
+  instead pins each Lenet connection to the connectID the recorded client
+  used, since the other side echoes it and checksums with it.
+- **Multi-peer scenarios.** The server's expected stream is the union of what
+  it sent to both clients, and `SEND`/`DISCONNECT` lines name the peer they
+  act on, so the replay targets the same peer.
+- **Checksums** (`checksum` scenario). Recorded datagrams are only accepted
+  if their CRC32 verifies, and Lenet's own must verify on the other side, so
+  a wrong CRC drops datagrams and fails the scenario. Quirk: `connectID` is
+  the one field ENet passes through without byte-order conversion, which is
+  why the checksum placeholder uses its big-endian form.
+- **Sanity.** Every datagram Lenet sends must decode with Lenet's decoder
+  and be at most 4096 bytes (ENet's receive buffer).
+- **Resource bounds** (see DESIGN.md) are checked after every service step.
 
 ## Scenarios
 
@@ -56,7 +80,7 @@ and the replay is fully deterministic (no sockets, no real time).
 | `send_c2s`     | reliable + unreliable + unsequenced sends, near-MTU packet       |
 | `send_s2c`     | same, server → client                                            |
 | `frag`         | 40 KB reliable packet split into MTU-bounded fragments           |
-| `fragthen`     | fragmentation span dispatch: more reliable/unreliable traffic queued behind and sent after a full fragment set, plus a second set — a span-naive dispatch frontier (advance-by-1 per set) deadlocks the channel and loses the follow-up traffic (regression for the fixed fragmentation frontier bug, see divergence triage) |
+| `fragthen`     | fragmentation span dispatch: more reliable/unreliable traffic queued behind and sent after a full fragment set, plus a second set - a span-naive dispatch frontier (advance-by-1 per set) deadlocks the channel and loses the follow-up traffic (regression for the fixed fragmentation frontier bug, see divergence triage) |
 | `disc_client`  | client-initiated graceful disconnect                             |
 | `disc_server`  | server-initiated graceful disconnect                             |
 | `idle`         | keepalive: ping/ACK duty with no traffic                         |
@@ -88,46 +112,36 @@ path (protocol.c); the replay verifies lenet behaves identically:
 | valid PING + unknown command   | **per-command processing**: prefix applied (ping ACKed), malformed tail dropped |
 | truncated command body         | break, nothing applied                                         |
 | PING with wrong header session | dropped by the peer-lookup session check                       |
-| compressed flag, no compressor | dropped                                                        |
+| compressed flag                | dropped (compression is not supported)                         |
 | CONNECT `channelCount = 0`     | rejected outright (must be in [1, 255])                        |
 | CONNECT `mtu = 0`              | accepted, MTU clamped to 576 in the advertised VERIFY_CONNECT  |
 | PING to a zombie peer          | dropped by the peer-lookup state check                         |
 
-These are differential scenarios (ENet is the record-time oracle), not
-fuzzing: the interesting input space — the validation matrix — is small and
-enumerable from protocol.c, and anything beyond it is covered by the planned
-formal proofs (see TODO.md, "No fuzzing executable").
-
-## What is compared
-
-- **Events** (CONNECT / RECEIVE / DISCONNECT, payload bytes): must match exactly.
-- **Outgoing commands** — Lenet's emitted datagrams are decoded and the merged
-  command stream is compared against ENet's, as multisets of masked commands.
-  Masked (non-deterministic): `connectId` (drawn from ENet randomness at
-  record time; the replay pins the peer's checksum key to the recorded value
-  right after connecting). Control-command order within one millisecond is a
-  scheduling artifact and not compared; order-sensitive behavior is still
-  verified by events and per-channel sequence numbers.
-- **Server commands in multi-peer scenarios** are compared per direction: the
-  server's expected stream is the union of its S2C and S2D datagrams, and
-  `SEND`/`DISCONNECT` lines record the acting peer index so the replay
-  targets the same peer.
-- **Checksums** (checksum scenario): datagrams recorded from ENet are only
-  accepted by lenet if their CRC32 verifies against the peer's `connectID`,
-  and lenet's own checksummed datagrams must decode (via the recorded peers'
-  behavior) — an incorrect CRC32 computation drops datagrams and fails the
-  scenario. Note ENet's quirk: `connectID` is the one command field passed
-  through the body without byte-order conversion, which is why the checksum
-  substitution uses the connectID's big-endian serialization.
-- **Sanity**: every datagram Lenet emits must decode with Lenet's own decoder
-  and be ≤ 4096 bytes (ENet's receive buffer).
+These are differential probes with ENet as the oracle, not fuzzing: the
+interesting inputs (ENet's validation gates) are few and can be listed from
+protocol.c, and the proofs cover the rest (see DESIGN.md, "No fuzzer").
 
 ## Divergence triage
 
-Observed or analysis-found behavioral differences, with their DESIGN.md 1.5
-classification.
+Behavioral differences from ENet, found by the tests or by reading both
+code bases, with their classification (DESIGN.md, "Correctness over
+compatibility"). Open, undecided differences are listed in TODO.md.
 
-- **Fragment-set dispatch span (lenet bug — fixed).** ENet treats a fragment
+- **Lenet bugs fixed in the 2026-09 review** (none visible to the corpus,
+  whose clocks start at 0, whose traces are short and loss-free):
+  retransmitted commands stayed counted as in transit, so every
+  retransmission shrank the congestion window for good; the sender never
+  occupied its reliable windows (`canSendReliable` always passed); RTT
+  samples mixed the 32-bit clock with the 16-bit echoed sent time, so they
+  were off by 65.5 s multiples once the clock passed 65535 ms; a client
+  accepted any VERIFY_CONNECT and took the server's MTU unclamped; a reused
+  peer slot kept the previous connection's bandwidths, window, throttle
+  and timeout settings; each throttle epoch's lowest RTT was never reset.
+  All now follow ENet (`protocol.c` check_timeouts,
+  check_outgoing_commands, handle_acknowledge, handle_verify_connect,
+  `peer.c` enet_peer_reset).
+
+- **Fragment-set dispatch span (lenet bug - fixed).** ENet treats a fragment
   set as one incoming reliable command spanning `fragmentCount` sequence
   numbers; dispatching the reassembled packet advances the receive frontier
   by the whole span (`peer.c dispatch_incoming_reliable_commands`:
@@ -136,7 +150,7 @@ classification.
   fragmented delivery the frontier no longer lined up with later commands -
   they were classified duplicates/out-of-order and staged forever: the
   channel silently stopped receiving everything after the first fragment
-  set. Found by the Phase 3 benchmark's fragmented batches (the old `frag`
+  set. Found by the benchmark's fragmented batches (the old `frag`
   scenario sends nothing after the set, which is why the corpus missed it).
   Fixed: staged deliveries are now `StagedReliable {seq, span, packet}`,
   delivery goes through `Channel.receiveReliableSpan` (plain packets span 1,
@@ -148,7 +162,7 @@ classification.
   assemble stale and duplicate fragment sets that ENet discards. Pinned by
   the `fragthen` golden scenario; the span arithmetic is pinned by proofs
   (`Lenet/Proofs/Channel.lean`).
-- **Receive window gate on reliable commands (lenet bug — fixed).** ENet
+- **Receive window gate on reliable commands (lenet bug - fixed).** ENet
   discards reliable commands outside the cyclic receive window
   (`peer.c:877-883`, `enet_peer_queue_incoming_command`) before any
   staleness/ordering logic. Lenet had ported the window test
@@ -156,7 +170,7 @@ classification.
   wrap-naive staleness test (`seq <= incoming`) instead. Two consequences,
   both invisible to the golden corpus (which would need ~65k commands per
   channel to reach): (a) at `incomingReliableSequenceNumber = 0xFFFF` the
-  legitimately next command `0x0000` was dropped forever — the channel
+  legitimately next command `0x0000` was dropped forever - the channel
   deadlocks at the 16-bit wrap, where ENet delivers (the window test is
   cyclic and `incoming + 1` wraps to `0x0000`); (b) far-future sequence
   numbers were staged without bound, where ENet discards beyond
@@ -164,15 +178,15 @@ classification.
   `Channel.receiveReliable`: out-of-window commands are discarded, the
   frontier duplicate (`seq == incoming`) is dropped, and delivery/staging
   happen exactly as before for in-window traffic. The wrap boundary is now
-  pinned by proofs (`Lenet/Proofs/Channel.lean`), which is where the TODO
-  routes wrap coverage (golden traces are descoped there).
+  pinned by proofs (`Lenet/Proofs/Channel.lean`), since golden traces cannot
+  reach it.
 - **Receive window gate on unreliable commands (documented, not mirrored).**
   ENet applies the same cyclic window gate to unreliable and
   unreliable-fragment commands (anything but SEND_UNSEQUENCED,
   `peer.c:869-883`). Lenet's `Channel.receiveUnreliable` accepts an
   unreliable command whenever its unreliable sequence number beats the
   channel's counter, ignoring the command's reliable sequence number.
-  Classification: hostile-input hardening only — legitimate senders emit
+  Classification: hostile-input hardening only - legitimate senders emit
   unreliable commands at (or within a window of) their current reliable
   sequence number, so the gate never fires for them; the structural
   difference (ENet queues out-of-order unreliable commands and dispatches
@@ -190,20 +204,9 @@ classification.
 | `frag`         | both                 | 40000-byte reliable fragmented send, byte-exact      |
 | `disconnect`   | lenet initiates      | graceful disconnect + ack dance, data passthrough    |
 | `disconnect_r` | C initiates          | reverse graceful disconnect                          |
-| `timeout`      | —                    | lenet goes silent → ENet retransmit backoff → timeout |
+| `timeout`      | lenet goes silent    | ENet retransmit backoff → timeout                     |
 | `checksum`     | both                 | CRC32 checksums on (`enet_crc32` ↔ lenet checksum), byte-exact |
 | `bandwidth`    | both                 | hosts created with 1MB/500KB bandwidths: windowSize negotiation, throttled window |
 | `disclater`    | lenet initiates      | packets queued + `disconnect_later` without pumping: flush-then-disconnect |
 | `multip`       | two C clients → lenet| address-based peer demux, broadcast to both peers, unicast |
 | `unfrag`       | both                 | 8000-byte unreliable-fragmented send, byte-exact     |
-
-These exercise the FFI boundary too: `include/lenet.h` is implemented by
-`c/interop.c` as a shim over the raw `lenet_ffi_*` Lean exports.
-
-## Layout
-
-- `c/harness.c` — recorder (scripted scenarios, proxy, wire logging)
-- `c/interop.c` — live interop runner (Lenet FFI vs real ENet over UDP)
-- `Makefile`    — builds both binaries against `../../enet` out-of-tree; `make traces` records traces, `make interop` runs all 7 scenarios
-- `traces/*.trace` — committed golden corpus (`A` = API call, `E` = event, `N` = network datagram)
-- `Replay.lean` — the replayer (`lake build replay`)

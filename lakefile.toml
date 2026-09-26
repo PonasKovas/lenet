@@ -17,8 +17,7 @@ name = "replay"
 root = "Replay"
 srcDir = "test"
 
-# Phase 3 benchmark executable (TODO.md, "Phase 3 - Performance").
-# Compile-only in CI; run it locally to record baseline numbers.
+# Benchmark: built in CI, run locally (baseline numbers in TODO.md).
 [[lean_exe]]
 name = "bench"
 root = "Bench"

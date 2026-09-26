@@ -477,8 +477,8 @@ theorem run_remaining (c : ReadCursor) :
     EStateM.run ReaderM.remaining c = .ok (c.bytes.size - c.offset) c := rfl
 
 /-- **Wire roundtrip** for the host's actual send/receive pair
-(`Host.pollPeer` encodes with `encode connectId`, `Host.handleDatagram`
-decodes with `decode checksumEnabled (some connectIdOf)`).
+(`Host.encodeDatagram` encodes with `encode connectId`,
+`Host.handleDatagram` decodes with `decode checksumEnabled (some connectIdOf)`).
 
 A datagram with a canonical header and well-formed commands decodes to
 itself, the checksum field carrying the CRC the encoder computed. With

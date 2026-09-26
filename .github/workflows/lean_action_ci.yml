@@ -19,11 +19,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: leanprover/lean-action@v1
-      # Compile-only: the Phase 3 benchmark executable must keep building;
-      # it is never run in CI.
+      # The benchmark must keep building; CI never runs it (timing on shared
+      # runners means nothing).
       - run: lake build bench
-  # Tier 1: no ENet needed - golden traces are committed and the replay
-  # is fully deterministic.
+  # No ENet needed: golden traces are committed and the replay is
+  # deterministic.
   replay:
     runs-on: ubuntu-latest
     steps:
@@ -32,8 +32,8 @@ jobs:
       - run: lake build replay
       - run: ./.lake/build/bin/replay test/traces
 
-  # Tier 1: the C API distribution builds and works from a pure C program
-  # that sees only include/lenet.h.
+  # The C distribution builds and works from a C program that sees only
+  # include/lenet.h.
   c-api:
     runs-on: ubuntu-latest
     steps:
@@ -42,8 +42,8 @@ jobs:
       - run: lake build Lenet:static
       - run: make -C csrc check
 
-  # Tier 2: live interop - Lenet (Lean FFI) vs a real ENet host over real
-  # UDP sockets. ENet is cloned at the pinned revision into the sibling
+  # Live interop: Lenet (through the C API) against a real ENet host over
+  # real UDP sockets. ENet is cloned at the pinned revision into the sibling
   # path the test Makefile expects (../enet relative to the repo root).
   interop:
     runs-on: ubuntu-latest

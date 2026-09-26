@@ -1,100 +1,136 @@
-# Lenet: Architecture & Design Specification
+# Design
 
-`Lenet` is a modern, formally verified reimplementation of the ENet protocol in Lean 4, providing wire compatibility with ENet 1.3.x while delivering a robust, ergonomic API suitable for both native Lean applications and external async runtimes (such as async Rust via Tokio/sans-I/O FFI).
+## Principles
 
----
+**Sans-I/O.** The engine is a pure state machine: `(host, input) -> (host,
+output)`. Inputs are received datagrams and the current time; outputs are
+datagrams to send and application events. The driver (a C loop, a Tokio
+task) owns the socket and the clock. Time is `UInt32` milliseconds and
+wraps, like ENet's; all time comparisons go through `Lenet.Time`, which
+uses ENet's wrap-aware order.
 
-## 1. Core Principles
+**Correctness over compatibility.** Lenet has to interoperate with ENet, not
+copy it. Every behavioral difference found is sorted into one of three
+kinds, and the decision is written down in
+[test/README.md](test/README.md#divergence-triage):
 
-### 1.1 Pure Sans-I/O Protocol Engine
-- **No Direct Sockets or Clock Syscalls in the Core**: The core protocol engine is a pure state machine:
-  $$\text{State} \times \text{InputEvent} \to \text{State} \times \text{OutputActions}$$
-- The host application (Lean 4 async task, Tokio/Rust runtime, C driver) owns the UDP socket and event loop, passing timestamps and datagrams into Lenet and executing returned transmission actions.
+- *lenet bug*: Lenet is wrong, fix Lenet.
+- *enet bug*: ENet is wrong. Lenet does the right thing and the difference
+  is recorded. Never copy the bug.
+- *don't care*: invisible to interop. The comparison masks it, with the
+  reason written next to the mask.
 
-### 1.2 Formally Verified Correctness
-- Lean 4 serves as both the implementation language and proof assistant.
-- Invariants to be proved:
-  - **Codec Roundtrip**: $\forall x, \text{decode}(\text{encode}(x)) = \text{ok}(x)$.
-  - **Memory & Bounds Safety**: No out-of-bounds indexing or integer overflows on untrusted input.
-  - **Reliable In-Order Delivery**: Channel sequence numbers and sliding windows guarantee exactly-once, in-order packet delivery without deadlocks.
-  - **Reassembly Safety**: Fragment reassembly logic is memory-safe and cannot be tricked into buffer overruns by malicious offsets/counts.
-  - **Throttling** and other features correctness.
-- Which invariants matter most is informed by the compatibility corpus (`test/`) - the corpus shows what real ENet interop actually exercises.
+**Robust against hostile input.** Every value from the wire is validated
+before it is used, and memory an attacker can make Lenet hold is bounded
+(see [Resource bounds](#resource-bounds)). Where ENet is looser, Lenet is
+deliberately stricter.
 
-### 1.3 Ergonomic, Type-Safe API
-- Replace C's untyped bitmasks and `void*` fields with strongly typed Lean 4 data structures (`ChannelId`, `Packet`, `PeerState`, `CommandBody`, `Event`).
-- Idiomatic high-level API with typed channels, streams, and event handlers on top of the sans-I/O core.
+## Architecture
 
-### 1.4 Wire Compatibility
-- Binary wire layout, packet headers, command structures, CRC32 checksums, and timeout backoff curves remain strictly compatible with standard ENet 1.3.18 (pinned revision, see `TODO.md`).
-- **Compression is explicitly out of scope** (descoped): ENet's optional order-2 PPM range coder is not implemented. Compressed datagrams are rejected. Rationale: the feature is opt-in and rarely used in ENet deployments, the wire format is ENet-specific (no library exists; a decoder must mirror ENet's encoder model exactly), and a faithful port of the pointer-heavy C coder is a large task with no current demand. Revisit only if a consumer needs it.
+```
+driver ──datagram──▶ Host.handleDatagram ──▶ Datagram.decode ──▶ Peer.handleCommand ──▶ Channel
+driver ──time──────▶ Host.service ─┬─ bandwidthThrottle      (every 1 s)
+                                   ├─ checkTimeoutsAndPings  (retransmit, timeout, keepalive)
+                                   └─ pollOutgoing ──▶ packOutgoingCommands ──▶ Datagram.encode ──▶ driver
+driver ◀──when─────  Host.nextDeadline
+```
 
-### 1.5 Correctness Over Compatibility (in stone)
+| module                     | role |
+|----------------------------|------|
+| `Host`                     | peer slots, connection setup, the API calls, `service`, `nextDeadline` |
+| `Peer`                     | one connection: state machine, RTT and throttle, command queues, incoming command handling |
+| `Channel`                  | per-channel sequence numbers, reliable windows, staging of out-of-order reliable deliveries |
+| `Reassembly`, `Unsequenced`| fragment reassembly; duplicate filter for unsequenced packets |
+| `Protocol.*`, `Codec`, `Checksum` | the wire format and ENet's CRC32 |
+| `FFI`                      | `IO` wrappers exported to the C shim (`csrc/lenet_capi.c`); the only place with `IO` |
 
-Lenet's primary objective is always **correctness and robustness**. Compatibility with ENet is a goal, never an excuse:
+Every function in the core follows ENet's structure closely and names the
+ENet function it mirrors (`protocol.c handle_acknowledge`, ...), so the two
+can be read side by side. The replay and interop tests pin ENet
+1.3.18-17 (`5a9c537`).
 
-- **If a divergence is caused by a bug in original ENet, fix it in Lenet. Never mirror the bug.**
-- Every observed divergence is triaged into one of three classes:
-  - **lenet bug**: Lenet deviates where ENet is right -> fix Lenet.
-  - **enet bug**: ENet behaves incorrectly -> implement the *correct* behavior in Lenet, and record the divergence and its rationale in `test/README.md`.
-  - **don't-care**: behaviorally invisible to interop -> mask it in the comparison with a written rationale.
-- The triage decision is always documented, never silent.
+## Code rules
 
-### 1.6 Quality Gates (enforced before/alongside formal verification)
+These hold for everything under `Lenet/`.
 
-- **NO PANICS** anywhere in the library: no panicking constructs (`get!`-style indexing without proofs, `unsafe`, partial pattern matches, unguarded arithmetic). Any possible error is an exception returned to the caller. This gate is a precondition for the no-panics formal proof and is checked in the code-quality phase.
-- The core is total by construction: every function terminates on every input.
+- **No panics.** No `xs[i]!`, `get!`, `unsafe`, `partial`, `sorry` or
+  incomplete matches. Array access is either proof-guarded
+  (`if h : i < xs.size`), total (`?`, `modify`, `setIfInBounds`), or a
+  `?`-match whose `none` case is handled. `Proofs/Panic.lean` enforces this
+  at build time.
+- **No invented state.** `getD` is fine when the default is the right
+  answer for "absent" (no event, an empty slot reads 0). It is not fine
+  when absence means a broken invariant: then handle the case.
+- **Total by construction.** Recursion is structural or fuel-bounded, and
+  the loop says why its fuel is enough.
+- **Sizes in types.** Fixed-size rings are `Vector _ N`, and the index
+  bound is proven once next to the index function.
+- **Typed errors.** Fallible API calls return `Except LenetError _`; wire
+  decoding fails with `CodecError`.
+- **Deliberate arithmetic.** `UInt*` arithmetic wraps like ENet's C code
+  (timers, sequence numbers); that is intended. `Nat` subtraction saturates;
+  code that relies on it says why it cannot underflow.
+- **One source of truth for wire sizes.** `CommandBody.fixedWireSize` and
+  `payloadSize`; the encoder, the decoder and the packer all use them.
+- **Performance idiom.** Lean updates a value in place only while it is
+  uniquely referenced. Hot loops are top-level functions over a state
+  record (see `Host.PackState`), and `IO.Ref`s are updated with
+  `modify`, not `get` then `set`.
 
-### 1.7 Code Style Conventions (Phase 1 gate)
+## What is proven
 
-Binding conventions for everything under `Lenet/`:
+The proofs live in the `LenetProofs` library (`Lenet/Proofs/`), which the
+default build and CI compile. The C library never includes them.
 
-- **No panicking constructs.** No `getElem!` (`xs[i]!`), `Array.get!`, `unsafe`,
-  `partial`, `sorry`, or partial pattern matches. Array access is either
-  proof-guarded (`if h : i < xs.size then xs[i]`) or a `?`-match whose `none`
-  branch is an explicit error or a commented unreachable case.
-- **No `getD` defaults that fabricate state.** A `?.getD d` is allowed only
-  when `d` is the semantically correct answer for "absent" (e.g. an `Option`
-  event defaulting to `#[]`, an empty ring-buffer slot reading as `0`/`false`).
-  Where absence would mean an internal invariant broke (a default `Peer`,
-  default `Channel`, default assembler), the case is handled explicitly:
-  typed error, drop, or commented-unreachable - never a silently fabricated
-  object that lets execution continue as if nothing happened.
-- **Fixed-size state carries its bounds in its type.** Ring windows that are
-  constant-sized by construction (`Channel.reliableWindows`,
-  `UnsequencedWindow.window`) are `Vector _ N`; the index bounds are
-  discharged once by the `*_lt` lemmas next to the index definition, not by
-  runtime guards.
-- **Typed errors at the API boundary.** Public fallible operations return
-  `Except LenetError _` (one constructor per failure mode, with a `ToString`
-  rendering); stringly-typed errors are not used. Wire-decode failures use
-  `CodecError`.
-- **Total by construction.** Every function terminates on every input:
-  recursion is structural or fuel-bounded (the fuel bound and its initial
-  value are documented at the loop). No `partial`.
-- **No imperative leftovers.** Pure state threading uses `foldl`/`map` over
-  ranges, not `let mut` accumulators in `for` loops. `IO` appears only in
-  `Lenet.FFI`.
-- **Wrap-aware arithmetic is intentional and documented.** `UInt*`
-  add/subtract/shift wrap, matching ENet's fixed-width arithmetic (timers,
-  sequence numbers) - that is parity, not a bug. `Nat` subtraction must never
-  be relied on to saturate where the value matters.
-- **Single source of truth for wire sizes.** Command sizes live in
-  `Protocol.CommandBody.fixedWireSize` / `payloadSize`; the encoder, the
-  datagram parser's advance logic, and the packer's MTU budget all derive
-  from them.
+| file            | result |
+|-----------------|--------|
+| `Codec`         | every reader primitive either advances past a bounds-checked region or fails in place; field-level write/read inverses; the command parser's fuel is always enough (`parseCommands_fuel_adequate`) |
+| `Roundtrip`     | every command kind roundtrips (`rt_command`), canonical headers roundtrip (`rt_header`), the command list is recovered exactly (`parseCommands_cmdsBytes`), and the full wire datagram roundtrips through the host's real encode/decode pair, checksum verification included (`wire_roundtrip`) |
+| `Reassembly`    | the assembler's bitmap and counter stay in step, writes stay in bounds, and a packet is only released when every fragment arrived (`addFragment_completion_sound`) |
+| `Channel`       | the staged-delivery drain has enough fuel and advances the frontier by exactly the delivered span; delivery works across the 16-bit wrap (`wrap_delivery`) |
+| `Unsequenced`   | a group accepted once is always rejected afterwards (`checkAndAdd_idempotent`) |
+| `Time`          | time differences don't depend on when the clock started; 16-bit wire timestamps are recovered exactly (`fromWire_recovers`) |
+| `Deadline`      | `nextDeadline` is always one of the host's timers and no timer is earlier (`nextDeadline_mem`, `nextDeadline_earliest`) |
+| `Resources`     | the fragment-assembler cap holds (`handleFragment_cap_preserved`), assembler memory is fixed at creation, and staging grows by at most one entry per receive |
+| `Panic`         | a build-time scan of every `Lenet.*` definition fails the build on any panicking construct; every division is listed with a proof its divisor is not zero |
 
----
+A kernel theorem cannot say "does not panic", because in Lean's logic
+`panic!` is just `default`. That is why the no-panic guarantee is a
+build-time audit rather than a theorem.
 
-## 2. Project Roadmap
+## Scope decisions
 
-The living roadmap (phases, exit criteria, task state) is maintained in `TODO.md`. Phase order: compatibility -> code quality -> formal proofs -> performance -> `lenet-rs` (async Rust bindings).
+- **No compression.** ENet's optional order-2 range coder is not
+  implemented, and datagrams with the compressed flag are dropped. The
+  feature is opt-in and rarely used, and a decoder would have to copy
+  ENet's coder model exactly, which is a large port with no user asking
+  for it.
+- **Static library only.** The stock Lean runtime is built without
+  `-fPIC`, so a shared `liblenet.so` cannot be made.
+- **One host, one thread.** A host is not thread-safe; drive it from one
+  thread or put a lock around it.
+- **Tests compare with ENet, not a spec.** Golden traces are recorded from
+  ENet at a pinned revision. Moving the pin means re-recording
+  (`make -C test traces`) and reviewing the diff.
+- **No fuzzer.** Hostile input is covered by hand-picked `inject` probes
+  (with ENet as the oracle) plus the proofs. Random fuzzing would cost more
+  than it finds here.
+- **Not covered by traces:** sequence-number wrap (it takes ~65k commands
+  per channel; the proofs cover it) and packet loss or reordering
+  (recording those is not deterministic).
 
----
+## Resource bounds
 
-## 3. Repository Layout
+Memory an attacker can make a host hold is bounded:
 
-- `Lenet/` - the sans-I/O protocol core (pure Lean)
-- `csrc/` - the C API distribution incl. `include/lenet.h` (static-only; Lean runtime archive is not built with `-fPIC`)
-- `test/` - ENet compatibility harness: golden-trace recorder (`c/harness.c`), replay diff (`test/Replay.lean`), live interop (`c/interop.c`); see `test/README.md`
-- `TODO.md` - roadmap and decided constraints
+- **Fragment assemblers:** at most `maximumFragmentAssemblers` (32) per peer
+  are in progress. Each one allocates its full packet up front, capped by
+  the validated total length (4 MB) and a fragment count of at most
+  `maximumReceivedFragmentCount` (65536). ENet has no such cap.
+- **Staged reliable packets:** only in-window sequence numbers are staged,
+  each at most once.
+- **ACK queue:** not capped on purpose. It grows by at most 32 entries per
+  received datagram and each service call drains it; capping it would only
+  force retransmissions. This matches ENet.
+
+The replay checks all three bounds after every service step.

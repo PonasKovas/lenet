@@ -14,6 +14,16 @@
  * runtimes (e.g. Rust/Tokio): every call is non-blocking and time is
  * always supplied by the caller.
  *
+ * Driver rules:
+ *   - Datagrams (ACKs included) are only produced by lenet_host_service:
+ *     call it after feeding datagrams, then drain lenet_host_poll_outgoing.
+ *   - Between datagrams, servicing at lenet_host_next_deadline is enough;
+ *     there is no need to busy-poll.
+ *   - Times are milliseconds on any monotonic clock, truncated to 32 bits.
+ *     They may wrap; compare them wrap-aware.
+ *   - On the server side the CONNECT event fires when the client
+ *     acknowledges the handshake, not when its CONNECT arrives.
+ *
  * Threading: a lenet_host is NOT thread-safe. Drive each host from a
  * single thread (or serialize access with your own lock).
  */
@@ -96,7 +106,8 @@ int32_t lenet_host_connect(lenet_host *host, uint32_t ip, uint16_t port,
                            size_t channel_count, uint32_t user_data);
 
 /**
- * Queues a packet for transmission on `channel`.
+ * Queues a packet for transmission on `channel`. `flags` is one
+ * LENET_* delivery mode.
  * Returns 0 on success, -1 on error (unknown peer, peer not connected,
  * channel out of range, packet too large).
  */

@@ -1,56 +1,99 @@
 # lenet
 
-A Lean 4, sans-I/O reimplementation of the [ENet](https://github.com/lsalzman/enet)
-protocol (1.3.x wire-compatible), with a plain C API.
+A Lean 4 implementation of the [ENet](https://github.com/lsalzman/enet)
+protocol, wire compatible with ENet 1.3.x, with a plain C API.
 
-- **Wire compatible** with ENet 1.3.x — validated against the real C library
-  (golden-trace replay + live UDP interop, see `test/README.md`).
-- **Sans-I/O core** — the protocol engine opens no sockets and reads no
-  clocks; the driver supplies time and datagrams. Works for sync or async
-  runtimes (e.g. Rust/Tokio).
-- **Clean C distribution** — builds to a single self-contained
-  `liblenet.a`; nothing Lean is visible to consumers.
-- **Correctness over compatibility** — where ENet is buggy, lenet implements
-  the correct behavior instead of mirroring the bug (see `DESIGN.md`).
-- **Not implemented**: ENet's optional compression (order-2 PPM range coder)
-  is explicitly descoped; compressed datagrams are rejected. See `DESIGN.md`
-  and `TODO.md` for the roadmap (code quality, formal proofs, performance,
-  and async Rust bindings are the planned next phases).
+- **Sans-I/O.** The protocol engine opens no sockets and reads no clocks.
+  The driver owns the UDP socket and the time, feeds datagrams in and sends
+  what comes out. That works the same for a C loop, a thread, or an async
+  runtime such as Tokio.
+- **Checked against real ENet.** Golden traces recorded from the C library
+  are replayed through Lenet and diffed, and a live test runs Lenet against
+  ENet over real UDP sockets.
+- **Partly proven.** Codec roundtrip, fragment reassembly, reliable
+  delivery across sequence wrap, timer scheduling, resource bounds and a
+  build-time no-panic audit are machine-checked Lean proofs.
+- **Correct before compatible.** Where ENet has a bug, Lenet does the right
+  thing instead of copying it; every such divergence is written down.
+- **One static library.** The C build is a single `liblenet.a` with the Lean
+  runtime inside; users see only `lenet.h`.
 
-## Building the C library
+ENet's optional packet compression is not implemented: compressed
+datagrams are dropped. See [DESIGN.md](DESIGN.md) for why.
 
-Requires: [Lean 4](https://lean-lang.org/) (via elan) and a C compiler.
+## Building
 
-```sh
-lake build Lenet:static   # compile the Lean core
-make -C csrc              # -> csrc/build/liblenet.a (self-contained)
-```
-
-This produces `csrc/build/liblenet.a` with the Lean runtime baked in.
-Consumers need only the header and one archive:
+Needs [Lean 4](https://lean-lang.org/) (through elan) and a C compiler.
 
 ```sh
-cc myapp.c -Ipath/to/lenet/include -Lpath/to/csrc/build -llenet \
-    -lpthread -ldl -lm
+lake build                 # the library and the proofs
+make -C csrc               # -> csrc/build/liblenet.a
+make -C csrc check         # a C program using only lenet.h links and runs
 ```
 
-Smoke-check the build (compiles a public-header-only program and runs it):
+Link your program with the header and the archive:
 
 ```sh
-make -C csrc check
+cc app.c -Ipath/to/csrc/include -Lpath/to/csrc/build -llenet -lpthread -ldl -lm
 ```
 
-See `csrc/include/lenet.h` for the API and `csrc/check.c` for a minimal example.
-A shared library is not currently possible: Lean's runtime archive is built
+A shared library is not possible yet: the Lean runtime archive is built
 without `-fPIC`.
+
+## Using it from C
+
+```c
+lenet_host *host = lenet_host_create(0, 0, 32, 2, 0, 0, 0);
+for (;;) {
+    /* for every datagram your socket receives: */
+    lenet_host_handle_datagram(host, now_ms(), ip, port, buf, len);
+
+    lenet_host_service(host, now_ms());          /* timers + packing */
+
+    lenet_datagram out;
+    while (lenet_host_poll_outgoing(host, &out) == 1)
+        sendto(sock, out.data, out.len, ...);    /* to out.ip:out.port */
+
+    lenet_event ev;
+    while (lenet_host_poll_event(host, &ev, payload, sizeof payload, &plen) == 1)
+        handle(&ev);
+
+    /* sleep until the next datagram or lenet_host_next_deadline() */
+}
+```
+
+The full API, with the rules a driver has to follow, is documented in
+[csrc/include/lenet.h](csrc/include/lenet.h). Async Rust bindings live in a
+separate repository (`lenet-rs`).
 
 ## Testing
 
 ```sh
 lake build replay && ./.lake/build/bin/replay test/traces   # golden-trace replay
-make -C csrc check                       # C API smoke test
-make -C test interop                     # live interop vs real ENet (needs ../enet)
+make -C csrc check                                          # C API smoke test
+make -C test interop                                        # live interop (needs ENet in ../enet)
+lake build bench && ./.lake/build/bin/bench                 # benchmark
 ```
 
-Details, including how the compatibility tests obtain real ENet, are in
-`test/README.md`. CI runs all three layers (`.github/workflows/`).
+CI runs all of it except the benchmark, which it only builds. How the ENet
+comparison works is explained in [test/README.md](test/README.md).
+
+## Layout
+
+| path                  | what                                                     |
+|-----------------------|----------------------------------------------------------|
+| `Lenet/`              | the protocol engine (pure Lean); `Lenet/Host.lean` is the entry point |
+| `Lenet/Protocol/`     | the wire format: header, commands, datagrams             |
+| `Lenet/Proofs/`       | the proofs (library `LenetProofs`, never linked into C)  |
+| `Lenet/FFI.lean`      | the exports the C shim wraps                             |
+| `csrc/`               | the C distribution: `include/lenet.h`, the shim, the build |
+| `test/`               | ENet comparison: trace recorder, replayer, live interop  |
+| `bench/`              | throughput and service-cost benchmark                    |
+
+## Documents
+
+- [DESIGN.md](DESIGN.md): principles, architecture, code rules, what is
+  proven, and the scope decisions.
+- [test/README.md](test/README.md): the test setup, every scenario, and the
+  record of where Lenet differs from ENet and why.
+- [TODO.md](TODO.md): open work.
