@@ -42,7 +42,18 @@ Done this session:
   the 32 MB send limit, header bytes, and fragment validation. Four ENet
   quirks are recorded as not copied.
 - Receiver cap raised to ENet's 32 MB (was 4 MB), the user's call, so
-  sender and receiver agree.
+  sender and receiver agree, with ENet's 32 MB waiting-data budget on the
+  assemblers (proven: `handleFragment_waiting`).
+- A review of the session's commits found reassembly quadratic (made
+  much worse by the 32 MB cap): fixed by taking the peer, the assembler
+  array and the assembler out before changing them (`takeAt`). The
+  sending side was quadratic too: packing now fills every datagram of a
+  service in one pass. Both are in the Performance section.
+- ENet API parity: disconnect_now, peer reset, ping, ping interval,
+  bandwidth limit, channel limit, flush and a peer-info getter.
+- Another proof hazard: when a value must stay unshared, `swapAt` alone is
+  not enough, since the compiler may sink its write; `takeAt` is
+  `@[noinline]` for that reason.
 - A proof hazard worth knowing: never let the kernel compare `h` with a
   host whose `randomSeed` was advanced (`h.randomSeed + 0x6D2B79F5`). It
   unfolds the addition one successor at a time, with no heartbeat limit,
