@@ -27,8 +27,8 @@ Results, bottom-up:
 * `parseCommands_cmdsBytes` - `Datagram.parseCommands` recovers exactly the
   command sequence from its concatenated wire bytes.
 * `wire_roundtrip` - **the send/receive pair the host actually uses**:
-  `decodeWith checksumEnabled (some connectIdOf) none` on
-  `encodeWith none connectId` returns the datagram (checksum field replaced
+  `decode checksumEnabled (some connectIdOf)` on
+  `encode connectId` returns the datagram (checksum field replaced
   by the CRC the encoder computed), *including passing checksum
   verification* whenever the receiver's key for the header's peer ID equals
   the sender's `connectId`.
@@ -299,9 +299,9 @@ theorem cmdBytes_spec {cmd : Command} (h : cmd.WellFormed) :
     rw [cmdBytes, hw, ByteArray.empty_append]
   subst e
   refine ⟨?_, hw, hr⟩
-  rw [hs, Command.wireSize]; simp only [if_true]; omega
+  rw [hs, Command.wireSize]; omega
 
-/-- The loop body `Datagram.encode`/`encodeWith` run over the commands. -/
+/-- The loop body `Datagram.encode` runs over the commands. -/
 abbrev encodeLoopBody : Command → PUnit → WriterM (ForInStep PUnit) :=
   fun cmd _ => do cmd.encode; pure (ForInStep.yield PUnit.unit)
 
@@ -425,7 +425,7 @@ theorem rt_header (h : Header) (hc : h.Canonical) :
   · exact rt_pure _
   · exact (rt_u16 _).last rfl
 
-/-! ## Datagram (the wire path: `encodeWith` / `decodeWith`) -/
+/-! ## Datagram (the wire path: `encode` / `decode`) -/
 
 /-- Run a reader whose bytes sit at a known position in the buffer. -/
 theorem Reads.run_eq {α} {r : ReaderM α} {s : ByteArray} {v : α} (h : Reads r s v)
@@ -444,13 +444,13 @@ theorem RoundTrip.writes {α} {w : WriterM Unit} {r : ReaderM α} {v : α} {n : 
 /-- The header's wire bytes. -/
 def headerBytes (h : Header) : ByteArray := runW h.encode ByteArray.empty
 
-/-- The checksum `encodeWith` stores: CRC over header + key placeholder + commands. -/
+/-- The checksum `Datagram.encode` stores: CRC over header + key placeholder + commands. -/
 def wireChecksum (d : Datagram) (connectId : UInt32) : UInt32 :=
   Datagram.computeChecksum (headerBytes d.header) (cmdsBytes d.commands.toList) connectId
 
-theorem encodeWith_eq (d : Datagram) (connectId : UInt32) (hcomp : d.header.compressed = false)
+theorem encode_eq (d : Datagram) (connectId : UInt32) (hcomp : d.header.compressed = false)
     (hcmds : ∀ c ∈ d.commands, c.WellFormed) :
-    d.encodeWith none connectId =
+    d.encode connectId =
       match d.checksum with
       | none => headerBytes d.header ++ cmdsBytes d.commands.toList
       | some _ => headerBytes d.header ++ fourBytes (wireChecksum d connectId) ++
@@ -458,7 +458,7 @@ theorem encodeWith_eq (d : Datagram) (connectId : UInt32) (hcomp : d.header.comp
   obtain ⟨hdr, cs, cmds⟩ := d
   have hw := writes_commands cmds hcmds
   have hh : { hdr with compressed := false } = hdr := by cases hdr; simp_all
-  unfold Datagram.encodeWith
+  unfold Datagram.encode
   have hrun : ∀ w : WriterM Unit, WriterM.run w = runW w ByteArray.empty := fun _ => rfl
   have hc : WriterM.run (forIn cmds PUnit.unit encodeLoopBody >>= fun _ => pure ()) =
       cmdsBytes cmds.toList := by
@@ -477,9 +477,8 @@ theorem run_remaining (c : ReadCursor) :
     EStateM.run ReaderM.remaining c = .ok (c.bytes.size - c.offset) c := rfl
 
 /-- **Wire roundtrip** for the host's actual send/receive pair
-(`Host.pollPeer` encodes with `encodeWith compressor connectId`,
-`Host.handleDatagram` decodes with `decodeWith checksumEnabled (some
-connectIdOf) compressor`; compression is descoped, so `none`).
+(`Host.pollPeer` encodes with `encode connectId`, `Host.handleDatagram`
+decodes with `decode checksumEnabled (some connectIdOf)`).
 
 A datagram with a canonical header and well-formed commands decodes to
 itself, the checksum field carrying the CRC the encoder computed. With
@@ -490,10 +489,10 @@ theorem wire_roundtrip (d : Datagram) (connectId : UInt32) (cidOf : UInt16 → U
     (hc : d.header.Canonical) (hcomp : d.header.compressed = false)
     (hcmds : ∀ c ∈ d.commands, c.WellFormed)
     (hkey : d.checksum.isSome → cidOf d.header.peerId = connectId) :
-    ReaderM.run (Datagram.decodeWith d.checksum.isSome (some cidOf) none)
-        (d.encodeWith none connectId) =
+    ReaderM.run (Datagram.decode d.checksum.isSome (some cidOf))
+        (d.encode connectId) =
       .ok { d with checksum := d.checksum.map fun _ => wireChecksum d connectId } := by
-  rw [encodeWith_eq d connectId hcomp hcmds]
+  rw [encode_eq d connectId hcomp hcmds]
   have hparse := parseCommands_cmdsBytes d.commands.toList
     (fun c hc' => hcmds c (Array.mem_toList_iff.mp hc'))
   obtain ⟨hdr, cs, cmds⟩ := d
@@ -502,7 +501,7 @@ theorem wire_roundtrip (d : Datagram) (connectId : UInt32) (cidOf : UInt16 → U
   have hB := reads_bytes (cmdsBytes cmds.toList)
   cases cs with
   | none =>
-    simp only [ReaderM.run, Datagram.decodeWith, EStateM.run_bind, Option.isSome_none,
+    simp only [ReaderM.run, Datagram.decode, EStateM.run_bind, Option.isSome_none,
       Bool.false_eq_true, if_false]
     rw [hR.run_eq (pre := ByteArray.empty) (post := cmdsBytes cmds.toList) (off := 0)
       (by simp [headerBytes]) rfl]
@@ -511,12 +510,12 @@ theorem wire_roundtrip (d : Datagram) (connectId : UInt32) (cidOf : UInt16 → U
         (ByteArray.empty.size + (runW hdr.encode ByteArray.empty).size) = (cmdsBytes cmds.toList).size
         by simp [headerBytes, ByteArray.size_append]]
     rw [hB.run_eq (pre := headerBytes hdr) (post := ByteArray.empty) (by simp) (by simp [headerBytes])]
-    simp only [hcomp, Bool.false_eq_true, if_false, EStateM.run_bind, EStateM.run_pure, hparse,
-      Option.map_none, Array.toArray_toList]
+    simp only [hcomp, Bool.false_eq_true, if_false, EStateM.run_pure, hparse, Option.map_none,
+      Array.toArray_toList]
   | some v =>
     have hk := hkey rfl
     generalize hW : wireChecksum { header := hdr, checksum := some v, commands := cmds } connectId = W
-    simp only [ReaderM.run, Datagram.decodeWith, EStateM.run_bind, Option.isSome_some, if_true]
+    simp only [ReaderM.run, Datagram.decode, EStateM.run_bind, Option.isSome_some, if_true]
     rw [hR.run_eq (pre := ByteArray.empty)
       (post := fourBytes W ++ cmdsBytes cmds.toList) (off := 0)
       (by simp [headerBytes, ByteArray.append_assoc]) rfl]
@@ -529,7 +528,7 @@ theorem wire_roundtrip (d : Datagram) (connectId : UInt32) (cidOf : UInt16 → U
         by simp [ByteArray.size_append]]
     rw [hB.run_eq (pre := headerBytes hdr ++ fourBytes W) (post := ByteArray.empty)
       (off := (headerBytes hdr).size + (fourBytes W).size) (by simp) (by simp [ByteArray.size_append])]
-    simp only [hcomp, Bool.false_eq_true, if_false, EStateM.run_bind, EStateM.run_pure, EStateM.run_get]
+    simp only [hcomp, Bool.false_eq_true, if_false, EStateM.run_bind, EStateM.run_get]
     have hx : (headerBytes hdr ++ fourBytes W ++ cmdsBytes cmds.toList).extract 0
         (ByteArray.empty.size + (runW hdr.encode ByteArray.empty).size) = headerBytes hdr := by
       rw [ByteArray.append_assoc]

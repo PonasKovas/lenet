@@ -68,7 +68,7 @@ run_meta do
         if isPanicking c then bad := bad.push m!"{n}: references {c}"
   -- guard against a vacuous scan (renamed namespace, dropped import)
   for entry in [``Host.handleDatagram, ``Host.service, ``Host.nextDeadline, ``Host.connect,
-      ``Host.send, ``Peer.send, ``Protocol.Datagram.decodeWith, ``Protocol.Datagram.encodeWith] do
+      ``Host.send, ``Peer.send, ``Protocol.Datagram.decode, ``Protocol.Datagram.encode] do
     unless scanned.contains entry do throwError m!"panic audit: entry point {entry} not scanned"
   unless bad.isEmpty do
     throwError m!"panic audit failed:{indentD (MessageData.joinSep bad.toList Format.line)}"

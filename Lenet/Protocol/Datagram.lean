@@ -6,16 +6,16 @@ import Lenet.Protocol.Command
 
 namespace Lenet.Protocol
 
-open Lenet
-open Lenet.ReaderM
-open Lenet.WriterM
+open ReaderM WriterM
 
 /--
-A decoded ENet protocol datagram.
-The wire format consists of:
-1. `Header` (2 or 4 bytes, uncompressed)
-2. `checksum` (optional 4 bytes, uncompressed)
-3. Commands payload (raw command bytes OR compressed bytes if `header.compressed = true`)
+A decoded ENet protocol datagram. Wire layout:
+1. `Header` (2 or 4 bytes)
+2. `checksum` (4 bytes, only when the hosts have checksums enabled)
+3. the commands, back to back
+
+ENet's optional payload compression is not supported (see DESIGN.md):
+compressed datagrams are rejected on decode and never produced.
 -/
 structure Datagram where
   header   : Header
@@ -60,16 +60,16 @@ where
         | .error _ => acc
 
 /--
-Decodes a datagram from a reader, optionally decompressing the commands payload
-if `header.compressed` is set and a `Compressor` is provided.
+Decodes a datagram. `hasChecksum` says whether the 4-byte checksum field is
+present (the host's checksum setting).
 
-`connectIdOf` resolves the checksum key for a datagram's header peer ID when
-the host has checksums enabled (ENet: the receiving host substitutes the
-peer's `connectID`, or 0 for the broadcast peer `0xFFF`, before verifying).
-Passing `none` consumes the checksum field without verifying it.
+`connectIdOf` resolves the checksum key for a datagram's header peer ID
+(ENet: the receiving host substitutes the peer's `connectID`, or 0 for the
+broadcast peer `0xFFF`, before verifying). Passing `none` consumes the
+checksum field without verifying it.
 -/
-def decodeWith (hasChecksum : Bool := false) (connectIdOf : Option (UInt16 → UInt32) := none)
-    (compressor : Option Compressor := none) : ReaderM Datagram := do
+def decode (hasChecksum : Bool := false) (connectIdOf : Option (UInt16 → UInt32) := none) :
+    ReaderM Datagram := do
   let header ← Header.decode
   let fieldStart := (← get).offset
   let checksum ← if hasChecksum then
@@ -78,98 +78,50 @@ def decodeWith (hasChecksum : Bool := false) (connectIdOf : Option (UInt16 → U
   else
     pure none
 
-  let payloadBytes ← readBytes (← remaining)
+  let commandBytes ← readBytes (← remaining)
 
-  let commandBytes ← if header.compressed then
-    match compressor with
-    | some comp =>
-      match comp.decompress payloadBytes with
-      | .ok decompressed => pure decompressed
-      | .error err       => throw err
-    | none =>
-      throw (CodecError.custom "Received compressed datagram but no compressor configured")
-  else
-    pure payloadBytes
+  if header.compressed then
+    throw (CodecError.custom "compressed datagrams are not supported")
 
   -- Verify the checksum (ENet enet_protocol_receive): the CRC32 is computed
   -- over header + checksum field (substituted with the peer's connectID) +
-  -- the *decompressed* commands payload, and compared against the field as
-  -- transmitted. Failures drop the datagram before any command is parsed.
-  let verify : ReaderM Unit :=
-    match connectIdOf, checksum with
-    | some cidOf, some stored => do
-      let raw := (← get).bytes
-      let pre := raw.extract 0 fieldStart
-      let expected := computeChecksum pre commandBytes (cidOf header.peerId)
-      if expected != stored then
-        throw (CodecError.custom s!"Checksum mismatch: expected {expected}, got {stored}")
-    | _, _ => pure ()
-  if hasChecksum then
-    verify
-  else
-    pure ()
+  -- the commands, and compared against the field as transmitted. Failures
+  -- drop the datagram before any command is parsed.
+  match connectIdOf, checksum with
+  | some cidOf, some stored =>
+    let pre := (← get).bytes.extract 0 fieldStart
+    let expected := computeChecksum pre commandBytes (cidOf header.peerId)
+    if expected != stored then
+      throw (CodecError.custom s!"Checksum mismatch: expected {expected}, got {stored}")
+  | _, _ => pure ()
 
-  -- Parse commands from the (decompressed) payload, sequentially, ENet-style
-  -- (protocol.c receive loop): apply the prefix of well-formed commands and
-  -- stop at the first malformed one (unknown command number, truncated body).
-  -- ENet does not discard earlier commands when a later one is malformed, and
-  -- accepts a payload with zero commands (the loop simply never runs).
-  let commands := parseCommands commandBytes
-
-  return { header, checksum, commands }
-
-/-- Decodes an uncompressed datagram from a `ReaderM` stream. -/
-def decode (hasChecksum : Bool := false) : ReaderM Datagram :=
-  decodeWith hasChecksum none none
+  -- ENet applies the prefix of well-formed commands and stops at the first
+  -- malformed one (unknown command number, truncated body); a payload with
+  -- zero commands is legal.
+  return { header, checksum, commands := parseCommands commandBytes }
 
 /--
-Serializes a datagram into a `ByteArray`, optionally compressing the commands payload
-if a `Compressor` is provided and results in a smaller byte size.
-
-When the datagram carries a checksum, `connectId` is the checksum key (ENet:
-`peer->connectID`, or 0 while the peer's outgoing ID is still unset). ENet
-computes the CRC32 over header + checksum field (holding `connectID` in host
-byte order, i.e. little-endian on the hosts we interop with) + the
-*uncompressed* commands payload, then stores the CRC32 big-endian in the field
-(`enet_crc32` returns `ENET_HOST_TO_NET_32 (~crc)`).
+Serializes a datagram. When it carries a checksum, the stored checksum value
+is ignored and recomputed with `connectId` as the key (ENet:
+`peer->connectID`, or 0 while the peer's outgoing ID is still unset); see
+`computeChecksum`.
 -/
-def encodeWith (compressor : Option Compressor := none) (connectId : UInt32 := 0) : Datagram → ByteArray
+def encode (connectId : UInt32 := 0) : Datagram → ByteArray
   | { header, checksum, commands } =>
-    let rawCommandBytes := WriterM.run (for cmd in commands do cmd.encode)
-    let (isCompressed, payloadBytes) := match compressor with
-      | some comp =>
-        let compressed := comp.compress rawCommandBytes
-        if compressed.size > 0 ∧ compressed.size < rawCommandBytes.size then
-          (true, compressed)
-        else
-          (false, rawCommandBytes)
-      | none =>
-        (false, rawCommandBytes)
-
-    let finalHeader := { header with compressed := isCompressed }
+    let commandBytes := WriterM.run (for cmd in commands do cmd.encode)
+    let header := { header with compressed := false }
     match checksum with
     | none =>
       WriterM.run do
-        finalHeader.encode
-        writeBytes payloadBytes
+        header.encode
+        writeBytes commandBytes
     | some _ =>
-      let crc := computeChecksum (WriterM.run finalHeader.encode) rawCommandBytes connectId
+      let crc := computeChecksum (WriterM.run header.encode) commandBytes connectId
       WriterM.run do
-        finalHeader.encode
+        header.encode
         writeUInt32BE crc
-        writeBytes payloadBytes
-
-/-- Serializes a datagram into a `WriterM` stream without payload compression. -/
-def encode (d : Datagram) : WriterM Unit := do
-  d.header.encode
-  if let some cs := d.checksum then
-    writeUInt32BE cs
-  for cmd in d.commands do
-    cmd.encode
+        writeBytes commandBytes
 
 end Datagram
-
-instance : Decode Datagram where decode := Datagram.decode false
-instance : Encode Datagram where encode := Datagram.encode
 
 end Lenet.Protocol

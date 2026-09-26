@@ -3,9 +3,7 @@ import Lenet.Codec
 
 namespace Lenet.Protocol
 
-open Lenet
-open Lenet.ReaderM
-open Lenet.WriterM
+open ReaderM WriterM
 
 /--
 Negotiation parameters shared between `Connect` and `VerifyConnect` commands.
@@ -64,8 +62,6 @@ def encode (p : ConnectParams) : WriterM Unit := do
 
 end ConnectParams
 
-instance : Decode ConnectParams where decode := ConnectParams.decode
-instance : Encode ConnectParams where encode := ConnectParams.encode
 
 /--
 Parameters for fragmented packet transmission commands (`SendFragment` and `SendUnreliableFragment`).
@@ -110,8 +106,6 @@ def encode (p : FragmentParams) : WriterM Unit := do
 
 end FragmentParams
 
-instance : Decode FragmentParams where decode := FragmentParams.decode
-instance : Encode FragmentParams where encode := FragmentParams.encode
 
 /--
 Payload variants for all 12 ENet protocol commands.
@@ -129,7 +123,7 @@ inductive CommandBody where
   | bandwidthLimit (incomingBandwidth : UInt32) (outgoingBandwidth : UInt32)
   | throttleConfigure (packetThrottleInterval : UInt32) (packetThrottleAcceleration : UInt32) (packetThrottleDeceleration : UInt32)
   | sendUnreliableFragment (params : FragmentParams)
-deriving  BEq, Inhabited
+deriving BEq, Inhabited
 
 namespace CommandBody
 
@@ -226,10 +220,10 @@ deriving BEq, Inhabited
 
 namespace Command
 
-/-- Total wire size of a serialized command: 4-byte command header + body
-(+ trailing payload bytes when `includePayload`). -/
-def wireSize (cmd : Command) (includePayload : Bool := true) : Nat :=
-  4 + cmd.body.fixedWireSize + (if includePayload then cmd.body.payloadSize else 0)
+/-- Total wire size of a serialized command: 4-byte command header, the
+body's fixed fields and its payload bytes. -/
+def wireSize (cmd : Command) : Nat :=
+  4 + cmd.body.fixedWireSize + cmd.body.payloadSize
 
 def decode : ReaderM Command := do
   let rawCommand ← readUInt8
@@ -310,7 +304,5 @@ def encode (cmd : Command) : WriterM Unit := do
 
 end Command
 
-instance : Decode Command where decode := Command.decode
-instance : Encode Command where encode := Command.encode
 
 end Lenet.Protocol

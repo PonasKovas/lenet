@@ -270,7 +270,7 @@ must match the recording host's checksum setting so the 4-byte checksum
 field is skipped; the field is consumed without verification (verification
 happens inside `Host.handleDatagram` during the actual replay). -/
 def decodeDatagram (hasChecksum : Bool) (bytes : ByteArray) : Except CodecError (Array Protocol.Command) :=
-  (ReaderM.run (Protocol.Datagram.decodeWith hasChecksum none none) bytes).map (·.commands)
+  (ReaderM.run (Protocol.Datagram.decode hasChecksum none) bytes).map (·.commands)
 
 /-- Scenarios whose recording hosts had checksums enabled (`host->checksum =
 enet_crc32` on both sides). -/

@@ -31,7 +31,6 @@ structure Host where
   recalculateBandwidthLimits : Bool := false
   mtu                    : UInt32 := Constants.defaultMtu.toUInt32
   randomSeed             : UInt32 := 0x12345678
-  compressor             : Option Compressor := none
   checksumEnabled        : Bool := false
   maximumPacketSize      : Nat := 32 * 1024 * 1024
 deriving Inhabited
@@ -354,7 +353,7 @@ def handleDatagram (h : Host) (now : UInt32) (fromAddr : Address) (bytes : ByteA
       | some p => p.connectId
       | none => 0
   let decodeResult :=
-    ReaderM.run (Protocol.Datagram.decodeWith h.checksumEnabled (some connectIdOf) h.compressor) bytes
+    ReaderM.run (Protocol.Datagram.decode h.checksumEnabled (some connectIdOf)) bytes
   match decodeResult with
   | .error _ =>
     (h, #[])
@@ -538,7 +537,7 @@ progress is possible, mirroring ENet's CONTINUE_SENDING multi-pass packing:
 each pass produces one MTU-bounded datagram. May emit disconnect events when
 an `acknowledgingDisconnect` peer's acks drain (ENet: ZOMBIE dispatch at ack
 send, event + reset at dispatch). -/
-def pollPeer (p : Peer) (now : UInt32) (checksumEnabled : Bool) (compressor : Option Compressor) : Peer × Array (Address × ByteArray) × Array Event :=
+def pollPeer (p : Peer) (now : UInt32) (checksumEnabled : Bool) : Peer × Array (Address × ByteArray) × Array Event :=
   if p.state == .disconnected then
     (p, #[], #[])
   else
@@ -571,7 +570,7 @@ def pollPeer (p : Peer) (now : UInt32) (checksumEnabled : Bool) (compressor : Op
               updatedPeer.connectId
             else
               0
-          let datagramBytes := datagram.encodeWith compressor connectId
+          let datagramBytes := datagram.encode connectId
           loop updatedPeer fuel' (acc.push (updatedPeer.address, datagramBytes))
     -- fuel bounds the number of datagrams per poll (one per queued command is
     -- more than enough)
@@ -584,7 +583,7 @@ any disconnect events dispatched at ack-send time.
 -/
 def pollOutgoing (h : Host) (now : UInt32) : Host × Array (Address × ByteArray) × Array Event :=
   let (updatedPeers, packets, events) := h.peers.foldl (init := (#[], #[], #[])) fun (peersAcc, pktsAcc, evsAcc) p =>
-    let (p', pkts, evs) := pollPeer p now h.checksumEnabled h.compressor
+    let (p', pkts, evs) := pollPeer p now h.checksumEnabled
     (peersAcc.push p', pktsAcc ++ pkts, evsAcc ++ evs)
   ({ h with peers := updatedPeers }, packets, events)
 
