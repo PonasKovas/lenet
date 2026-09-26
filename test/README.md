@@ -236,6 +236,26 @@ compatibility"). Open, undecided differences are listed in TODO.md.
   after newer packets went out, and moves the channel's unreliable counter
   back; Lenet drops it.
 
+- **Fragment assembler lifetime (lenet bug - fixed).** ENet keeps a
+  fragment set's reassembly state in the channel's incoming queues: keyed
+  by the channel and, for unreliable sets, by the reliable command they
+  were sent after; kept until the set is dispatched, so a retransmitted
+  fragment of a complete set finds it and is ignored; and discarded with
+  the unreliable queue once the frontier passes it. Lenet keyed its
+  assemblers by the start sequence number alone, so sets on different
+  channels (or a reliable and an unreliable one) could share one; a
+  retransmitted fragment of a complete but still staged reliable set opened
+  a new assembler that never completed; and an unreliable set that lost a
+  fragment held its assembler forever. After 32 such leftovers every new
+  set was refused, reliable fragments included, and those had already been
+  acknowledged: silent loss of reliable data. Now assemblers carry their
+  `FragmentOrigin`, one check (`Peer.fragmentSetLive`) gates fragments and
+  prunes dead assemblers after each delivery, a full cap evicts the oldest
+  unreliable assembler, and a reliable fragment that still finds no room is
+  not acknowledged, so the sender retransmits it (ENet skips the ACK of a
+  command it failed to handle). Found by the benchmark's lossy link, where
+  a reliable 4096 B run delivered 153 of 512 packets.
+
 - **Address check before negotiation (lenet bug - fixed).** ENet drops a
   datagram for a peer unless it comes from the peer's address (or the peer
   was connected to the broadcast address), whether or not the remote peer ID

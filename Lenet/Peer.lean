@@ -300,108 +300,153 @@ def isTimedOut (p : Peer) (now : UInt32) (earliestTimeout : UInt32) (sendAttempt
 
 /-! ## Incoming commands -/
 
-/-- Runs a channel's receive step on channel `channelId` and turns what it
-delivers into receive events. Commands for a channel the peer does not have
-are dropped. -/
+/-- The origin of the fragment set a fragment command on `channelId`
+belongs to; `reliableSeq` is the command's reliable sequence number. -/
+def fragmentOrigin (channelId : UInt8) (reliableSeq : UInt16) (unreliable : Bool) : FragmentOrigin :=
+  { channelId, unreliable, reliableSeq := if unreliable then reliableSeq else 0 }
+
+/-- Whether the fragment set (`origin`, `startSeq`) can still be delivered on
+channel `ch`. Anything else is stale or a duplicate: its fragments are
+dropped before reassembly, and an assembler for it is discarded.
+- Reliable sets: the start sequence number must be inside the receive window
+  and not duplicate the dispatch frontier (protocol.c handle_send_fragment's
+  cyclic window check plus peer.c queue_incoming_command's duplicate check),
+  and the set must not be complete already and staged (ENet finds the staged
+  command and ignores the fragment).
+- Unreliable sets: the reliable command they were sent after must be inside
+  the receive window, and a set sent after the frontier must be newer than
+  the last unreliable delivery (protocol.c handle_send_unreliable_fragment)
+  and not complete already and staged. -/
+def fragmentSetLive (ch : Channel) (origin : FragmentOrigin) (startSeq : UInt16) : Bool :=
+  if origin.unreliable then
+    ch.isIncomingReliableInWindow origin.reliableSeq &&
+      !(origin.reliableSeq == ch.incomingReliableSequenceNumber &&
+        startSeq ≤ ch.incomingUnreliableSequenceNumber) &&
+      !ch.stagedUnreliable.any fun e => e.reliableSeq == origin.reliableSeq && e.unreliableSeq == startSeq
+  else
+    ch.isIncomingReliableInWindow startSeq && startSeq != ch.incomingReliableSequenceNumber &&
+      !ch.stagedReliable.any (·.seq == startSeq)
+
+/-- Discards the assemblers of channel `channelId` whose set can no longer be
+delivered: the dispatch frontier or the last unreliable delivery moved past
+it. Without this, an unreliable set that lost a fragment would hold its
+assembler forever. -/
+def pruneAssemblers (p : Peer) (channelId : UInt8) : Peer :=
+  match p.channels[channelId.toNat]? with
+  | some ch =>
+    if p.fragmentAssemblers.isEmpty then p
+    else
+      { p with
+        fragmentAssemblers := p.fragmentAssemblers.filter fun a =>
+          a.origin.channelId != channelId || fragmentSetLive ch a.origin a.startSequenceNumber }
+  | none => p
+
+/-- Runs a channel's receive step on channel `channelId`, discards the
+assemblers that step made stale, and turns what it delivers into receive
+events. Commands for a channel the peer does not have are dropped. -/
 def receiveOnChannel (p : Peer) (channelId : UInt8) (receive : Channel → Channel × Array Packet) :
     Peer × Array Event :=
   if h : channelId.toNat < p.channels.size then
     let (ch, delivered) := receive p.channels[channelId.toNat]
-    ({ p with channels := p.channels.set channelId.toNat ch h },
+    (({ p with channels := p.channels.set channelId.toNat ch h } : Peer).pruneAssemblers channelId,
       delivered.map (Event.receive p.peerId channelId))
   else
     (p, #[])
 
-/-- Absorbs a fragment into the assembler array: finds the assembler for
-`params.startSequenceNumber` (creating one when below the concurrency cap
-`maximumFragmentAssemblers` and the fragment count is within
-`maximumReceivedFragmentCount` - robustness guards, DESIGN.md,
-deliberately stricter than ENet whose pending-assembler growth is bounded
-only by its window span). Returns the (possibly grown) array and the
-assembler to deliver to. -/
-def absorbFragment (xs : Array FragmentAssembler) (params : Protocol.FragmentParams) :
-    Array FragmentAssembler × Option FragmentAssembler :=
-  match xs.find? (fun a => a.startSequenceNumber == params.startSequenceNumber) with
+/-- Room for one more assembler in `xs`: `xs` itself below the cap
+`maximumFragmentAssemblers`, otherwise `xs` without its oldest unreliable
+assembler (an unreliable packet may be lost anyway). `none` when every slot
+holds a reliable set. -/
+def assemblerRoom (xs : Array FragmentAssembler) : Option (Array FragmentAssembler) :=
+  if xs.size < Constants.maximumFragmentAssemblers then some xs
+  else
+    match xs.findFinIdx? (·.origin.unreliable) with
+    | some i => some (xs.eraseIdx i)
+    | none => none
+
+/-- Absorbs a fragment into the assembler array: finds the assembler for the
+set (`origin`, `params.startSequenceNumber`), or creates one when there is
+room (`assemblerRoom`) and the fragment count is within
+`maximumReceivedFragmentCount` - robustness guards, DESIGN.md, deliberately
+stricter than ENet whose pending-assembler growth is bounded only by its
+window span. Returns the (possibly changed) array and the assembler to
+deliver to. -/
+def absorbFragment (xs : Array FragmentAssembler) (origin : FragmentOrigin)
+    (params : Protocol.FragmentParams) : Array FragmentAssembler × Option FragmentAssembler :=
+  match xs.find? (fun a => a.origin == origin && a.startSequenceNumber == params.startSequenceNumber) with
   | some asm => (xs, some asm)
   | none =>
-    if xs.size ≥ Constants.maximumFragmentAssemblers ∨
-        params.fragmentCount.toNat = 0 ∨
+    if params.fragmentCount.toNat = 0 ∨
         params.fragmentCount.toNat > Constants.maximumReceivedFragmentCount then
       (xs, none)
     else
-      match FragmentAssembler.init params.startSequenceNumber params.totalLength.toNat
-          params.fragmentCount.toNat with
-      | .ok newAsm => (xs.push newAsm, some newAsm)
-      | .error _ => (xs, none)
+      match assemblerRoom xs with
+      | none => (xs, none)
+      | some room =>
+        match FragmentAssembler.init params.startSequenceNumber params.totalLength.toNat
+            params.fragmentCount.toNat with
+        | .ok newAsm =>
+          let newAsm := { newAsm with origin }
+          (room.push newAsm, some newAsm)
+        | .error _ => (xs, none)
 
 /-- The assembler array after delivering a fragment result: the matching
 assembler is updated in place while the assembly is partial, and filtered
-out when it completes. `none` (no assembler, e.g. cap-rejected or invalid
+out when it completes. `none` (no assembler, e.g. no room or invalid
 parameters) leaves the array unchanged. -/
-def assemblerArrayAfterDeliver (xs : Array FragmentAssembler)
+def assemblerArrayAfterDeliver (xs : Array FragmentAssembler) (origin : FragmentOrigin)
     (params : Protocol.FragmentParams)
     (result : Option (Except CodecError (FragmentAssembler × Option ByteArray))) :
     Array FragmentAssembler :=
+  let isSet (a : FragmentAssembler) :=
+    a.origin == origin && a.startSequenceNumber == params.startSequenceNumber
   match result with
   | none => xs
   | some (.error _) => xs
-  | some (.ok (updatedAsm, none)) =>
-    xs.map (fun a => if a.startSequenceNumber == params.startSequenceNumber then updatedAsm else a)
-  | some (.ok (_, some _)) =>
-    xs.filter (fun a => a.startSequenceNumber ≠ params.startSequenceNumber)
+  | some (.ok (updatedAsm, none)) => xs.map fun a => if isSet a then updatedAsm else a
+  | some (.ok (_, some _)) => xs.filter fun a => !isSet a
 
-/-- The fragment receive gate; anything it rejects is a stale or duplicate
-fragment set and is dropped before reassembly.
-- Reliable fragments: the set's start sequence number must be inside the
-  receive window and not duplicate the dispatch frontier (protocol.c
-  handle_send_fragment's cyclic window check plus peer.c
-  queue_incoming_command's duplicate check).
-- Unreliable fragments: the reliable command they were sent after
-  (`reliableSeq`) must be inside the receive window, and a set sent after the
-  frontier must be newer than the last unreliable delivery (protocol.c
-  handle_send_unreliable_fragment). -/
+/-- The fragment receive gate (`fragmentSetLive` on the command's channel). -/
 def fragmentGateOk (p : Peer) (channelId : UInt8) (reliableSeq : UInt16)
     (params : Protocol.FragmentParams) (unreliable : Bool) : Bool :=
   match p.channels[channelId.toNat]? with
   | none => false
-  | some ch =>
-    if unreliable then
-      ch.isIncomingReliableInWindow reliableSeq ∧
-        !(reliableSeq == ch.incomingReliableSequenceNumber ∧
-          params.startSequenceNumber ≤ ch.incomingUnreliableSequenceNumber)
-    else
-      ch.isIncomingReliableInWindow params.startSequenceNumber ∧
-        params.startSequenceNumber ≠ ch.incomingReliableSequenceNumber
+  | some ch => fragmentSetLive ch (fragmentOrigin channelId reliableSeq unreliable) params.startSequenceNumber
 
-/-- Delivers a fragment to the (possibly newly created) assembler for
-`params.startSequenceNumber`. When the fragment completes the packet, the
-assembler is consumed and the packet goes through the channel's receive
-path; a reliable set occupies `fragmentCount` sequence numbers (ENet
-advances the dispatch frontier by the whole span). Fragments with invalid
-parameters (which ENet validates identically) are dropped. -/
+/-- Delivers a fragment to the (possibly newly created) assembler for its
+set. When the fragment completes the packet, the assembler is consumed and
+the packet goes through the channel's receive path; a reliable set occupies
+`fragmentCount` sequence numbers (ENet advances the dispatch frontier by the
+whole span). The flag is false when the fragment passed the gate but found
+no assembler (no room, or invalid parameters, which ENet validates
+identically): such a reliable fragment must not be acknowledged, so the
+sender retransmits it (ENet skips the acknowledgement of a command it
+failed to handle). -/
 def handleFragment (p : Peer) (channelId : UInt8) (reliableSeq : UInt16)
-    (params : Protocol.FragmentParams) (unreliable : Bool) : Peer × Array Event :=
+    (params : Protocol.FragmentParams) (unreliable : Bool) : Peer × Array Event × Bool :=
   if !fragmentGateOk p channelId reliableSeq params unreliable then
-    (p, #[])
+    (p, #[], true)
   else
-    let (xs, assembler?) := absorbFragment p.fragmentAssemblers params
+    let origin := fragmentOrigin channelId reliableSeq unreliable
+    let (xs, assembler?) := absorbFragment p.fragmentAssemblers origin params
     let result : Option (Except CodecError (FragmentAssembler × Option ByteArray)) :=
       assembler?.bind fun asm =>
         asm.addFragment params.fragmentNumber.toNat params.fragmentOffset.toNat params.data
-    let p := { p with fragmentAssemblers := assemblerArrayAfterDeliver xs params result }
+    let p := { p with fragmentAssemblers := assemblerArrayAfterDeliver xs origin params result }
     match result with
     | some (.ok (_, some data)) =>
-      p.receiveOnChannel channelId fun ch =>
+      let (p, events) := p.receiveOnChannel channelId fun ch =>
         if unreliable then
           let (ch, delivered) :=
             ch.receiveUnreliable reliableSeq params.startSequenceNumber (.unreliableFragment data)
           (ch, delivered.toArray)
         else
           ch.receiveReliableAndRelease params.startSequenceNumber params.fragmentCount.toNat (.reliable data)
-    | _ => (p, #[])
+      (p, events, true)
+    | _ => (p, #[], assembler?.isSome)
 
-/-- Handles a data command (send reliable/unreliable/unsequenced/fragment);
-other commands are ignored. -/
+/-- Handles an unfragmented data command (send reliable/unreliable/
+unsequenced); other commands are ignored. -/
 def handleData (p : Peer) (cmd : Protocol.Command) : Peer × Array Event :=
   match cmd.body with
   | .sendReliable data =>
@@ -416,10 +461,6 @@ def handleData (p : Peer) (cmd : Protocol.Command) : Peer × Array Event :=
     | some window =>
       ({ p with unsequencedWindow := window }, #[.receive p.peerId cmd.channelId (.unsequenced data)])
     | none => (p, #[])
-  | .sendFragment params =>
-    p.handleFragment cmd.channelId cmd.reliableSequenceNumber params (unreliable := false)
-  | .sendUnreliableFragment params =>
-    p.handleFragment cmd.channelId cmd.reliableSequenceNumber params (unreliable := true)
   | _ => (p, #[])
 
 /-- Handles an ACK (ENet handle_acknowledge): updates the RTT, retires the
@@ -494,32 +535,44 @@ def handleVerifyConnect (p : Peer) (params : Protocol.ConnectParams) : Peer × A
     (p, #[.connect p.peerId p.eventData])
 
 /-- Processes one incoming command from this peer: queues the ACK it asks
-for, then applies it. Returns the updated peer and the events produced. -/
+for, then applies it. Returns the updated peer and the events produced. A
+reliable fragment that found no assembler is not acknowledged
+(`handleFragment`). -/
 def handleCommand (p : Peer) (now : UInt32) (cmd : Protocol.Command) (sentTime : Option UInt16) :
     Peer × Array Event :=
-  let p := match cmd.acknowledge, sentTime with
+  let ack (p : Peer) : Peer := match cmd.acknowledge, sentTime with
     | true, some sentTime =>
       p.queueAck { channelId := cmd.channelId, reliableSequenceNumber := cmd.reliableSequenceNumber, sentTime }
     | _, _ => p
+  let fragment (params : Protocol.FragmentParams) (unreliable : Bool) : Peer × Array Event :=
+    if p.isConnected then
+      let (p, events, accepted) := p.handleFragment cmd.channelId cmd.reliableSequenceNumber params unreliable
+      (if accepted then ack p else p, events)
+    else (ack p, #[])
   match cmd.body with
-  | .acknowledge seq sentTime => p.handleAcknowledge now cmd.channelId seq sentTime
-  | .disconnect data => p.handleDisconnect data
-  | .verifyConnect params => p.handleVerifyConnect params
-  | .bandwidthLimit inBw outBw =>
-    -- ENet also recomputes the window size here, which needs the host's
-    -- outgoing bandwidth: `Host.handleDatagram` does that
-    ({ p with incomingBandwidth := inBw, outgoingBandwidth := outBw }, #[])
-  | .throttleConfigure interval accel decel =>
-    ({ p with
-      packetThrottleInterval     := interval
-      packetThrottleAcceleration := accel
-      packetThrottleDeceleration := decel }, #[])
-  | .ping => (p, #[])
-  -- a CONNECT for an existing peer is ignored (ENet same)
-  | .connect .. => (p, #[])
-  | .sendReliable .. | .sendUnreliable .. | .sendUnsequenced ..
-  | .sendFragment .. | .sendUnreliableFragment .. =>
-    if p.isConnected then p.handleData cmd else (p, #[])
+  | .sendFragment params => fragment params (unreliable := false)
+  | .sendUnreliableFragment params => fragment params (unreliable := true)
+  | body =>
+    let p := ack p
+    match body with
+    | .acknowledge seq sentTime => p.handleAcknowledge now cmd.channelId seq sentTime
+    | .disconnect data => p.handleDisconnect data
+    | .verifyConnect params => p.handleVerifyConnect params
+    | .bandwidthLimit inBw outBw =>
+      -- ENet also recomputes the window size here, which needs the host's
+      -- outgoing bandwidth: `Host.handleDatagram` does that
+      ({ p with incomingBandwidth := inBw, outgoingBandwidth := outBw }, #[])
+    | .throttleConfigure interval accel decel =>
+      ({ p with
+        packetThrottleInterval     := interval
+        packetThrottleAcceleration := accel
+        packetThrottleDeceleration := decel }, #[])
+    | .ping => (p, #[])
+    -- a CONNECT for an existing peer is ignored (ENet same)
+    | .connect .. => (p, #[])
+    | .sendReliable .. | .sendUnreliable .. | .sendUnsequenced .. =>
+      if p.isConnected then p.handleData cmd else (p, #[])
+    | .sendFragment .. | .sendUnreliableFragment .. => (p, #[])
 
 end Peer
 

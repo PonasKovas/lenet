@@ -3,10 +3,23 @@ import Lenet.Codec
 
 namespace Lenet
 
+/-- Where a fragment set was sent: with its start sequence number this
+identifies the set. Reliable sets are numbered in their channel's reliable
+sequence; unreliable sets in the unreliable sequence after one reliable
+command, so two sets can share a start number and still differ. -/
+structure FragmentOrigin where
+  channelId   : UInt8 := 0
+  unreliable  : Bool := false
+  /-- For an unreliable set, the reliable command it was sent after; 0 for a
+  reliable set. -/
+  reliableSeq : UInt16 := 0
+deriving BEq, Inhabited
+
 /--
 State machine for assembling a fragmented packet from incoming fragment commands.
 -/
 structure FragmentAssembler where
+  origin              : FragmentOrigin := {}
   startSequenceNumber : UInt16
   totalLength         : Nat
   fragmentCount       : Nat

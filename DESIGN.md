@@ -117,7 +117,10 @@ build-time audit rather than a theorem.
   than it finds here.
 - **Not covered by traces:** sequence-number wrap (it takes ~65k commands
   per channel; the proofs cover it) and packet loss or reordering
-  (recording those is not deterministic).
+  (recording those is not deterministic). The benchmark's lossy link covers
+  loss: it drops every n-th datagram between two Lenet hosts and checks
+  that reliable packets all arrive, once and in order, and that nothing is
+  left in transit afterwards.
 
 ## Resource bounds
 
@@ -126,7 +129,10 @@ Memory an attacker can make a host hold is bounded:
 - **Fragment assemblers:** at most `maximumFragmentAssemblers` (32) per peer
   are in progress. Each one allocates its full packet up front, capped by
   the validated total length (4 MB) and a fragment count of at most
-  `maximumReceivedFragmentCount` (65536). ENet has no such cap.
+  `maximumReceivedFragmentCount` (65536). ENet has no such cap. When it is
+  full, a new set evicts the oldest unreliable one; if all 32 are reliable,
+  the fragment is dropped without an ACK, so the sender retransmits it
+  later instead of losing it.
 - **Staged reliable packets:** only in-window sequence numbers are staged,
   each at most once.
 - **Staged unreliable packets:** only those sent after an in-window reliable

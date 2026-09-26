@@ -40,8 +40,9 @@ The attacker-controlled memory surfaces and their bounds:
    the same exposure as ENet's - documented, not capped (capping drops ACKs
    and forces retransmissions for no robustness gain).
 
-The mutator of `fragmentAssemblers` is `Peer.handleFragment` (via
-`absorbFragment` + `assemblerArrayAfterDeliver`; `Peer.reset` clears the
+The mutators of `fragmentAssemblers` are `Peer.handleFragment` (via
+`absorbFragment` + `assemblerArrayAfterDeliver`) and
+`Peer.receiveOnChannel`, which only prunes (`Peer.reset` clears the
 field), so these theorems cover every growth path; the replay corpus
 asserts the bounds after every service step of every scenario.
 -/
@@ -128,58 +129,78 @@ theorem addFragment_size_preserved {a a' : FragmentAssembler} {n off : Nat} {d :
 
 /-! ## The assembler concurrency cap -/
 
+/-- `assemblerRoom` leaves room for one more assembler under the cap. -/
+theorem assemblerRoom_size {xs room : Array FragmentAssembler}
+    (h : assemblerRoom xs = some room)
+    (hcap : xs.size ≤ Constants.maximumFragmentAssemblers) :
+    room.size < Constants.maximumFragmentAssemblers := by
+  unfold assemblerRoom at h
+  split at h
+  · next hlt =>
+    cases h
+    exact hlt
+  · split at h
+    · next i _ =>
+      cases h
+      rw [Array.size_eraseIdx]
+      have := i.isLt
+      omega
+    · cases h
+
 /-- `absorbFragment` never grows the array beyond the cap. -/
-theorem absorbFragment_cap_preserved (xs : Array FragmentAssembler)
+theorem absorbFragment_cap_preserved (xs : Array FragmentAssembler) (origin : FragmentOrigin)
     (params : Protocol.FragmentParams)
     (hcap : xs.size ≤ Constants.maximumFragmentAssemblers) :
-    (absorbFragment xs params).1.size ≤ Constants.maximumFragmentAssemblers := by
+    (absorbFragment xs origin params).1.size ≤ Constants.maximumFragmentAssemblers := by
   unfold absorbFragment
   split
-  · next _ => exact hcap
-  · next =>
-    by_cases hguard : xs.size ≥ Constants.maximumFragmentAssemblers ∨
-        params.fragmentCount.toNat = 0 ∨
-        params.fragmentCount.toNat > Constants.maximumReceivedFragmentCount
-    · simp only [hguard, reduceIte]
-      exact hcap
-    · have hlt : xs.size < Constants.maximumFragmentAssemblers := by
-        simp at hguard
-        omega
-      simp only [hguard, reduceIte]
-      split
-      · next newAsm _ =>
-        have hproj : (xs.push newAsm, some newAsm).1.size = (xs.push newAsm).size := rfl
-        have hpush : (xs.push newAsm).size = xs.size + 1 := Array.size_push newAsm
-        omega
-      · next _ => exact hcap
+  · exact hcap
+  · split
+    · exact hcap
+    · split
+      · exact hcap
+      · next room hroom =>
+        have hlt := assemblerRoom_size hroom hcap
+        split
+        · simp only [Array.size_push]
+          omega
+        · exact hcap
 
 /-- `assemblerArrayAfterDeliver` never grows the array. -/
-theorem assemblerArrayAfterDeliver_size (xs : Array FragmentAssembler)
+theorem assemblerArrayAfterDeliver_size (xs : Array FragmentAssembler) (origin : FragmentOrigin)
     (params : Protocol.FragmentParams)
     (result : Option (Except CodecError (FragmentAssembler × Option ByteArray))) :
-    (assemblerArrayAfterDeliver xs params result).size ≤ xs.size := by
+    (assemblerArrayAfterDeliver xs origin params result).size ≤ xs.size := by
   unfold assemblerArrayAfterDeliver
   split
-  · next => exact Nat.le_refl _
-  · next _ => exact Nat.le_refl _
-  · next updatedAsm _ =>
-    rw [Array.size_map]
+  · exact Nat.le_refl _
+  · exact Nat.le_refl _
+  · rw [Array.size_map]
     exact Nat.le_refl _
-  · next _ _ =>
-    exact Nat.le_trans (Array.size_filter_le
-      (p := fun a : FragmentAssembler =>
-        a.startSequenceNumber ≠ params.startSequenceNumber)) (Nat.le_refl _)
+  · exact Array.size_filter_le
 
-/-- Channel delivery leaves the assemblers alone. -/
-theorem receiveOnChannel_fragmentAssemblers (p : Peer) (channelId : UInt8)
+/-- Pruning only removes assemblers. -/
+theorem pruneAssemblers_size (p : Peer) (channelId : UInt8) :
+    (p.pruneAssemblers channelId).fragmentAssemblers.size ≤ p.fragmentAssemblers.size := by
+  unfold pruneAssemblers
+  split
+  · split
+    · exact Nat.le_refl _
+    · exact Array.size_filter_le
+  · exact Nat.le_refl _
+
+/-- Channel delivery never adds assemblers (it only prunes stale ones). -/
+theorem receiveOnChannel_fragmentAssemblers_size (p : Peer) (channelId : UInt8)
     (receive : Channel → Channel × Array Packet) :
-    (p.receiveOnChannel channelId receive).1.fragmentAssemblers = p.fragmentAssemblers := by
+    (p.receiveOnChannel channelId receive).1.fragmentAssemblers.size ≤ p.fragmentAssemblers.size := by
   unfold receiveOnChannel
-  split <;> rfl
+  split
+  · exact pruneAssemblers_size _ _
+  · exact Nat.le_refl _
 
 /-- `handleFragment` never grows the assembler array beyond the cap: when the
-gate passes, both match arms set `fragmentAssemblers :=
-assemblerArrayAfterDeliver xs params result`, which never exceeds
+gate passes, the array is `assemblerArrayAfterDeliver xs …` (then possibly
+pruned by the channel delivery), which never exceeds
 `xs = (absorbFragment ...).1`, itself capped by `absorbFragment_cap_preserved`;
 when the gate fails the peer is returned unchanged. -/
 theorem handleFragment_cap_preserved (p : Peer) (channelId : UInt8) (reliableSeq : UInt16)
@@ -191,17 +212,14 @@ theorem handleFragment_cap_preserved (p : Peer) (channelId : UInt8) (reliableSeq
   by_cases hg : fragmentGateOk p channelId reliableSeq params unreliable = true
   · rw [if_neg (by simp [hg] : ¬((!fragmentGateOk p channelId reliableSeq params unreliable) = true))]
     -- gate passed: the array is `assemblerArrayAfterDeliver` of the absorbed array
-    generalize habs : absorbFragment p.fragmentAssemblers params = ab
-    obtain ⟨xs, asm⟩ := ab
+    have hxs := absorbFragment_cap_preserved p.fragmentAssemblers
+      (fragmentOrigin channelId reliableSeq unreliable) params hcap
+    have hdel := fun result => Nat.le_trans
+      (assemblerArrayAfterDeliver_size _ (fragmentOrigin channelId reliableSeq unreliable) params result) hxs
     simp only [] -- zeta the lets, iota-reduce the pair match
-    have hfst : (absorbFragment p.fragmentAssemblers params).1 = xs :=
-      congrArg Prod.fst habs
-    have hxs := absorbFragment_cap_preserved p.fragmentAssemblers params hcap
-    rw [hfst] at hxs
-    -- every delivery arm keeps `fragmentAssemblers := assemblerArrayAfterDeliver …`
     split
-    all_goals (try rw [receiveOnChannel_fragmentAssemblers])
-    all_goals exact Nat.le_trans (assemblerArrayAfterDeliver_size _ _ _) hxs
+    · exact Nat.le_trans (receiveOnChannel_fragmentAssemblers_size _ _ _) (hdel _)
+    · exact hdel _
   · rw [if_pos (by simp [hg] : ((!fragmentGateOk p channelId reliableSeq params unreliable) = true))]
     exact hcap
 
