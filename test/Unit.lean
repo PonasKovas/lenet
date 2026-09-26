@@ -378,6 +378,18 @@ def hostTests : List Test := [
       -- ENet enet_peer_timeout: each 0 is replaced by its default
       expect (q.timeoutLimit == Constants.defaultTimeoutLimit && q.timeoutMinimum == Constants.defaultTimeoutMinimum
         && q.timeoutMaximum == 5000) s!"{q.timeoutLimit}/{q.timeoutMinimum}/{q.timeoutMaximum}" },
+  { name := "the server takes over and echoes the client's throttle parameters"
+    run := fun _ => do
+      -- a client whose throttle parameters are not the defaults
+      let client := (Host.create clientAddr 1).modifyPeer 0 fun q =>
+        { q with packetThrottleInterval := 2000, packetThrottleAcceleration := 3, packetThrottleDeceleration := 4 }
+      let .ok (client, _) := client.connect serverAddr 2 | throw "connect failed"
+      let p := ({ client, server := Host.create serverAddr 1, now := 1000 } : Pair).rounds 10
+      let some sp := p.server.peers[0]? | throw "no server peer"
+      expect (sp.packetThrottleInterval == 2000 && sp.packetThrottleAcceleration == 3 &&
+        sp.packetThrottleDeceleration == 4) "server peer kept its own throttle parameters"
+      -- the client checks the echo (ENet handle_verify_connect)
+      expect (p.clientP.state == .connected) "client refused the VERIFY_CONNECT" },
   { name := "a retransmitted CONNECT does not take a second slot"
     run := fun _ => do
       let .ok (client, _) := (Host.create clientAddr 1).connect serverAddr 2 | throw "connect failed"

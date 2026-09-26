@@ -282,9 +282,11 @@ def handleIncomingConnect (h : Host) (fromAddr : Address) (params : Protocol.Con
         channelCount               := channels.toUInt32
         incomingBandwidth          := h.incomingBandwidth
         outgoingBandwidth          := h.outgoingBandwidth
-        packetThrottleInterval     := p.packetThrottleInterval
-        packetThrottleAcceleration := p.packetThrottleAcceleration
-        packetThrottleDeceleration := p.packetThrottleDeceleration
+        -- the client's throttle parameters, which the peer takes over: the
+        -- client refuses a VERIFY_CONNECT that does not echo them (ENet)
+        packetThrottleInterval     := params.packetThrottleInterval
+        packetThrottleAcceleration := params.packetThrottleAcceleration
+        packetThrottleDeceleration := params.packetThrottleDeceleration
         connectId                  := params.connectId
       }
       let p := { p with
@@ -298,6 +300,9 @@ def handleIncomingConnect (h : Host) (fromAddr : Address) (params : Protocol.Con
         windowSize        := windowSizeFor h.outgoingBandwidth params.incomingBandwidth
         incomingBandwidth := params.incomingBandwidth
         outgoingBandwidth := params.outgoingBandwidth
+        packetThrottleInterval     := params.packetThrottleInterval
+        packetThrottleAcceleration := params.packetThrottleAcceleration
+        packetThrottleDeceleration := params.packetThrottleDeceleration
         incomingSessionId := inSession
         outgoingSessionId := outSession
       }.queueControlCommand (.verifyConnect verifyParams)

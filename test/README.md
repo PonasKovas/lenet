@@ -251,6 +251,13 @@ compatibility"). Open, undecided differences are listed in TODO.md.
   for events from a received datagram, missing timeouts and the remote
   DISCONNECT that completes once its ACK is out. `Host.service` now sets
   it too.
+- **Client's throttle parameters (lenet bug - fixed).** ENet's
+  handle_connect takes over the packet-throttle interval, acceleration and
+  deceleration a CONNECT carries and echoes them in the VERIFY_CONNECT,
+  which the client checks. Lenet echoed the server slot's own values, so a
+  client with other throttle parameters refused the VERIFY_CONNECT, and the
+  server throttled with the wrong ones. `Host.handleIncomingConnect` now
+  takes them over.
 - **Retransmitted CONNECT (lenet bug - fixed).** ENet's handle_connect
   ignores a CONNECT when a peer that is not a client still connecting
   already has its address, port and connect ID: the client resent it
