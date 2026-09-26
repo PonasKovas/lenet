@@ -30,14 +30,23 @@ deriving BEq, Inhabited
 
 namespace FragmentAssembler
 
-/-- Safely copies `src` bytes into `dst` starting at `dstOffset`. -/
+/-- Safely copies `src` bytes into `dst` starting at `dstOffset`: in place
+(`ByteArray.copySlice`) when `dst` is not shared. -/
 def copyBytes (dst : ByteArray) (dstOffset : Nat) (src : ByteArray) : ByteArray :=
   if dstOffset + src.size > dst.size then
     dst
   else
-    let pre := dst.extract 0 dstOffset
-    let suffix := dst.extract (dstOffset + src.size) dst.size
-    pre ++ src ++ suffix
+    src.copySlice 0 dst dstOffset src.size
+
+/-- `n` zero bytes. Built by pushing into a buffer of that capacity:
+`ByteArray.mk (Array.replicate n 0)` would first build an array of `n`
+boxed bytes, eight times the size. -/
+def zeros (n : Nat) : ByteArray :=
+  go n (ByteArray.emptyWithCapacity n)
+where
+  go : Nat → ByteArray → ByteArray
+    | 0, b => b
+    | k + 1, b => go k (b.push 0)
 
 /--
 Initializes a new `FragmentAssembler` for a fragmented packet.
@@ -54,7 +63,7 @@ def init (startSequenceNumber : UInt16) (totalLength : Nat) (fragmentCount : Nat
     throw (CodecError.custom "Total length cannot be less than fragment count")
 
   let received := Array.replicate fragmentCount false
-  let buffer := ByteArray.mk (Array.replicate totalLength 0)
+  let buffer := zeros totalLength
   return {
     startSequenceNumber
     totalLength
@@ -63,6 +72,11 @@ def init (startSequenceNumber : UInt16) (totalLength : Nat) (fragmentCount : Nat
     received
     buffer
   }
+
+/-- Whether `addFragment` takes fragment `fragmentNumber` of `data` at
+`offset`: its number and bytes fit the set. -/
+def fits (a : FragmentAssembler) (fragmentNumber : Nat) (offset : Nat) (data : ByteArray) : Bool :=
+  fragmentNumber < a.fragmentCount && offset < a.totalLength && offset + data.size ≤ a.totalLength
 
 /--
 Adds an incoming fragment to the assembler.
@@ -87,14 +101,14 @@ def addFragment (a : FragmentAssembler) (fragmentNumber : Nat) (offset : Nat) (d
   | some true =>
     return (a, none)
   | some false =>
-    let newReceived := a.received.setIfInBounds fragmentNumber true
-
-    let newBuffer := copyBytes a.buffer offset data
-    let remaining := a.fragmentsRemaining - 1
-
-    let updated := { a with
-      received           := newReceived
-      buffer             := newBuffer
+    -- the fields leave `a` first, so its arrays are held once and update in
+    -- place (reading them while `a` still holds them would copy them)
+    let { origin, startSequenceNumber, totalLength, fragmentCount, fragmentsRemaining, received, buffer } := a
+    let remaining := fragmentsRemaining - 1
+    let updated : FragmentAssembler := {
+      origin, startSequenceNumber, totalLength, fragmentCount
+      received           := received.setIfInBounds fragmentNumber true
+      buffer             := copyBytes buffer offset data
       fragmentsRemaining := remaining
     }
 

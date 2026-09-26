@@ -10,6 +10,7 @@ import Lenet.Protocol.Datagram
 import Lenet.Packet
 import Lenet.Channel
 import Lenet.Unsequenced
+import Lenet.Take
 import Lenet.Reassembly
 import Lenet.OutgoingCommand
 import Lenet.Event

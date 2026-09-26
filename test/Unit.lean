@@ -214,8 +214,10 @@ def fragmentValidationTests : List Test := [
       let (q, evs, reading) := peer.handleCommand 2000 (relFrag 0 1 5 3 1) (some 0)
       expect (!reading && evs.isEmpty) "mismatched fragment taken"
       expect (q.acknowledgements.size == peer.acknowledgements.size) "mismatched fragment acknowledged"
-      let (_, evs) := feed peer [relFrag 0 1 5 2 1]
-      expect (evs.size == 1) "the set no longer completes" },
+      -- the refused fragment left the set as it was: the real fragment 1
+      -- completes it with the right bytes
+      let (_, evs) := feed q [relFrag 0 1 5 2 1]
+      expect (received evs == #[(0, whole 5 2)]) "the set did not complete intact" },
   { name := "a receiver assembles packets up to ENet's 32 MB"
     run := fun _ => do
       let peer ← serverPeer

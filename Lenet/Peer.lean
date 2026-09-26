@@ -4,6 +4,7 @@ import Lenet.Address
 import Lenet.Error
 import Lenet.Channel
 import Lenet.Unsequenced
+import Lenet.Take
 import Lenet.Reassembly
 import Lenet.Packet
 import Lenet.OutgoingCommand
@@ -447,11 +448,11 @@ room (`assemblerRoom`), the fragment count is within
 (queue_incoming_command refuses a new packet once `totalWaitingData`
 reaches `maximumWaitingData`); the other two are robustness guards,
 DESIGN.md, stricter than ENet. Returns the (possibly changed) array and the
-assembler to deliver to. -/
+index of the set's assembler in it. -/
 def absorbFragment (xs : Array FragmentAssembler) (origin : FragmentOrigin)
-    (params : Protocol.FragmentParams) : Array FragmentAssembler × Option FragmentAssembler :=
-  match xs.find? (fun a => a.origin == origin && a.startSequenceNumber == params.startSequenceNumber) with
-  | some asm => (xs, some asm)
+    (params : Protocol.FragmentParams) : Array FragmentAssembler × Option Nat :=
+  match xs.findFinIdx? (fun a => a.origin == origin && a.startSequenceNumber == params.startSequenceNumber) with
+  | some i => (xs, some i.val)
   | none =>
     if params.fragmentCount.toNat = 0 ∨
         params.fragmentCount.toNat > Constants.maximumReceivedFragmentCount then
@@ -464,26 +465,8 @@ def absorbFragment (xs : Array FragmentAssembler) (origin : FragmentOrigin)
         else
         match FragmentAssembler.init params.startSequenceNumber params.totalLength.toNat
             params.fragmentCount.toNat with
-        | .ok newAsm =>
-          let newAsm := { newAsm with origin }
-          (room.push newAsm, some newAsm)
+        | .ok newAsm => (room.push { newAsm with origin }, some room.size)
         | .error _ => (xs, none)
-
-/-- The assembler array after delivering a fragment result: the matching
-assembler is updated in place while the assembly is partial, and filtered
-out when it completes. `none` (no assembler, e.g. no room or invalid
-parameters) leaves the array unchanged. -/
-def assemblerArrayAfterDeliver (xs : Array FragmentAssembler) (origin : FragmentOrigin)
-    (params : Protocol.FragmentParams)
-    (result : Option (Except CodecError (FragmentAssembler × Option ByteArray))) :
-    Array FragmentAssembler :=
-  let isSet (a : FragmentAssembler) :=
-    a.origin == origin && a.startSequenceNumber == params.startSequenceNumber
-  match result with
-  | none => xs
-  | some (.error _) => xs
-  | some (.ok (updatedAsm, none)) => xs.map fun a => if isSet a then updatedAsm else a
-  | some (.ok (_, some _)) => xs.filter fun a => !isSet a
 
 /-- The fragment receive gate (`fragmentSetLive` on the command's channel). -/
 def fragmentGateOk (p : Peer) (channelId : UInt8) (reliableSeq : UInt16)
@@ -508,26 +491,39 @@ def handleFragment (p : Peer) (channelId : UInt8) (reliableSeq : UInt16)
     (p, #[], true)
   else
     let origin := fragmentOrigin channelId reliableSeq unreliable
-    let (xs, assembler?) := absorbFragment p.fragmentAssemblers origin params
-    let result : Option (Except CodecError (FragmentAssembler × Option ByteArray)) :=
-      assembler?.bind fun asm =>
-        -- a fragment that does not describe the set under way is refused (ENet)
-        if asm.totalLength != params.totalLength.toNat || asm.fragmentCount != params.fragmentCount.toNat then
-          some (.error (.custom "fragment does not match its set"))
-        else asm.addFragment params.fragmentNumber.toNat params.fragmentOffset.toNat params.data
-    let p := { p with fragmentAssemblers := assemblerArrayAfterDeliver xs origin params result }
-    match result with
-    | some (.ok (_, some data)) =>
-      let (p, events) := p.receiveOnChannel channelId fun ch =>
-        if unreliable then
-          let (ch, delivered) :=
-            ch.receiveUnreliable reliableSeq params.startSequenceNumber (.unreliableFragment data)
-          (ch, delivered.toArray)
+    -- the assemblers leave the peer and the set's assembler leaves the array
+    -- (`takeAt`), so its buffer is held once and each fragment is copied in
+    -- place: a shared buffer would be copied whole for every fragment
+    let xs := p.fragmentAssemblers
+    let p := { p with fragmentAssemblers := #[] }
+    match absorbFragment xs origin params with
+    | (xs, none) => ({ p with fragmentAssemblers := xs }, #[], false)
+    | (xs, some i) =>
+      if hi : i < xs.size then
+        let (asm, xs) := takeAt xs i default hi
+        let number := params.fragmentNumber.toNat
+        let offset := params.fragmentOffset.toNat
+        -- a fragment that does not describe the set under way, or does not
+        -- fit it, is refused (ENet)
+        if asm.totalLength != params.totalLength.toNat || asm.fragmentCount != params.fragmentCount.toNat ||
+            !asm.fits number offset params.data then
+          ({ p with fragmentAssemblers := xs.setIfInBounds i asm }, #[], false)
         else
-          ch.receiveReliableAndRelease params.startSequenceNumber params.fragmentCount.toNat (.reliable data)
-      (p, events, true)
-    | some (.error _) => (p, #[], false)
-    | _ => (p, #[], assembler?.isSome)
+          match asm.addFragment number offset params.data with
+          | .ok (asm, none) => ({ p with fragmentAssemblers := xs.setIfInBounds i asm }, #[], true)
+          | .ok (_, some data) =>
+            let p := { p with fragmentAssemblers := xs.eraseIdxIfInBounds i }
+            let (p, events) := p.receiveOnChannel channelId fun ch =>
+              if unreliable then
+                let (ch, delivered) :=
+                  ch.receiveUnreliable reliableSeq params.startSequenceNumber (.unreliableFragment data)
+                (ch, delivered.toArray)
+              else
+                ch.receiveReliableAndRelease params.startSequenceNumber params.fragmentCount.toNat (.reliable data)
+            (p, events, true)
+          -- unreachable: `fits` covers every refusal of `addFragment`
+          | .error _ => ({ p with fragmentAssemblers := xs.eraseIdxIfInBounds i }, #[], false)
+      else ({ p with fragmentAssemblers := xs }, #[], false)
 
 /-- Handles an unfragmented data command (send reliable/unreliable/
 unsequenced); other commands are ignored. -/

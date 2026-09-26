@@ -54,6 +54,16 @@ def Inv (a : FragmentAssembler) : Prop :=
   a.buffer.size = a.totalLength ∧
   a.fragmentsRemaining + a.received.countP (fun b => b) = a.fragmentCount
 
+theorem zeros_go_size : ∀ (k : Nat) (b : ByteArray), (FragmentAssembler.zeros.go k b).size = b.size + k
+  | 0, _ => rfl
+  | k + 1, b => by
+    rw [FragmentAssembler.zeros.go, zeros_go_size k, ByteArray.size_push]; omega
+
+theorem zeros_size (n : Nat) : (FragmentAssembler.zeros n).size = n := by
+  unfold FragmentAssembler.zeros; rw [zeros_go_size]
+  have : (ByteArray.emptyWithCapacity n).size = 0 := rfl
+  omega
+
 /-- A successfully initialized assembler satisfies the invariant. -/
 theorem init_inv {ssn : UInt16} {tl fc maxPacketSize : Nat} {a : FragmentAssembler}
     (h : FragmentAssembler.init ssn tl fc maxPacketSize = Except.ok a) : Inv a := by
@@ -76,7 +86,7 @@ theorem init_inv {ssn : UInt16} {tl fc maxPacketSize : Nat} {a : FragmentAssembl
   subst h
   refine ⟨?_, ?_, ?_⟩
   · simp
-  · simp [ByteArray.size]
+  · exact zeros_size tl
   · simp [Array.countP_replicate]
 
 /-- `copyBytes` preserves the destination size: a fragment write stays
@@ -87,9 +97,8 @@ theorem copyBytes_size (dst : ByteArray) (dstOffset : Nat) (src : ByteArray) :
   split
   · rfl
   · next h =>
-    have hoff : dstOffset ≤ dst.size := by omega
-    have hsrc : dstOffset + src.size ≤ dst.size := by omega
-    simp only [ByteArray.size_append, ByteArray.size_extract]
+    simp only [ByteArray.copySlice, ByteArray.size, Array.size_append, Array.size_extract]
+    simp only [ByteArray.size] at h
     omega
 
 /-- Fragment writes are in-bounds: whatever `addFragment` accepts satisfies

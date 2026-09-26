@@ -175,6 +175,28 @@ private def throughputCases : List ThroughputCase :=
   , { label := "reliable 4096B (frag)", mode := .reliable,            payloadSize := 4096, batches := 256, batchSize := 16 }
   , { label := "unrelfrag 4096B (frag)", mode := .unreliableFragment, payloadSize := 4096, batches := 256, batchSize := 16 } ]
 
+/-! ## Large packets -/
+
+/-- One reliable packet of `payload` sent end to end, pumped at 5 ms clock
+steps until it arrives (at most `steps` pumps). Exercises reassembly of
+thousands of fragments into one buffer. -/
+private def largeRun (payload : ByteArray) (steps : Nat) (seed : Nat) : RunResult :=
+  match handshake with
+  | none => { sendFailed := true }
+  | some p0 =>
+    let { client, server, clientPeer, serverPeer } := p0
+    match client.trySend clientPeer 0 { data := payload, delivery := .reliable } with
+    | (_, .error _) => { sendFailed := true }
+    | (client, .ok ()) =>
+      go steps { client, server, clientPeer, serverPeer } (1000 + seed % 1000).toUInt32 {}
+where
+  go : Nat → BenchPair → UInt32 → PumpStats → RunResult
+    | 0, _, _, st => { sent := 1, received := st.received, bad := st.bad }
+    | i + 1, p, now, st =>
+      let (p1, st1) := pump p now payload st
+      if st1.received > 0 then { sent := 1, received := st1.received, bad := st1.bad }
+      else go i p1 (now + 5) st1
+
 /-! ## Service-tick cost scenarios -/
 
 /-- One idle-tick run: `rounds` pump rounds at 50 ms clock steps with no
@@ -433,6 +455,15 @@ def runBench : IO UInt32 := do
       padRight (toString (ns / total)) 8 ++
       (if sane then "ok" else "FAIL")
     IO.println row
+  IO.println ""
+
+  IO.println "large packets (one reliable packet, end to end)"
+  for mb in [1, 4, 16] do
+    let payload := ByteArray.mk (Array.replicate (mb * 1024 * 1024) 7)
+    let (ns, sane) ← measure 1 (fun seed => largeRun payload 100000 seed)
+      (fun r => ¬r.sendFailed ∧ r.received == 1 ∧ r.bad == 0)
+    unless sane do failures := failures + 1
+    IO.println s!"reliable {mb} MB : {ns / 1000000} ms  {if sane then "ok" else "FAIL"}"
   IO.println ""
 
   IO.println "service tick cost (one pump round: service both hosts + route datagrams)"

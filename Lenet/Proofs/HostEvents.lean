@@ -52,22 +52,12 @@ theorem receiveOnChannel_named (p : Peer) (c r) : ∀ e ∈ (p.receiveOnChannel 
   · intro e he; simp at he
 
 theorem handleFragment_peerId (p : Peer) (c s pr u) : (p.handleFragment c s pr u).1.peerId = p.peerId := by
-  unfold handleFragment; split
-  · rfl
-  split
-  · rfl
-  · dsimp only; split
-    · dsimp only; exact receiveOnChannel_peerId _ _ _
-    all_goals rfl
+  unfold handleFragment; dsimp only
+  (repeat' split) <;> first | rfl | exact receiveOnChannel_peerId _ _ _
 theorem handleFragment_named (p : Peer) (c s pr u) :
     ∀ e ∈ (p.handleFragment c s pr u).2.1, eventPeer e = p.peerId := by
-  unfold handleFragment; split
-  · intro e he; simp at he
-  split
-  · intro e he; simp at he
-  · dsimp only; split
-    · dsimp only; exact receiveOnChannel_named _ _ _
-    all_goals (intro e he; simp at he)
+  unfold handleFragment; dsimp only
+  (repeat' split) <;> first | exact receiveOnChannel_named _ _ _ | (intro e he; simp at he; done)
 
 theorem handleData_peerId (p : Peer) (cmd) : (p.handleData cmd).1.peerId = p.peerId := by
   unfold handleData; split
@@ -408,8 +398,15 @@ theorem withPeer_eq {α} (h : Host) (i : Nat) (d : α) (f : Peer → Peer × α)
       ({ h with peers := h.peers.modify i (fun p => (f p).1) },
         if hi : i < h.peers.size then (f h.peers[i]).2 else d) := by
   unfold Host.withPeer Host.takePeers
-  simp only [Array.modifyM, Array.modify, Id.run]
-  by_cases hi : i < h.peers.size <;> simp [hi] <;> rfl
+  dsimp only
+  by_cases hi : i < h.peers.size
+  · rw [dif_pos hi, dif_pos hi, takeAt_eq]
+    dsimp only
+    rw [set_setIfInBounds_same, Array.modify, Array.modifyM, dif_pos hi]
+    rfl
+  · rw [dif_neg hi, dif_neg hi]
+    simp only [Array.modify, Array.modifyM, dif_neg hi]
+    rfl
 
 /-! ## Receiving -/
 

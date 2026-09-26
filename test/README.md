@@ -251,6 +251,13 @@ compatibility"). Open, undecided differences are listed in TODO.md.
   for events from a received datagram, missing timeouts and the remote
   DISCONNECT that completes once its ACK is out. `Host.service` now sets
   it too.
+- **Reassembly was quadratic (lenet bug - fixed).** Every fragment rebuilt
+  the whole reassembly buffer (`copyBytes` by `extract` and append), and
+  the buffer was shared (the assembler was read out of an array the peer
+  still held, inside a peer the host still held), so even an in-place copy
+  copied it whole. A 4 MB packet took 3.3 s, a 32 MB one minutes. The
+  buffer is now filled in place (`ByteArray.copySlice`, and `takeAt` along
+  the way); 4 MB takes 0.17 s (bench, "large packets").
 - **Waiting-data budget (lenet bug - fixed).** ENet's
   queue_incoming_command refuses a new packet once the peer's
   `totalWaitingData` reaches `maximumWaitingData` (32 MB). Lenet had no

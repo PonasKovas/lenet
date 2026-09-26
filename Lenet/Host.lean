@@ -104,19 +104,18 @@ copies the peer and its arrays. -/
 /-- Runs `f` on peer slot `i` and puts the result back. Returns `dflt` when
 there is no such slot.
 
-`Array.modifyM` is meant to empty the slot while `f` runs, but once it is
-specialized to `StateM` the compiler moves that step after the call, so
-`f` still gets a shared peer and its first change copies the record. Taking
-the peer out by hand (an out-of-line swap) removes the copy, yet measured
-no faster on the bench (2026-09-26): copying one record is cheap next to
-the rest of a datagram. `mapPeers` has no such problem. -/
+The peer is taken out of the array first (`takeAt`), so `f` holds its only
+reference: a fragment's bytes then go into the assembler's buffer in place
+instead of copying it. (`Array.modifyM` is meant to do this, but once it is
+specialized to `StateM` the compiler moves the slot-emptying step after the
+call.) `mapPeers` has no such problem. -/
 @[inline] def withPeer (h : Host) (i : Nat) (dflt : α) (f : Peer → Peer × α) : Host × α :=
   let (h, peers) := h.takePeers
-  let (peers, a) := (peers.modifyM (m := StateM α) i fun p => do
+  if hi : i < peers.size then
+    let (p, peers) := takeAt peers i default hi
     let (p, a) := f p
-    set a
-    pure p).run dflt
-  ({ h with peers }, a)
+    ({ h with peers := peers.setIfInBounds i p }, a)
+  else ({ h with peers }, dflt)
 
 /-- Runs `f` on every peer in order, each one unshared (`Array.mapM`),
 threading `init` through. -/

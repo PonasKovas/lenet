@@ -122,21 +122,11 @@ theorem receiveOnChannel_events (p : Peer) (c r) : ∀ e ∈ (p.receiveOnChannel
   · intro e he; simp at he
 
 theorem handleFragment_state (p : Peer) (c s pr u) : (p.handleFragment c s pr u).1.state = p.state := by
-  unfold handleFragment; split
-  · rfl
-  split
-  · rfl
-  · dsimp only; split
-    · dsimp only; exact receiveOnChannel_state _ _ _
-    all_goals rfl
+  unfold handleFragment; dsimp only
+  (repeat' split) <;> first | rfl | exact receiveOnChannel_state _ _ _
 theorem handleFragment_events (p : Peer) (c s pr u) : ∀ e ∈ (p.handleFragment c s pr u).2.1, isReceive e := by
-  unfold handleFragment; split
-  · intro e he; simp at he
-  split
-  · intro e he; simp at he
-  · dsimp only; split
-    · dsimp only; exact receiveOnChannel_events _ _ _
-    all_goals (intro e he; simp at he)
+  unfold handleFragment; dsimp only
+  (repeat' split) <;> first | exact receiveOnChannel_events _ _ _ | (intro e he; simp at he; done)
 theorem handleData_state (p : Peer) (cmd) : (p.handleData cmd).1.state = p.state := by
   unfold handleData; split
   · exact receiveOnChannel_state _ _ _

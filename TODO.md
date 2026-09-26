@@ -107,11 +107,22 @@ alive for an error branch, gets copied on its next change. To find such a
 copy, wrap the value in `dbgTraceIfShared "tag" x` for a moment and count
 the messages a bench run prints. Known costs left:
 
+- **Sending a large packet is quadratic.** `packOutgoingCommands` folds
+  over the whole outgoing queue for every datagram, so a 16 MB packet
+  (about 12,000 fragments, one per datagram) rescans a queue of thousands
+  each time: `packCommand` is a quarter of the profile. ENet's linked
+  lists stop at `break` and cut the reliable list instead. Bench, large
+  packets: 1 MB ~16 ms, 4 MB ~170 ms, 16 MB ~2.5 s. The fix is a queue
+  that packing need not rebuild, for example ENet's split into a
+  reliable-data list and the rest.
+- Receiving a large packet is linear since 2026-09-26: `Host.withPeer`
+  and `Peer.handleFragment` take the peer, the assembler array and the
+  assembler out before changing them (`takeAt`), so each fragment is
+  copied into the buffer in place (before: 4 MB took 3.3 s). This costs the
+  small-packet rows 2-5%, measured back to back.
 - Tried and dropped: `Peer.enqueue` and `Peer.receiveOnChannel` copy the
-  channel record on each send and receive, and `Host.withPeer` copies the
-  peer record (see its comment). Removing those copies with an out-of-line
-  swap made the bench 1-4% slower, not faster. `Array.modifyM` does not
-  help: the compiler moves its slot-emptying step after the call.
+  channel record on each send and receive. Removing those copies with an
+  out-of-line swap made the bench 1-4% slower, not faster.
 - Fragmented sends copy each fragment out of the packet (`extract`).
 - `Datagram.parseCommands` copies the rest of the datagram after every
   command, but that is 0.3% of the profile: not worth a cursor rewrite.
