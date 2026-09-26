@@ -38,15 +38,17 @@ def copyBytes (dst : ByteArray) (dstOffset : Nat) (src : ByteArray) : ByteArray 
   else
     src.copySlice 0 dst dstOffset src.size
 
-/-- `n` zero bytes. Built by pushing into a buffer of that capacity:
+/-- `n` zero bytes, built by doubling (a handful of memcpy-speed appends):
 `ByteArray.mk (Array.replicate n 0)` would first build an array of `n`
-boxed bytes, eight times the size. -/
+boxed bytes, eight times the size, and pushing byte by byte is slow. -/
 def zeros (n : Nat) : ByteArray :=
-  go n (ByteArray.emptyWithCapacity n)
+  grow n (ByteArray.empty.push 0)
 where
-  go : Nat → ByteArray → ByteArray
-    | 0, b => b
-    | k + 1, b => go k (b.push 0)
+  /-- Doubles the zero bytes `b` until they are at least `n`, then cuts. -/
+  grow (n : Nat) (b : ByteArray) : ByteArray :=
+    if _h : 0 < b.size ∧ b.size < n then grow n (b ++ b) else b.extract 0 n
+  termination_by n - b.size
+  decreasing_by simp only [ByteArray.size_append]; omega
 
 /--
 Initializes a new `FragmentAssembler` for a fragmented packet.

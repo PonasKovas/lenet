@@ -54,15 +54,18 @@ def Inv (a : FragmentAssembler) : Prop :=
   a.buffer.size = a.totalLength ∧
   a.fragmentsRemaining + a.received.countP (fun b => b) = a.fragmentCount
 
-theorem zeros_go_size : ∀ (k : Nat) (b : ByteArray), (FragmentAssembler.zeros.go k b).size = b.size + k
-  | 0, _ => rfl
-  | k + 1, b => by
-    rw [FragmentAssembler.zeros.go, zeros_go_size k, ByteArray.size_push]; omega
+theorem zeros_grow_size (n : Nat) (b : ByteArray) (hb : 0 < b.size) :
+    (FragmentAssembler.zeros.grow n b).size = n := by
+  induction b using FragmentAssembler.zeros.grow.induct n with
+  | case1 b h ih =>
+    rw [FragmentAssembler.zeros.grow, dif_pos h]
+    exact ih (by simp only [ByteArray.size_append]; omega)
+  | case2 b h =>
+    rw [FragmentAssembler.zeros.grow, dif_neg h, ByteArray.size_extract]
+    omega
 
-theorem zeros_size (n : Nat) : (FragmentAssembler.zeros n).size = n := by
-  unfold FragmentAssembler.zeros; rw [zeros_go_size]
-  have : (ByteArray.emptyWithCapacity n).size = 0 := rfl
-  omega
+theorem zeros_size (n : Nat) : (FragmentAssembler.zeros n).size = n :=
+  zeros_grow_size n _ (by simp)
 
 /-- A successfully initialized assembler satisfies the invariant. -/
 theorem init_inv {ssn : UInt16} {tl fc maxPacketSize : Nat} {a : FragmentAssembler}
