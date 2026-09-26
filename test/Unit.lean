@@ -378,6 +378,17 @@ def hostTests : List Test := [
       -- ENet enet_peer_timeout: each 0 is replaced by its default
       expect (q.timeoutLimit == Constants.defaultTimeoutLimit && q.timeoutMinimum == Constants.defaultTimeoutMinimum
         && q.timeoutMaximum == 5000) s!"{q.timeoutLimit}/{q.timeoutMinimum}/{q.timeoutMaximum}" },
+  { name := "a retransmitted CONNECT does not take a second slot"
+    run := fun _ => do
+      let .ok (client, _) := (Host.create clientAddr 1).connect serverAddr 2 | throw "connect failed"
+      let (_, outs, _) := client.service 1000
+      let some (_, connect) := outs[0]? | throw "no CONNECT sent"
+      let server := Host.create serverAddr 4
+      let (server, _) := server.handleDatagram 1000 clientAddr connect
+      -- the same CONNECT again, as the client resends it when the VERIFY_CONNECT is late
+      let (server, _) := server.handleDatagram 1600 clientAddr connect
+      let taken := server.peers.filter (·.state != .disconnected) |>.size
+      expect (taken == 1) s!"{taken} slots taken" },
   { name := "a peer that never answers times out between the minimum and maximum"
     run := fun _ => do
       let p ← send (← connected) (pkt 100)

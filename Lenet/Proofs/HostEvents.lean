@@ -462,6 +462,7 @@ theorem hostStep_setPeer {a : Array Peer} (hids : IdsOk a) {j : Nat} (hj : j < a
 theorem handleIncomingConnect_step {h : Host} (hids : IdsOk h.peers) (fromAddr params data) :
     HostStep h.peers (h.handleIncomingConnect fromAddr params data).peers #[] := by
   unfold Host.handleIncomingConnect
+  dsimp only
   split
   · exact .rfl' _
   · split

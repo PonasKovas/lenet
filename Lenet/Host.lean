@@ -245,11 +245,17 @@ def nextSession (offered current : UInt8) : UInt8 :=
 takes a free slot, which negotiates sessions, MTU and window and answers
 with a VERIFY_CONNECT. The connect event fires once the client acknowledges
 the VERIFY_CONNECT. CONNECTs with a channel count outside [1, 255], or with
-no slot free, are ignored. -/
+no slot free, are ignored, and so is a retransmitted one: a peer (other
+than a client still connecting) already has its address and connect ID.
+ENet also caps the peers per remote IP (`host->duplicatePeers`), but its
+default, 4095, is more than a host has slots. -/
 def handleIncomingConnect (h : Host) (fromAddr : Address) (params : Protocol.ConnectParams)
     (data : UInt32) : Host :=
+  let duplicate := h.peers.any fun p =>
+    p.state != .disconnected && p.state != .connecting && p.address == fromAddr &&
+      p.connectId == params.connectId
   if params.channelCount.toNat < Constants.minimumChannelCount ∨
-      params.channelCount.toNat > Constants.maximumChannelCount then
+      params.channelCount.toNat > Constants.maximumChannelCount ∨ duplicate then
     h
   else
     match h.freeSlot? with

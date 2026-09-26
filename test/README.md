@@ -228,6 +228,13 @@ compatibility"). Open, undecided differences are listed in TODO.md.
   so a server application got disconnect events for connections it never
   heard of. `Host.checkPeerTimeouts` and `Peer.handleDisconnect` now reset
   such a peer without an event.
+- **Retransmitted CONNECT (lenet bug - fixed).** ENet's handle_connect
+  ignores a CONNECT when a peer that is not a client still connecting
+  already has its address, port and connect ID: the client resent it
+  because the VERIFY_CONNECT was late or lost. Lenet took a second slot and
+  sent a second VERIFY_CONNECT with another peer ID; the slot the client
+  did not pick retransmitted until it timed out, and a burst of them could
+  fill a server. `Host.handleIncomingConnect` now ignores the duplicate.
 - **Zero timeout parameters (lenet bug - fixed).** ENet's
   enet_peer_timeout replaces each 0 by its default (32, 5000, 30000 ms).
   Lenet stored the 0, so the common call `timeout(peer, 0, 0, 5000)` made
