@@ -41,7 +41,7 @@ structure Peer where
   state                          : PeerState := .disconnected
   channels                       : Array Channel := #[]
   unsequencedWindow              : UnsequencedWindow := {}
-  mtu                            : UInt32 := Constants.minimumMtu.toUInt32
+  mtu                            : UInt32 := Constants.defaultMtu.toUInt32
   windowSize                     : UInt32 := Constants.maximumWindowSize.toUInt32
   incomingBandwidth              : UInt32 := 0
   outgoingBandwidth              : UInt32 := 0
@@ -80,44 +80,13 @@ deriving BEq, Inhabited
 
 namespace Peer
 
-/-- Creates an initialized peer allocated with `channelCount` channels. -/
-def create (peerId : UInt16) (channelCount : Nat := 1) (address : Address := {}) : Peer :=
-  let channels := Array.replicate channelCount Channel.init
-  {
-    peerId
-    address
-    channels
-    mtu := Constants.defaultMtu.toUInt32
-  }
-
-/-- Resets the peer back to disconnected state, clearing channels and sequence numbers.
-ENet's enet_peer_reset does NOT reset the session IDs: a reused slot keeps the
-previously negotiated sessions (fresh slots start at 0xFF from host creation). -/
+/-- ENet's enet_peer_reset: back to a fresh disconnected slot. Only the
+session IDs survive, so a reused slot keeps the previously negotiated
+sessions (fresh slots start at 0xFF). -/
 def reset (p : Peer) : Peer :=
-  { p with
-    outgoingPeerId               := Constants.maximumPeerId
-    connectId                    := 0
-    state                        := .disconnected
-    channels                     := Array.replicate p.channels.size Channel.init
-    unsequencedWindow            := UnsequencedWindow.init
-    roundTripTime                := Constants.defaultRoundTripTime
-    roundTripTimeVariance        := 0
-    lowestRoundTripTime          := Constants.defaultRoundTripTime
-    highestRoundTripTimeVariance := 0
-    lastReceiveTime              := 0
-    earliestTimeout              := 0
-    packetThrottle               := Constants.defaultPacketThrottle
-    packetThrottleLimit          := Constants.packetThrottleScale
-    packetThrottleEpoch          := 0
-    reliableDataInTransit        := 0
-    outgoingControlSeq           := 0
-    outgoingUnsequencedGroup     := 0
-    eventData                    := 0
-    outgoingCommands             := #[]
-    sentReliableCommands         := #[]
-    acknowledgements             := #[]
-    fragmentAssemblers           := #[]
-  }
+  { peerId            := p.peerId
+    incomingSessionId := p.incomingSessionId
+    outgoingSessionId := p.outgoingSessionId }
 
 /-- Queues an outgoing command for transmission. -/
 def queueOutgoingCommand (p : Peer) (cmd : OutgoingCommand) : Peer :=

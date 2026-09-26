@@ -59,8 +59,7 @@ ENET_PROTOCOL_MAXIMUM_MTU; hosts outside the range are silently corrected). -/
 def create (address : Address := {}) (peerCount : Nat := 32) (channelLimit : Nat := Constants.maximumChannelCount) (inBw : UInt32 := 0) (outBw : UInt32 := 0) (seed : UInt32 := 0x87654321) (mtu : UInt32 := Constants.defaultMtu.toUInt32) : Host :=
   let cl := if channelLimit == 0 ∨ channelLimit > Constants.maximumChannelCount then Constants.maximumChannelCount else channelLimit
   let mtu := Nat.min Constants.maximumMtu (Nat.max Constants.minimumMtu mtu.toNat) |>.toUInt32
-  let peers := (List.range peerCount).toArray.map fun idx =>
-    Peer.create idx.toUInt16 1 address
+  let peers := (Array.range peerCount).map fun idx => { peerId := idx.toUInt16 }
   {
     address
     peers
@@ -101,6 +100,9 @@ def connect (h : Host) (remoteAddress : Address) (channelCount : Nat := 2) (data
       -- Control commands on channel 0xFF share a pre-incremented counter;
       -- the CONNECT is the first reliable control command (seq 1).
       let (p, controlSeq) := p.nextControlSeq
+      -- ENet (enet_host_connect): the client's window derives from its own
+      -- outgoing bandwidth (a fresh slot has incomingBandwidth = 0).
+      let windowSize := windowSizeFor hRand.outgoingBandwidth 0
 
       let connectParams : Protocol.ConnectParams := {
         outgoingPeerId             := p.peerId
@@ -110,9 +112,7 @@ def connect (h : Host) (remoteAddress : Address) (channelCount : Nat := 2) (data
         incomingSessionId          := p.incomingSessionId
         outgoingSessionId          := p.outgoingSessionId
         mtu                        := hRand.mtu
-        -- ENet: the client's window derives from its own outgoing bandwidth
-        -- (enet_host_connect); a fresh peer slot has incomingBandwidth = 0.
-        windowSize                 := windowSizeFor hRand.outgoingBandwidth 0
+        windowSize                 := windowSize
         channelCount               := channels.toUInt32
         incomingBandwidth          := hRand.incomingBandwidth
         outgoingBandwidth          := hRand.outgoingBandwidth
@@ -137,11 +137,13 @@ def connect (h : Host) (remoteAddress : Address) (channelCount : Nat := 2) (data
       }
 
       let updatedPeer := { p with
-        address   := remoteAddress
-        state     := .connecting
-        connectId := connectId
-        channels  := peerChannels
-        eventData := data
+        address    := remoteAddress
+        state      := .connecting
+        connectId  := connectId
+        channels   := peerChannels
+        eventData  := data
+        mtu        := hRand.mtu
+        windowSize := windowSize
       }.queueOutgoingCommand outCmd
 
       let newPeers := hRand.peers.set idx updatedPeer (by
