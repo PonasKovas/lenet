@@ -251,6 +251,14 @@ compatibility"). Open, undecided differences are listed in TODO.md.
   for events from a received datagram, missing timeouts and the remote
   DISCONNECT that completes once its ACK is out. `Host.service` now sets
   it too.
+- **Header bytes (lenet bug - fixed).** ENet sets the SENT_TIME flag and
+  writes the 2-byte sent time only when the datagram carries a command
+  that asks for an ACK, and adds the session bits only once the remote
+  peer ID is known. Lenet always wrote both, so datagrams with only ACKs or
+  unreliable data were 2 bytes longer and a fresh client's CONNECT carried
+  session bits. Harmless to ENet, but not its bytes; the replay compares
+  decoded commands, so it never saw this. `Host.encodeDatagram` now writes
+  what ENet writes.
 - **No maximum packet size on send (lenet bug - fixed).** ENet's
   enet_peer_send refuses packets over `host->maximumPacketSize` (32 MB by
   default). Lenet only capped the fragment count, which allows about

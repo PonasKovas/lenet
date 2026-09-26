@@ -461,6 +461,23 @@ def hostTests : List Test := [
       expect q.outgoingCommands.isEmpty "acknowledged command still queued"
       expect (q.channels[0]!.reliableWindows.all (· == 0)) "window slot kept"
       expect (q.reliableDataInTransit == 0) "in-transit bytes wrong" },
+  { name := "the header carries a sent time only for reliable commands, a session only once negotiated"
+    run := fun _ => do
+      let headers (outs : Array (Address × ByteArray)) : List Protocol.Header :=
+        outs.toList.filterMap fun (_, d) =>
+          match ReaderM.run Protocol.Datagram.decode d with | .ok d => some d.header | .error _ => none
+      -- a fresh client's CONNECT: no session bits yet (ENet adds them once
+      -- the remote peer ID is known)
+      let .ok (client, _) := (Host.create clientAddr 1).connect serverAddr 2 | throw "connect failed"
+      let (_, outs, _) := client.service 1000
+      expect ((headers outs).all fun h => h.session == 0 && h.sentTime.isSome) "CONNECT header"
+      -- unreliable data alone: no sent time (ENet sets SENT_TIME only for a reliable command)
+      let p ← send (← connected) (pkt 10 .unreliable)
+      let (_, outs, _) := p.client.service p.now
+      expect (!(headers outs).isEmpty && (headers outs).all (·.sentTime.isNone)) "unreliable-only header has a sent time"
+      let p ← send p (pkt 10)
+      let (_, outs, _) := p.client.service p.now
+      expect ((headers outs).any (·.sentTime.isSome)) "reliable datagram without a sent time" },
   { name := "a peer that never answers times out between the minimum and maximum"
     run := fun _ => do
       let p ← send (← connected) (pkt 100)

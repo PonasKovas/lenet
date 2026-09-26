@@ -560,9 +560,13 @@ def packOutgoingCommands (p : Peer) (now : UInt32) : Peer × Array Protocol.Comm
 /-- The datagram carrying `commands` to peer `p`, encoded. -/
 def encodeDatagram (p : Peer) (now : UInt32) (checksumEnabled : Bool)
     (commands : Array Protocol.Command) : ByteArray :=
+  let negotiated := p.outgoingPeerId < Constants.maximumPeerId
   let datagram : Protocol.Datagram := {
-    header   := { peerId := p.outgoingPeerId, session := p.outgoingSessionId, compressed := false,
-                  sentTime := some now.toUInt16 }
+    -- as ENet: the sent time only when a command asks for an ACK (ACKs echo
+    -- it), the session only once the remote peer ID is known
+    header   := { peerId := p.outgoingPeerId, session := if negotiated then p.outgoingSessionId else 0
+                  compressed := false
+                  sentTime := if commands.any (·.acknowledge) then some now.toUInt16 else none }
     checksum := if checksumEnabled then some 0 else none
     commands
   }
