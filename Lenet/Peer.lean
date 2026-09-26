@@ -575,16 +575,20 @@ def handleVerifyConnect (p : Peer) (params : Protocol.ConnectParams) : Peer × A
       state             := .connected }
     (p, #[.connect p.peerId p.eventData])
 
+/-- Queues the ACK `cmd` asks for, echoing the datagram's `sentTime`. -/
+def ackCommand (p : Peer) (cmd : Protocol.Command) (sentTime : Option UInt16) : Peer :=
+  match cmd.acknowledge, sentTime with
+  | true, some sentTime =>
+    p.queueAck { channelId := cmd.channelId, reliableSequenceNumber := cmd.reliableSequenceNumber, sentTime }
+  | _, _ => p
+
 /-- Processes one incoming command from this peer: queues the ACK it asks
 for, then applies it. Returns the updated peer and the events produced. A
 reliable fragment that found no assembler is not acknowledged
 (`handleFragment`). -/
 def handleCommand (p : Peer) (now : UInt32) (cmd : Protocol.Command) (sentTime : Option UInt16) :
     Peer × Array Event :=
-  let ack (p : Peer) : Peer := match cmd.acknowledge, sentTime with
-    | true, some sentTime =>
-      p.queueAck { channelId := cmd.channelId, reliableSequenceNumber := cmd.reliableSequenceNumber, sentTime }
-    | _, _ => p
+  let ack (p : Peer) : Peer := p.ackCommand cmd sentTime
   let fragment (params : Protocol.FragmentParams) (unreliable : Bool) : Peer × Array Event :=
     if p.isConnected then
       let (p, events, accepted) := p.handleFragment cmd.channelId cmd.reliableSequenceNumber params unreliable

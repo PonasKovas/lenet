@@ -92,6 +92,7 @@ default build and CI compile. The C library never includes them.
 | `Time`          | time differences don't depend on when the clock started; 16-bit wire timestamps are recovered exactly (`fromWire_recovers`) |
 | `Deadline`      | `nextDeadline` is always one of the host's timers and no timer is earlier (`nextDeadline_mem`, `nextDeadline_earliest`) |
 | `Resources`     | the fragment-assembler cap holds and every assembler stays well formed with its memory fixed at creation (`handleFragment_assemblersOk`), and a channel stages at most seven windows of reliable packets whatever the sender does (`stagedReliableInv_size`) |
+| `Events`        | every per-peer step keeps the peer's events consistent: connect only when not already connected, receives only while connected, no way back but a disconnect (`handleCommand_wf`, `checkPeerTimeouts_wf`, `pollPeer_wf`) |
 | `Panic`         | a build-time scan of every `Lenet.*` definition fails the build on any panicking construct; every division is listed with a proof its divisor is not zero |
 
 A kernel theorem cannot say "does not panic", because in Lean's logic

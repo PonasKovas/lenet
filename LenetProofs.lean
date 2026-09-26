@@ -7,6 +7,7 @@ import Lenet.Proofs.Deadline
 import Lenet.Proofs.Unsequenced
 import Lenet.Proofs.Panic
 import Lenet.Proofs.Resources
+import Lenet.Proofs.Events
 
 /-!
 # LenetProofs

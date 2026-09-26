@@ -30,8 +30,10 @@ Done this session:
 - **In-place updates** (Performance): 15-35% faster across the bench.
   The C API's send no longer copies the host.
 
-Suggested next: the event-level properties (Proofs), or the two channel
-copies left under Performance.
+Also since: disconnect handling now follows ENet (two event bugs fixed,
+test/README.md), and `Proofs/Events.lean` proves the per-peer event rules.
+
+Suggested next: the host-level lift of the event proof.
 
 Checks before each commit: `lake build` (library and proofs, including the
 no-panic audit in `Proofs/Panic.lean`), `./.lake/build/bin/unit`,
@@ -55,9 +57,10 @@ as bugs show where the corpus is blind.
 - **Sender-side window span.** The in-flight reliable commands of a channel
   span fewer than seven windows (see the handoff note: the stronger "always
   in the receiver's window" is false, for ENet too).
-- **Event-level properties.** For example "a connection produces exactly
-  one connect and at most one disconnect event", stated over
-  `handleDatagram`/`service` traces.
+- **Event-level properties, host level.** `Proofs/Events.lean` proves the
+  per-peer steps keep a peer's events well formed (`EventsWf`); lift it to
+  `Host.handleDatagram` and `Host.service` with a per-slot projection of
+  the event array (events carry the peer ID; a slot's ID never changes).
 
 ## Performance
 
