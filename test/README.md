@@ -251,6 +251,11 @@ compatibility"). Open, undecided differences are listed in TODO.md.
   for events from a received datagram, missing timeouts and the remote
   DISCONNECT that completes once its ACK is out. `Host.service` now sets
   it too.
+- **Channel count of a connect (lenet bug - fixed).** ENet's
+  enet_host_connect clamps the channel count to [1, 255]; the host's
+  channel limit only caps incoming CONNECTs. Lenet also capped its own
+  connects at the limit, so a host created with channel limit 1 could not
+  open more than one channel to a server that allowed them.
 - **Client's throttle parameters (lenet bug - fixed).** ENet's
   handle_connect takes over the packet-throttle interval, acceleration and
   deceleration a CONNECT carries and echoes them in the VERIFY_CONNECT,

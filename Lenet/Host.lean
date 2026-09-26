@@ -131,15 +131,16 @@ def freeSlot? (h : Host) : Option (Fin h.peers.size) :=
 
 /-! ## Application API -/
 
-/-- Starts connecting to `remoteAddress` with `channelCount` channels (at
-least 1, at most the host's channel limit), sending `data` with the CONNECT.
+/-- Starts connecting to `remoteAddress` with `channelCount` channels
+(clamped to [1, 255]; the host's channel limit only caps incoming
+connections, as in ENet enet_host_connect), sending `data` with the CONNECT.
 Returns the updated host and the peer ID of the new connection. -/
 def connect (h : Host) (remoteAddress : Address) (channelCount : Nat := 2) (data : UInt32 := 0) :
     Except LenetError (Host × UInt16) := do
   let some slot := h.freeSlot? | throw .noFreePeerSlots
   let p := h.peers[slot]
   let (h, connectId) := h.random
-  let channels := if channelCount == 0 then 1 else Nat.min channelCount h.channelLimit
+  let channels := Nat.max Constants.minimumChannelCount (Nat.min channelCount Constants.maximumChannelCount)
   -- ENet (enet_host_connect): the client's window derives from its own
   -- outgoing bandwidth (a fresh slot has incomingBandwidth = 0)
   let windowSize := windowSizeFor h.outgoingBandwidth 0

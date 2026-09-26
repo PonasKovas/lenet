@@ -390,6 +390,16 @@ def hostTests : List Test := [
         sp.packetThrottleDeceleration == 4) "server peer kept its own throttle parameters"
       -- the client checks the echo (ENet handle_verify_connect)
       expect (p.clientP.state == .connected) "client refused the VERIFY_CONNECT" },
+  { name := "connect asks for its channel count whatever the host's channel limit"
+    run := fun _ => do
+      -- ENet enet_host_connect clamps to [1, 255] only; the limit caps incoming CONNECTs
+      let .ok (h, id) := (Host.create clientAddr 1 (channelLimit := 1)).connect serverAddr 4
+        | throw "connect failed"
+      expect (h.peers[id.toNat]!.channels.size == 4) s!"{h.peers[id.toNat]!.channels.size} channels"
+      let .ok (h, id) := (Host.create clientAddr 1).connect serverAddr 0 | throw "connect failed"
+      expect (h.peers[id.toNat]!.channels.size == 1) "0 channels not raised to 1"
+      let .ok (h, id) := (Host.create clientAddr 1).connect serverAddr 300 | throw "connect failed"
+      expect (h.peers[id.toNat]!.channels.size == 255) "300 channels not capped at 255" },
   { name := "a retransmitted CONNECT does not take a second slot"
     run := fun _ => do
       let .ok (client, _) := (Host.create clientAddr 1).connect serverAddr 2 | throw "connect failed"
