@@ -7,7 +7,7 @@ import Lenet.Proofs.Channel
 /-!
 # Resource-safety proofs
 
-Robustness against hostile input (DESIGN.md 1.5 - deliberately stricter than
+Robustness against hostile input (deliberately stricter than
 ENet, whose pending-assembler growth is bounded only by its window span).
 The attacker-controlled memory surfaces and their bounds:
 
@@ -26,11 +26,11 @@ The attacker-controlled memory surfaces and their bounds:
    `Proofs/Reassembly.lean`.)
 2. **Staged reliable packets** (`Channel.stagedReliable`): the receive-window
    gate drops out-of-window seqs, the duplicate check keeps keys distinct,
-   delivery only shrinks the staged array (`drainContiguousLoop_size`), and
-   a non-delivery call adds at most one entry
-   (`receiveReliable_staged_mono`). The full window-span bound is asserted
-   in the replay corpus (test/Replay.lean) alongside the deferred Peer-skew
-   formal proof.
+   draining only shrinks the staged array (`drainContiguousLoop_size`), and
+   one receive stages at most one entry (`receiveReliableSpan_staged_le`).
+   The full window-span bound is asserted by the replay corpus
+   (test/Replay.lean); proving it needs the sender-side window invariant
+   (TODO.md).
 3. **Acknowledgement queue**: production is coupled to the driver's pump
    rate (≤ 32 acks per received datagram) and the packing loop drains up to
    `maximumPacketCommands` per tick; growth beyond a well-behaved pump is
@@ -201,4 +201,49 @@ theorem handleFragment_cap_preserved (p : Peer) (channelId : UInt8)
     all_goals exact Nat.le_trans (assemblerArrayAfterDeliver_size _ _ _) hxs
   · rw [if_pos (by simp [hg] : ((!fragmentGateOk p channelId params unreliable) = true))]
     exact hcap
+
+/-! ## Staged reliable packets -/
+
+open Channel
+
+/-- Draining delivers from the staged array; it never adds to it. -/
+theorem drainContiguousLoop_size : ∀ (f : Nat) (cur : UInt16) (staged : Array StagedReliable)
+    (del : Array (Nat × Packet)) (adv : Nat),
+    (drainContiguousLoop cur staged del f adv).2.2.1.size ≤ staged.size := by
+  intro f
+  induction f with
+  | zero => intro cur staged del adv; simp [drainContiguousLoop]
+  | succ f ih =>
+    intro cur staged del adv
+    simp only [drainContiguousLoop]
+    split
+    · next idx _ =>
+      split
+      · next hidx =>
+        have := ih ((cur + 1) + ((staged[idx]).span - 1).toUInt16) (staged.eraseIdx idx hidx)
+          (del.push ((staged[idx]).span, (staged[idx]).packet)) (adv + (staged[idx]).span)
+        rw [Array.size_eraseIdx] at this
+        omega
+      · exact Nat.le_refl _
+    · exact Nat.le_refl _
+
+/-- One reliable receive stages at most one delivery. -/
+theorem receiveReliableSpan_staged_le (c : Channel) (seq : UInt16) (span : Nat) (packet : Packet) :
+    (receiveReliableSpan c seq span packet).1.stagedReliable.size ≤ c.stagedReliable.size + 1 := by
+  unfold receiveReliableSpan
+  split
+  · simp
+  · split
+    · simp
+    · split
+      · have := drainContiguousLoop_size c.stagedReliable.size (seq + (span - 1).toUInt16)
+          c.stagedReliable #[] 0
+        simp only [drainContiguous]
+        generalize drainContiguousLoop _ c.stagedReliable #[] c.stagedReliable.size 0 = r at this ⊢
+        obtain ⟨_, _, rest, _⟩ := r
+        simp only at this ⊢
+        omega
+      · simp only []
+        split <;> simp
+
 end Lenet.Proofs

@@ -5,8 +5,8 @@ import Lenet.Host
 /-!
 # `Host.nextDeadline`: the earliest scheduled timer
 
-The driver-facing contract (TODO.md Phase 4; lenet-rs schedules its service
-ticks from it): the returned deadline
+The driver-facing contract (drivers schedule their service ticks from it):
+the returned deadline
 
 1. is always present and is one of the host's actual timers
    (`nextDeadline_mem`) - never a spurious wakeup time;

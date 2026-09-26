@@ -6,7 +6,7 @@ import Lenet.Proofs.Basic
 
 Pins the wrap-boundary behavior fixed by the receive-window gate (see
 test/README.md, divergence triage) and proves the drain loop's adequacy and
-correctness, plus delivery monotonicity. See TODO.md Phase 2.
+correctness, plus delivery monotonicity.
 
 Non-obvious content:
 

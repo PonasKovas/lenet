@@ -16,7 +16,7 @@ def maximumFragmentCount : Nat := 1024 * 1024
 /-- Cap on concurrently-assembling fragmented packets per peer. ENet has no
 explicit cap; its effective bound is the receive window span with each
 pending assembly allocating the full `totalLength` up front - far more
-permissive than this. Robustness (DESIGN.md 1.5), not parity: beyond the
+permissive than this. Robustness, not parity: beyond the
 cap, fragments of *new* assemblies are dropped (the sender retransmits;
 in-flight assemblies keep absorbing). -/
 def maximumFragmentAssemblers : Nat := 32

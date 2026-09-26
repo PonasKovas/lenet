@@ -5,7 +5,7 @@ import Lenet.Proofs.Basic
 /-!
 # Reassembly safety proofs
 
-The non-obvious content (see TODO.md Phase 2): the fragment assembler's
+The non-obvious content: the fragment assembler's
 received-bitset and fragmentsRemaining counter must stay in correspondence -
 `fragmentsRemaining + received.count = fragmentCount` - which is what makes
 completion sound: the assembled buffer is dispatched only after every

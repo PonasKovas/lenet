@@ -1,5 +1,3 @@
-import Lenet.Constants
-
 /-!
 # Shared proof infrastructure
 

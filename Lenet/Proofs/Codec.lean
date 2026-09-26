@@ -9,7 +9,7 @@ import Lenet.Protocol.Datagram
 /-!
 # Codec proofs: reader algebra, fuel adequacy, roundtrip
 
-What makes these proofs non-trivial (see TODO.md Phase 2):
+What makes these proofs non-trivial:
 
 * Roundtrip is **false without preconditions**: `encode` truncates payload
   lengths to `UInt16`, and `Header.encode` shifts the session into flag-bit

@@ -229,7 +229,7 @@ private def cmpBytes (b : ByteArray) : String :=
   if b.size ≤ 64 then s!"{b.size}:{hexOf b}" else s!"{b.size}:{hexOf (b.extract 0 64)}…"
 
 /-- Canonical, mask-aware representation of a protocol command.
-Masked fields (inherently non-deterministic, documented in TESTING.md):
+Masked fields (inherently non-deterministic, see test/README.md):
   - connect/verifyConnect: `connectId` (drawn from real-clock-seeded ENet
     randomness at record time)
 Session IDs are NOT masked: negotiation is deterministic (client sends

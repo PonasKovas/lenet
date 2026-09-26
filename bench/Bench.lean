@@ -1,5 +1,5 @@
 /-
-Phase 3 benchmark executable (see TODO.md, "Phase 3 — Performance").
+Benchmark executable (baseline numbers: TODO.md, "Performance").
 
 Measures, through the pure sans-I/O core only (no sockets, no FFI):
 
