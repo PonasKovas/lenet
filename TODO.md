@@ -10,10 +10,6 @@ what is left, roughly in priority order.
 Not yet triaged as bugs or accepted; each needs a decision per
 DESIGN.md's rules.
 
-- **Outgoing bandwidth throttle uses a different input.** ENet's
-  `enet_host_bandwidth_throttle` sets each peer's throttle limit from the
-  bytes it sent during the epoch (`outgoingDataTotal`); Lenet uses the
-  reliable bytes currently in flight. Lenet does not count sent bytes yet.
 - **No window gate on unreliable commands.** Documented in
   [test/README.md](test/README.md#divergence-triage); only matters for
   hostile senders.

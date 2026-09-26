@@ -74,6 +74,10 @@ structure Peer where
   packetThrottleInterval         : UInt32 := Constants.defaultPacketThrottleInterval
   eventData                      : UInt32 := 0
   reliableDataInTransit          : Nat := 0
+  /-- Bytes of commands and ACKs queued for this peer since the last
+  bandwidth-throttle epoch; retransmissions do not count (ENet
+  `outgoingDataTotal`). -/
+  outgoingDataTotal              : Nat := 0
   /-- Sequence counter of the reliable control commands on channel 0xFF
   (connect, verify, disconnect, ping, bandwidth/throttle configuration);
   ENet's `peer->outgoingReliableSequenceNumber`. -/
@@ -107,7 +111,9 @@ def isConnected (p : Peer) : Bool :=
 
 /-- Queues an outgoing command for transmission. -/
 def queueOutgoingCommand (p : Peer) (cmd : OutgoingCommand) : Peer :=
-  { p with outgoingCommands := p.outgoingCommands.push cmd }
+  { p with
+    outgoingCommands  := p.outgoingCommands.push cmd
+    outgoingDataTotal := p.outgoingDataTotal + cmd.command.wireSize }
 
 /-- Queues a reliable control command on channel 0xFF, numbered by the
 peer-level control sequence (pre-incremented: the first one is 1). -/
@@ -123,7 +129,9 @@ def queueDisconnect (p : Peer) (data : UInt32) : Peer :=
 
 /-- Queues an acknowledgement for the remote peer. -/
 def queueAck (p : Peer) (ack : Acknowledgement) : Peer :=
-  { p with acknowledgements := p.acknowledgements.push ack }
+  { p with
+    acknowledgements  := p.acknowledgements.push ack
+    outgoingDataTotal := p.outgoingDataTotal + 8 } -- an ACK command's wire size
 
 /-- Removes the in-flight reliable command `(channelId, seq)` once it is
 acknowledged: releases its channel window slot and its in-transit bytes.

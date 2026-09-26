@@ -189,6 +189,20 @@ compatibility"). Open, undecided differences are listed in TODO.md.
   whose step lands above the throttle is dropped, all its fragments with it.
   Invisible to the corpus: its throttle stays at the full 32, where nothing
   is dropped.
+- **Outgoing bandwidth throttle input (lenet bug - fixed).** ENet sets each
+  peer's throttle limit from the bytes queued for it during the epoch
+  (`outgoingDataTotal`, counted in setup_outgoing_command and
+  queue_acknowledgement) and first limits peers that exceed their own
+  incoming bandwidth (`host.c` enet_host_bandwidth_throttle). Lenet split
+  the host bandwidth evenly and compared it with the reliable bytes in
+  flight. `Host.outgoingThrottleLimits` now ports ENet's loop. Invisible to
+  the corpus: no trace queues data across a throttle epoch.
+- **Bandwidth throttle overflow (enet bug - not copied).** ENet computes
+  `bandwidth * elapsedTime` in 32 bits, which wraps once a bandwidth passes
+  about 4.3 MB/s, and subtracts a limited peer's bandwidth from a host
+  budget that can be smaller, which wraps to a near-unlimited budget. Lenet
+  computes on `Nat`: no wrap, and an exhausted budget stays exhausted. Only
+  the sender's own throttle changes, so interop does not see it.
 - **Unsequenced drop cascade (enet bug - not copied).** When ENet's throttle
   drops a packet it also drops every directly following command with the
   same sequence numbers, meant for the rest of a fragment set. Unsequenced

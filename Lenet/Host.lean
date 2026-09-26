@@ -587,6 +587,78 @@ where
         if marked'.size > marked.size then go bandwidth' remaining' share marked' fuel
         else (share, marked')
 
+/-- What is left of the host's outgoing budget for one bandwidth-throttle
+epoch: the bytes it may send and the bytes its peers queued. `none` when the
+host's outgoing bandwidth is unlimited. -/
+abbrev OutgoingBudget := Option (Nat × Nat)
+
+/-- The packet throttle limit that spreads `budget` over the queued bytes. -/
+def OutgoingBudget.throttle : OutgoingBudget → Nat
+  | some (bandwidth, dataTotal) =>
+    if dataTotal ≤ bandwidth then Constants.packetThrottleScale.toNat
+    else bandwidth * Constants.packetThrottleScale.toNat / dataTotal
+  | none => Constants.packetThrottleScale.toNat
+
+/-- Sets peer `p`'s packet throttle limit, lowers its throttle to it, and
+starts its next epoch's byte count. -/
+def limitPeerThrottle (p : Peer) (limit : Nat) : Peer :=
+  let limit := limit.toUInt32
+  { p with
+    packetThrottleLimit := limit
+    packetThrottle      := min p.packetThrottle limit
+    outgoingDataTotal   := 0 }
+
+/-- ENet's outgoing half of enet_host_bandwidth_throttle, over an epoch of
+`elapsed` ms. First, every connected peer that was queued more bytes than
+its own incoming bandwidth takes (at the current host-wide throttle) is
+limited to that bandwidth, and its share leaves the host's budget; this
+repeats until no more peers are limited. Then every other connected peer
+gets the throttle that spreads the rest of the budget over the bytes queued.
+
+The arithmetic is on `Nat`. ENet computes `bandwidth * elapsed` in 32 bits,
+which overflows from about 4.3 MB/s up, and subtracts a limited peer's
+bandwidth from a host budget that may be smaller, which wraps to "no limit"
+(see test/README.md, divergence triage). -/
+def outgoingThrottleLimits (h : Host) (elapsed : Nat) : Array Peer :=
+  let budget : OutgoingBudget :=
+    if h.outgoingBandwidth == 0 then none
+    else
+      some (h.outgoingBandwidth.toNat * elapsed / 1000,
+        h.peers.foldl (init := 0) fun total p => if p.isConnected then total + p.outgoingDataTotal else total)
+  let connected := h.peers.filter (·.isConnected) |>.size
+  let needsAdjustment := h.peers.any fun p => p.isConnected ∧ p.incomingBandwidth != 0
+  let (peers, budget, limited) := limitPeers budget #[] needsAdjustment h.peers (connected + 1)
+  if limited.size ≥ connected then peers
+  else
+    let throttle := budget.throttle
+    peers.map fun p =>
+      if p.isConnected ∧ !limited.contains p.peerId then limitPeerThrottle p throttle else p
+where
+  /-- The rounds of limiting peers to their own bandwidth; every round but
+  the last limits at least one more peer. -/
+  limitPeers (budget : OutgoingBudget) (limited : Array UInt16) (needsAdjustment : Bool) (peers : Array Peer) :
+      Nat → Array Peer × OutgoingBudget × Array UInt16
+    | 0 => (peers, budget, limited)
+    | fuel + 1 =>
+      if !needsAdjustment ∨ limited.size ≥ connectedCount peers then (peers, budget, limited)
+      else
+        let throttle := budget.throttle
+        let (peers', budget', limited') :=
+          peers.foldl (init := (#[], budget, limited)) fun (acc, budget, limited) p =>
+            let peerBandwidth := p.incomingBandwidth.toNat * elapsed / 1000
+            if !p.isConnected ∨ p.incomingBandwidth == 0 ∨ limited.contains p.peerId ∨
+                throttle * p.outgoingDataTotal / Constants.packetThrottleScale.toNat ≤ peerBandwidth then
+              (acc.push p, budget, limited)
+            else
+              -- `outgoingDataTotal > peerBandwidth` here, so the division is
+              -- by a positive total and `dataTotal` does not underflow
+              let limit := max 1 (peerBandwidth * Constants.packetThrottleScale.toNat / p.outgoingDataTotal)
+              (acc.push (limitPeerThrottle p limit),
+                budget.map fun (bandwidth, dataTotal) => (bandwidth - peerBandwidth, dataTotal - peerBandwidth),
+                limited.push p.peerId)
+        limitPeers budget' limited' (limited'.size > limited.size) peers' fuel
+  connectedCount (peers : Array Peer) : Nat := peers.filter (·.isConnected) |>.size
+
 /-- The bandwidth-throttle epoch (every `bandwidthThrottleInterval` ms,
 ENet enet_host_bandwidth_throttle): recomputes each connected peer's packet
 throttle limit from the host's outgoing bandwidth and, after connects or
@@ -597,15 +669,7 @@ def bandwidthThrottle (h : Host) (now : UInt32) : Host :=
     let connected := h.peers.filter (·.isConnected)
     if connected.isEmpty then { h with bandwidthThrottleEpoch := now }
     else
-      let throttleLimit (p : Peer) : UInt32 :=
-        if h.outgoingBandwidth == 0 then Constants.packetThrottleScale
-        else
-          let share := h.outgoingBandwidth / connected.size.toUInt32
-          let inTransit := p.reliableDataInTransit.toUInt32
-          if inTransit ≤ share then Constants.packetThrottleScale
-          else max 1 (share * Constants.packetThrottleScale / inTransit)
-      let peers := h.peers.map fun p =>
-        if p.isConnected then { p with packetThrottleLimit := throttleLimit p } else p
+      let peers := h.outgoingThrottleLimits (Time.difference now h.bandwidthThrottleEpoch).toNat
       let peers :=
         if !h.recalculateBandwidthLimits then peers
         else
