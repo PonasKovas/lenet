@@ -382,6 +382,33 @@ compatibility"). Open, undecided differences are listed in TODO.md.
   ENet; the handshaking peer waits as `zombie` until the next service sends
   its DISCONNECT (there is no socket to flush to). The corpus only ever
   disconnects connected peers with nothing queued.
+- **Unsequenced packets held behind staged unreliable ones (enet quirk -
+  not copied).** ENet appends an unsequenced packet to the channel's
+  unreliable list, and dispatch_incoming_unreliable_commands stops at the
+  first entry waiting for a later reliable frontier, so an unsequenced
+  packet that arrives behind a staged unreliable one waits with it (and is
+  never delivered if that frontier never comes). Where it sorts in depends
+  on the frontier, because queue_incoming_command's insertion loop tests
+  the new command's type where it means the queued one's. Lenet delivers
+  an unsequenced packet when it arrives, which is what unsequenced means.
+  Only visible with loss or reordering on a channel that mixes both.
+- **Retransmit check gated by one deadline (enet quirk - not copied).**
+  ENet checks for timeouts only once the service time reaches
+  `peer->nextTimeout`, the deadline of the command at the front of the
+  in-flight list, so a later command with a shorter retransmit timeout (the
+  RTT fell) waits for the front's deadline. Lenet checks every command
+  against its own deadline (`Host.checkPeerTimeouts`, and `nextDeadline`
+  reports the earliest), so it can resend such a command sooner. The wire
+  differs in timing only.
+- **Timeout ends the send pass (enet quirk - not copied).** When a peer
+  times out, ENet's send_outgoing_commands returns at once: the peers after
+  it get their datagrams in the next service call. Lenet serves every peer
+  in the same `Host.service`.
+- **UNSEQUENCED with UNRELIABLE_FRAGMENT (not copied, C API only).** ENet
+  sends a small packet with both flags unsequenced and a large one as
+  unreliable fragments. Lenet's delivery modes cannot say both
+  (`DeliveryMode.fromFlags` picks unsequenced), so a large one goes as
+  reliable fragments, as with UNSEQUENCED alone.
 - **Unsequenced window (enet quirk - not copied).** ENet deduplicates
   unsequenced packets in aligned blocks of 1024 groups
   (`protocol.c` handle_send_unsequenced): a group in a newer block moves
