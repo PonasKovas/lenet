@@ -30,8 +30,8 @@ Done this session:
 - **In-place updates** (Performance): 15-35% faster across the bench.
   The C API's send no longer copies the host.
 
-Suggested next: the unit-test candidates below (cheap, and past bugs hid
-exactly there), then the event-level properties.
+Suggested next: the event-level properties (Proofs), or the two channel
+copies left under Performance.
 
 Checks before each commit: `lake build` (library and proofs, including the
 no-panic audit in `Proofs/Panic.lean`), `./.lake/build/bin/unit`,
@@ -46,9 +46,9 @@ after 65 s of uptime, retransmissions leaked in-transit bytes, the sender's
 reliable windows were never occupied. The benchmark's lossy link now covers
 loss (and found the fragment assembler leak), and `test/Unit.lean` pins the
 fragment-assembler rules, retransmission, timeouts and disconnect-later.
-Worth adding there as they come up:
-
-- **More unit tests.** Candidate: bandwidth limits across several peers.
+The candidate list is done (unsequenced window, `nextDeadline` against
+`service`, packet throttle, bandwidth limits across peers); add more there
+as bugs show where the corpus is blind.
 
 ## Proofs
 

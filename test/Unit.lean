@@ -312,6 +312,32 @@ def hostTests : List Test := [
       let p := p.rounds 5
       let got := (received p.serverEvents).size
       expect (got == 9) s!"{got} of 32 delivered" },
+  { name := "bandwidth throttle: a slow peer is limited first, the rest share what is left"
+    run := fun _ => do
+      -- expected values worked out by hand from ENet's enet_host_bandwidth_throttle
+      let peer (id : UInt16) (inBw outBw : UInt32) : Peer :=
+        { peerId := id, state := .connected, incomingBandwidth := inBw, outgoingBandwidth := outBw
+          outgoingDataTotal := 3000 }
+      let h : Host := { Host.create serverAddr 4 with
+        outgoingBandwidth := 4000, incomingBandwidth := 3000, recalculateBandwidthLimits := true
+        peers := #[peer 0 1000 500, peer 1 0 0, peer 2 0 3000, {}] }
+      let h := h.bandwidthThrottle 1000
+      let limit (i : Nat) := (h.peers[i]!.packetThrottleLimit, h.peers[i]!.packetThrottle)
+      -- 4000 for 9000 queued bytes: throttle 14, which leaves A more than
+      -- its 1000, so A gets 32 * 1000 / 3000
+      expect (limit 0 == (10, 10)) s!"A limit {limit 0}"
+      -- the budget loses A's 1000: 32 * 3000 / 8000
+      expect (limit 1 == (12, 12) && limit 2 == (12, 12)) s!"B, C limits {limit 1}, {limit 2}"
+      expect (h.peers[3]! == {}) "an unconnected slot was touched"
+      -- incoming 3000: the share of 1000 marks A (sends at most 500) and B
+      -- (unlimited), each told its own outgoing bandwidth; C, sending 3000,
+      -- is told the 2500 left
+      let limits := h.peers.filterMap fun p => p.outgoingCommands.back?.bind fun c =>
+        match c.command.body with
+        | .bandwidthLimit incoming outgoing => some (incoming, outgoing)
+        | _ => none
+      expect (limits == #[(500, 4000), (0, 4000), (2500, 4000)]) s!"BANDWIDTH_LIMITs {limits}"
+      expect (!h.recalculateBandwidthLimits && h.bandwidthThrottleEpoch == 1000) "epoch not advanced" },
   { name := "service before nextDeadline does nothing; at it, the resend goes out"
     run := fun _ => do
       let p := (← send (← connected) (pkt 100)).round dropAll
