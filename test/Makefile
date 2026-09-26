@@ -1,7 +1,9 @@
-# Builds the ENet compatibility recorder harness against the real enet
-# sources (out-of-tree; ../enet is never modified).
+# Builds the ENet compatibility test programs against the real ENet sources
+# (out-of-tree; the ENet checkout is never modified).
 #
-#   make               -> builds c/harness
+#   make               -> builds c/harness (the trace recorder)
+#   make c/interop     -> builds the live interop runner
+#   make interop       -> runs every interop scenario
 #   make traces        -> records all scenario traces into traces/
 #   make record SCENARIO=connect
 #   make clean
@@ -22,12 +24,7 @@ CFLAGS := -O1 -g -Wall -DHAS_FCNTL=1 -DHAS_POLL=1 -DHAS_GETADDRINFO=1 \
 SCENARIOS := connect send_c2s send_s2c frag fragthen disc_client disc_server idle timeout checksum bandwidth unfrag disclater multip inject multichannel dup reconnect retimeout mtu576 throttleconf
 INTEROP_SCENARIOS := connect connect_r send frag disconnect disconnect_r timeout checksum bandwidth disclater multip unfrag
 
-# Lean toolchain (for the interop harness linking liblenet_Lenet.a)
-TOOLCHAIN := $(patsubst %/bin/leanc,%,$(abspath $(shell ls ~/.elan/toolchains/*/bin/leanc | head -1)))
-LEAN_INC  := $(TOOLCHAIN)/include
-LEANLIB   := $(TOOLCHAIN)/lib/lean
-
-.PHONY: all traces record interop clean
+.PHONY: all traces record interop clean FORCE
 
 all: $(HARNESS)
 
@@ -43,12 +40,12 @@ $(ENET_LIB): $(ENET_OBJS)
 $(HARNESS): $(HARNESS_SRC) $(ENET_LIB)
 	$(CC) $(CFLAGS) $(HARNESS_SRC) $(ENET_LIB) -o $@ -lm
 
-
 c/interop: c/interop.c $(ENET_LIB) ../csrc/build/liblenet.a
 	$(CC) $(CFLAGS) -I../csrc/include c/interop.c $(ENET_LIB) ../csrc/build/liblenet.a \
 	    -o $@ -lpthread -ldl -lm
 
-../csrc/build/liblenet.a:
+# Delegate to csrc's Makefile every time; it knows when the archive is stale.
+../csrc/build/liblenet.a: FORCE
 	$(MAKE) -C ../csrc
 
 traces: $(HARNESS)

@@ -15,11 +15,13 @@ LEANLIB   := $(TOOLCHAIN)/lib/lean
 
 LEAN_STATIC := $(abspath ../.lake/build/lib/liblenet_Lenet.a)
 
-.PHONY: all check clean
+.PHONY: all check clean FORCE
 
 all: build/liblenet.a
 
-$(LEAN_STATIC):
+# Always ask lake: it rebuilds the Lean archive only when a source changed,
+# and a stale archive would silently ship old code.
+$(LEAN_STATIC): FORCE
 	lake -d .. build Lenet:static
 
 build:

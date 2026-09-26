@@ -68,32 +68,14 @@ static void lenet_bootstrap(void) {
     lean_dec_ref(res);
 }
 
+/* Every other entry point takes a host, and hosts only come from
+ * lenet_host_create, which initializes: they need no check of their own. */
 void lenet_initialize(void) {
     static pthread_once_t once = PTHREAD_ONCE_INIT;
     pthread_once(&once, lenet_bootstrap);
 }
 
-static void ensure_init(void) {
-    static pthread_once_t once = PTHREAD_ONCE_INIT;
-    pthread_once(&once, lenet_bootstrap);
-}
-
 /* ---- helpers ---- */
-
-/* Extracts the ok-value of an exported `IO a` result, or aborts after
- * printing the error. Returns the value with +1 ref (caller must dec). */
-static lean_object *ffi_value(lean_object *r) {
-    if (!lean_io_result_is_ok(r)) {
-        lean_io_result_show_error(r);
-        lean_dec(r);
-        fprintf(stderr, "lenet: FATAL: internal call failed\n");
-        abort();
-    }
-    lean_object *v = lean_ctor_get(r, 0);
-    lean_inc(v);
-    lean_dec(r);
-    return v;
-}
 
 /* 0 on ok, -1 on error; always releases r. */
 static int ffi_status(lean_object *r) {
@@ -104,10 +86,9 @@ static int ffi_status(lean_object *r) {
 
 /* Builds a Lean ByteArray from (data, len). */
 static lean_object *mk_byte_array(const void *data, size_t len) {
-    lean_object *arr = lean_mk_empty_byte_array(lean_box(len > 0 ? len : 1));
-    const uint8_t *p = data;
-    for (size_t i = 0; i < len; i++)
-        arr = lean_byte_array_push(arr, p[i]);
+    lean_object *arr = lean_alloc_sarray(1, len, len);
+    if (len > 0)
+        memcpy(lean_sarray_cptr(arr), data, len);
     return arr;
 }
 
@@ -128,16 +109,9 @@ lenet_host *lenet_host_create(uint32_t bind_ip, uint16_t bind_port,
         lean_dec(r);
         return NULL;
     }
-    lean_object *opt = lean_ctor_get(r, 0); /* Option (IO.Ref Ctx) */
-    lean_inc(opt);
-    lean_dec(r);
-    if (lean_obj_tag(opt) != 1) { /* none */
-        lean_dec(opt);
-        return NULL;
-    }
-    lean_object *ref = lean_ctor_get(opt, 0);
+    lean_object *ref = lean_ctor_get(r, 0); /* IO.Ref HostContext */
     lean_inc(ref);
-    lean_dec(opt);
+    lean_dec(r);
     return (lenet_host *)ref; /* we hold the only reference */
 }
 
@@ -153,7 +127,6 @@ void lenet_host_destroy(lenet_host *host) {
 int32_t lenet_host_connect(lenet_host *host, uint32_t ip, uint16_t port,
                            size_t channel_count, uint32_t user_data) {
     if (host == NULL) return -1;
-    ensure_init();
     lean_inc((lean_object *)host);
     lean_object *r = lenet_ffi_host_connect((lean_object *)host, ip, port,
                                             channel_count, user_data);
@@ -167,7 +140,6 @@ int32_t lenet_host_connect(lenet_host *host, uint32_t ip, uint16_t port,
 int32_t lenet_host_send(lenet_host *host, uint16_t peer_id, uint8_t channel,
                         uint32_t flags, const void *data, size_t len) {
     if (host == NULL) return -1;
-    ensure_init();
     lean_object *arr = mk_byte_array(data, len);
     lean_inc((lean_object *)host);
     lean_object *r = lenet_ffi_host_send((lean_object *)host, peer_id, channel,
@@ -180,7 +152,6 @@ int32_t lenet_host_send(lenet_host *host, uint16_t peer_id, uint8_t channel,
 void lenet_host_broadcast(lenet_host *host, uint8_t channel, uint32_t flags,
                           const void *data, size_t len) {
     if (host == NULL) return;
-    ensure_init();
     lean_object *arr = mk_byte_array(data, len);
     lean_inc((lean_object *)host);
     lean_object *r = lenet_ffi_host_broadcast((lean_object *)host, channel,
@@ -190,7 +161,6 @@ void lenet_host_broadcast(lenet_host *host, uint8_t channel, uint32_t flags,
 
 void lenet_host_disconnect(lenet_host *host, uint16_t peer_id, uint32_t data) {
     if (host == NULL) return;
-    ensure_init();
     lean_inc((lean_object *)host);
     lean_object *r = lenet_ffi_host_disconnect((lean_object *)host, peer_id, data);
     lean_dec(r);
@@ -198,7 +168,6 @@ void lenet_host_disconnect(lenet_host *host, uint16_t peer_id, uint32_t data) {
 
 void lenet_host_disconnect_later(lenet_host *host, uint16_t peer_id, uint32_t data) {
     if (host == NULL) return;
-    ensure_init();
     lean_inc((lean_object *)host);
     lean_object *r = lenet_ffi_host_disconnect_later((lean_object *)host, peer_id, data);
     lean_dec(r);
@@ -206,7 +175,6 @@ void lenet_host_disconnect_later(lenet_host *host, uint16_t peer_id, uint32_t da
 
 void lenet_host_enable_checksum(lenet_host *host) {
     if (host == NULL) return;
-    ensure_init();
     lean_inc((lean_object *)host);
     lean_object *r = lenet_ffi_host_enable_checksum((lean_object *)host);
     lean_dec(r);
@@ -216,7 +184,6 @@ void lenet_peer_throttle_configure(lenet_host *host, uint16_t peer_id,
                                    uint32_t interval, uint32_t acceleration,
                                    uint32_t deceleration) {
     if (host == NULL) return;
-    ensure_init();
     lean_inc((lean_object *)host);
     lean_object *r = lenet_ffi_peer_throttle_configure((lean_object *)host, peer_id,
                                                        interval, acceleration, deceleration);
@@ -226,7 +193,6 @@ void lenet_peer_throttle_configure(lenet_host *host, uint16_t peer_id,
 void lenet_peer_set_timeout(lenet_host *host, uint16_t peer_id,
                             uint32_t limit, uint32_t minimum, uint32_t maximum) {
     if (host == NULL) return;
-    ensure_init();
     lean_inc((lean_object *)host);
     lean_object *r = lenet_ffi_set_peer_timeout((lean_object *)host, peer_id,
                                                 limit, minimum, maximum);
@@ -239,31 +205,22 @@ int32_t lenet_host_handle_datagram(lenet_host *host, uint32_t now_ms,
                                    uint32_t ip, uint16_t port,
                                    const void *data, size_t len) {
     if (host == NULL) return -1;
-    ensure_init();
     lean_object *arr = mk_byte_array(data, len);
     lean_inc((lean_object *)host);
-    lean_object *r = lenet_ffi_host_handle_datagram((lean_object *)host, now_ms,
-                                                    ip, port, arr);
-    int32_t v = lean_io_result_is_ok(r) ? 0 : -1;
-    lean_dec(r);
-    return v;
+    return ffi_status(lenet_ffi_host_handle_datagram((lean_object *)host, now_ms,
+                                                     ip, port, arr));
 }
 
 int32_t lenet_host_service(lenet_host *host, uint32_t now_ms) {
     if (host == NULL) return -1;
-    ensure_init();
     lean_inc((lean_object *)host);
-    lean_object *r = lenet_ffi_host_service((lean_object *)host, now_ms);
-    int32_t v = lean_io_result_is_ok(r) ? 0 : -1;
-    lean_dec(r);
-    return v;
+    return ffi_status(lenet_ffi_host_service((lean_object *)host, now_ms));
 }
 
 /* ---- output polling ---- */
 
 int32_t lenet_host_next_deadline(lenet_host *host, uint32_t *deadline) {
     if (host == NULL || deadline == NULL) return -1;
-    ensure_init();
     lean_inc((lean_object *)host);
     lean_object *r = lenet_ffi_host_next_deadline((lean_object *)host);
     if (!lean_io_result_is_ok(r)) {
@@ -288,7 +245,6 @@ static _Thread_local uint8_t g_out_buf[64 * 1024];
 
 int32_t lenet_host_poll_outgoing(lenet_host *host, lenet_datagram *out) {
     if (host == NULL || out == NULL) return -1;
-    ensure_init();
     lean_inc((lean_object *)host);
     lean_object *r = lenet_ffi_host_poll_outgoing((lean_object *)host);
 
@@ -329,7 +285,6 @@ int32_t lenet_host_poll_event(lenet_host *host, lenet_event *out,
                               void *payload_buf, size_t payload_cap,
                               size_t *payload_len) {
     if (host == NULL || out == NULL) return -1;
-    ensure_init();
     lean_inc((lean_object *)host);
     lean_object *r = lenet_ffi_host_poll_event((lean_object *)host);
 

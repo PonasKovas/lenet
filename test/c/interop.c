@@ -2,18 +2,11 @@
  * Live interop harness: a real C ENet host and a Lenet host talk to each
  * other over actual UDP sockets in one process.
  *
- * This program uses ONLY the public C API declared in ../../csrc/include/lenet.h
- * and links only against libcsrc/build/liblenet.a — no Lean headers, no
- * Lean symbols. If this compiles and passes, the C API is clean.
+ * Lenet is used ONLY through the public C API (csrc/include/lenet.h) and
+ * csrc/build/liblenet.a: no Lean headers, no Lean symbols. If this compiles
+ * and passes, the C API is clean.
  *
- * Usage: interop <scenario>
- *   connect       lenet client -> C server handshake + one packet each way
- *   connect_r     C client -> lenet server handshake
- *   send          reliable/unreliable/unsequenced, both directions
- *   frag          40000-byte fragmented reliable send, both directions
- *   disconnect    lenet-initiated graceful disconnect
- *   disconnect_r  C-initiated graceful disconnect
- *   timeout       lenet stops responding -> C peer timeout
+ * Usage: interop <scenario>   (scenarios: see main() or test/README.md)
  *
  * Exit code 0 = scenario passed.
  */
