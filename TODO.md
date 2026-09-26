@@ -6,7 +6,7 @@ scenarios pass), unit tests, a lossy-link benchmark, the C distribution,
 and the proofs listed in [DESIGN.md](DESIGN.md#what-is-proven). What
 follows is what is left, roughly in priority order.
 
-## Next step (handoff, 2026-09-26, third session)
+## Next step (handoff, 2026-09-26, third and fourth sessions)
 
 Done this session:
 
@@ -28,6 +28,24 @@ Done this session:
   commands" and "Remote DISCONNECT keeps the queues"): a refused command
   gets no ACK and ends its datagram, ACKs depend on the state after the
   command, and both disconnects drop the queues and channels.
+- **ENet audit** (fourth session): four parallel read-only audits
+  (connection setup, incoming data, outgoing data, timers) compared ENet's
+  C line by line with Lenet. Fixed, each with a unit test that fails
+  without its fix (test/README.md has an entry per item): unreliable
+  numbers used up (a streaming channel went silent after 65535 packets),
+  no ping while unreliable data was queued (a dead remote was never timed
+  out), zero timeout parameters, retransmitted CONNECT, bandwidth
+  recalculation after disconnects in service, data while disconnecting
+  later, ACK of a command queued for resend, the client's throttle
+  parameters, a connect's channel count, the client's own connect event
+  data (0, as ENet; the live `connect` scenario expected the old value),
+  the 32 MB send limit, header bytes, and fragment validation. Four ENet
+  quirks are recorded as not copied.
+- Open design question: a Lenet receiver assembles at most 4 MB (a
+  resource cap), while its sender now takes up to ENet's 32 MB, so a
+  reliable packet of 4-32 MB between two Lenet hosts is never acknowledged
+  and the connection times out. Either the sender refuses above 4 MB (and
+  Lenet-to-ENet loses 4-32 MB packets), or the receiver cap goes up.
 - A proof hazard worth knowing: never let the kernel compare `h` with a
   host whose `randomSeed` was advanced (`h.randomSeed + 0x6D2B79F5`). It
   unfolds the addition one successor at a time, with no heartbeat limit,
