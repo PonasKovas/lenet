@@ -68,28 +68,36 @@ Worth adding there as they come up:
 
 ## Performance
 
-Baseline (`./.lake/build/bin/bench`, median of 5 runs, i5-8350U @ 1.7 GHz,
-Lean 4.33.1; run-to-run noise is about 10%):
+Baseline (`./.lake/build/bin/bench`, median of 3 runs of the bench's own
+median of 5, i5-8350U @ 1.7 GHz, Lean 4.33.1; run-to-run noise is about
+10%). Before the in-place peer updates of 2026-09-26 it was ~233k / ~420k /
+~255k / ~43k / ~59k pkts/s, idle ~2.7 µs, loaded ~276 µs.
 
 | scenario               | pkts/s | MB/s | ns/pkt |
 |------------------------|--------|------|--------|
-| reliable 1200B         | ~233k  | ~280 | ~4300  |
-| unreliable 1200B       | ~420k  | ~510 | ~2400  |
-| unsequenced 1200B      | ~255k  | ~305 | ~3900  |
-| reliable 4096B (frag)  | ~43k   | ~175 | ~23500 |
-| unrelfrag 4096B (frag) | ~59k   | ~240 | ~17000 |
+| reliable 1200B         | ~318k  | ~380 | ~3150  |
+| unreliable 1200B       | ~518k  | ~620 | ~1930  |
+| unsequenced 1200B      | ~343k  | ~410 | ~2920  |
+| reliable 4096B (frag)  | ~49k   | ~200 | ~20400 |
+| unrelfrag 4096B (frag) | ~64k   | ~263 | ~15500 |
 
-Service tick: idle pair ~2.7 µs, loaded (64 reliable sends) ~276 µs.
+Service tick: idle pair ~2.2 µs, loaded (64 reliable sends) ~206 µs.
 
-Known costs, in likely order of payoff:
+What the profile shows now: most time is allocation and freeing, spread
+thin. Lean updates an array or record in place only while one reference
+holds it, so a value read out of a container that still holds it, or kept
+alive for an error branch, gets copied on its next change. To find such a
+copy, wrap the value in `dbgTraceIfShared "tag" x` for a moment and count
+the messages a bench run prints. Known costs left:
 
-- `Datagram.parseCommands` copies the rest of the datagram after every
-  command (`extract`); parsing with a cursor would make it linear.
-- Peers are read out of `Host.peers` and written back, which shares them
-  with the array for a moment and forces a copy of the peer record. A
-  take-modify-put pattern (`Array.modify`) through the whole call chain
-  would avoid it.
+- `Peer.enqueue` and `Peer.receiveOnChannel` read the channel out of
+  `Peer.channels` while the array still holds it, so each send and each
+  receive copies the channel record (and its window vector on the next
+  acquire). `Array.modifyM` in `StateM` fixes it (as `Host.withPeer`
+  does); the Resources proofs over both functions need redoing with it.
 - Fragmented sends copy each fragment out of the packet (`extract`).
+- `Datagram.parseCommands` copies the rest of the datagram after every
+  command, but that is 0.3% of the profile: not worth a cursor rewrite.
 
 ## API and bindings
 
