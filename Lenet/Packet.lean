@@ -37,18 +37,6 @@ def fromFlags (flags : UInt32) : DeliveryMode :=
   else
     .unreliable
 
-/-- True if the packet requires reliable acknowledgment and retransmission. -/
-@[inline]
-def isReliable : DeliveryMode → Bool
-  | .reliable => true
-  | _         => false
-
-/-- True if the packet is unsequenced. -/
-@[inline]
-def isUnsequenced : DeliveryMode → Bool
-  | .unsequenced => true
-  | _            => false
-
 end DeliveryMode
 
 /--

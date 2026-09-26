@@ -52,8 +52,6 @@ structure Peer where
   lastRoundTripTime              : UInt32 := Constants.defaultRoundTripTime
   lastRoundTripTimeVariance      : UInt32 := 0
   lastReceiveTime                : UInt32 := 0
-  lastSendTime                   : UInt32 := 0
-  nextTimeout                    : UInt32 := 0
   earliestTimeout                : UInt32 := 0
   pingInterval                   : UInt32 := Constants.defaultPingInterval
   timeoutLimit                   : UInt32 := Constants.defaultTimeoutLimit
@@ -61,14 +59,10 @@ structure Peer where
   timeoutMaximum                 : UInt32 := Constants.defaultTimeoutMaximum
   packetThrottle                 : UInt32 := Constants.defaultPacketThrottle
   packetThrottleLimit            : UInt32 := Constants.packetThrottleScale
-  packetThrottleCounter          : UInt32 := 0
   packetThrottleEpoch            : UInt32 := 0
   packetThrottleAcceleration     : UInt32 := Constants.defaultPacketThrottleAcceleration
   packetThrottleDeceleration     : UInt32 := Constants.defaultPacketThrottleDeceleration
   packetThrottleInterval         : UInt32 := Constants.defaultPacketThrottleInterval
-  /-- ENet: marks peers already bandwidth-adjusted within the current
-  bandwidth-throttle epoch (incomingBandwidthThrottleEpoch). -/
-  incomingBandwidthThrottleEpoch : UInt32 := 0
   eventData                      : UInt32 := 0
   reliableDataInTransit          : Nat := 0
   /-- Sequence counter for reliable control commands sent on channel 0xFF
@@ -111,14 +105,10 @@ def reset (p : Peer) : Peer :=
     lowestRoundTripTime          := Constants.defaultRoundTripTime
     highestRoundTripTimeVariance := 0
     lastReceiveTime              := 0
-    lastSendTime                 := 0
-    nextTimeout                  := 0
     earliestTimeout              := 0
     packetThrottle               := Constants.defaultPacketThrottle
     packetThrottleLimit          := Constants.packetThrottleScale
-    packetThrottleCounter        := 0
     packetThrottleEpoch          := 0
-    incomingBandwidthThrottleEpoch := 0
     reliableDataInTransit        := 0
     outgoingControlSeq           := 0
     outgoingUnsequencedGroup     := 0

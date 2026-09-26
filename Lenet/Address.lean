@@ -12,7 +12,6 @@ deriving Repr, BEq, Inhabited
 
 namespace Address
 
-def any : UInt32 := 0
 def broadcast : UInt32 := 0xFFFFFFFF
 
 /-- Constructs a 32-bit network-order IPv4 address from 4 octets (`b0.b1.b2.b3`). -/

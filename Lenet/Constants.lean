@@ -21,8 +21,8 @@ cap, fragments of *new* assemblies are dropped (the sender retransmits;
 in-flight assemblies keep absorbing). -/
 def maximumFragmentAssemblers : Nat := 32
 /-- Upper bound on the fragment count of a *received* fragment set. Any
-legitimate packet (host `maximumPacketSize` 32MB at the smallest MTU's
-~548-byte fragment payload) needs at most ~60k fragments; the wire format
+legitimate packet (ENet's default 32MB maximum packet size at the smallest
+MTU's ~548-byte fragment payload) needs at most ~60k fragments; the wire format
 admits 2^32, and the assembler's received-bitset is a boxed `Array Bool`, so
 an unguarded hostile `fragmentCount` near the wire maximum would allocate
 gigabytes before validation. -/
@@ -34,9 +34,7 @@ def reliableWindows : Nat := 16
 def reliableWindowSize : Nat := 0x1000 -- 4096 sequence numbers per window
 def freeReliableWindows : Nat := 8
 
-def unsequencedWindows : Nat := 64
 def unsequencedWindowSize : Nat := 1024
-def freeUnsequencedWindows : Nat := 32
 
 /-! ### Protocol Header Bitmasks & Flags -/
 
@@ -55,7 +53,6 @@ def commandMask            : UInt8 := 0x0F
 
 /-! ### Protocol Command Numbers -/
 
-def commandNone                   : UInt8 := 0
 def commandAcknowledge            : UInt8 := 1
 def commandConnect                : UInt8 := 2
 def commandVerifyConnect          : UInt8 := 3
@@ -68,30 +65,26 @@ def commandSendUnsequenced        : UInt8 := 9
 def commandBandwidthLimit         : UInt8 := 10
 def commandThrottleConfigure      : UInt8 := 11
 def commandSendUnreliableFragment : UInt8 := 12
-def commandCount                  : Nat   := 13
 
 /-! ### Packet Flags -/
 
 def packetFlagReliable           : UInt32 := (1 : UInt32) <<< 0
 def packetFlagUnsequenced        : UInt32 := (1 : UInt32) <<< 1
-def packetFlagNoAllocate         : UInt32 := (1 : UInt32) <<< 2
 def packetFlagUnreliableFragment : UInt32 := (1 : UInt32) <<< 3
-def packetFlagSent               : UInt32 := (1 : UInt32) <<< 8
 
 /-! ### Peer Defaults & Throttle Constants -/
 
 def defaultRoundTripTime              : UInt32 := 500
 def defaultPacketThrottle             : UInt32 := 32
 def packetThrottleScale               : UInt32 := 32
-def packetThrottleCounter             : UInt32 := 7
 def defaultPacketThrottleAcceleration : UInt32 := 2
 def defaultPacketThrottleDeceleration : UInt32 := 2
 def defaultPacketThrottleInterval     : UInt32 := 5000
 def defaultPingInterval               : UInt32 := 500
 def defaultTimeoutLimit               : UInt32 := 32
 def defaultTimeoutMinimum             : UInt32 := 5000
-def defaultTimeoutMaximum           : UInt32 := 30000
-def windowSizeScale                 : UInt32 := 64 * 1024
-def bandwidthThrottleInterval       : UInt32 := 1000
+def defaultTimeoutMaximum             : UInt32 := 30000
+def windowSizeScale                   : UInt32 := 64 * 1024
+def bandwidthThrottleInterval         : UInt32 := 1000
 
 end Lenet.Constants

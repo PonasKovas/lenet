@@ -32,7 +32,6 @@ structure Host where
   mtu                    : UInt32 := Constants.defaultMtu.toUInt32
   randomSeed             : UInt32 := 0x12345678
   checksumEnabled        : Bool := false
-  maximumPacketSize      : Nat := 32 * 1024 * 1024
 deriving Inhabited
 
 namespace Host
@@ -753,7 +752,6 @@ def bandwidthThrottle (h : Host) (now : UInt32) : Host :=
                 unsequenced            := false
                 body                   := .bandwidthLimit incoming h.outgoingBandwidth
               }
-              let p := { p with incomingBandwidthThrottleEpoch := now }
               p.queueOutgoingCommand { command := cmd }
             else p
           (updatedPeers, false)

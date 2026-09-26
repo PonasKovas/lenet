@@ -14,8 +14,6 @@ structure HostContext where
   host           : Host
   pendingEvents  : Array Event := #[]
   pendingPackets : Array (Address × ByteArray) := #[]
-  activePacket   : ByteArray := ByteArray.empty
-  activeEventPkt : ByteArray := ByteArray.empty
 
 @[export lenet_ffi_host_create]
 def ffi_host_create (hostIp : UInt32) (port : UInt16) (peerCount : USize) (channelLimit : USize) (inBw : UInt32) (outBw : UInt32) (seed : UInt32) (mtu : UInt32) : IO (Option (IO.Ref HostContext)) := do
