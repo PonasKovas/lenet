@@ -3,8 +3,40 @@
 Done so far: full ENet 1.3.x interop except compression (21 golden-trace
 scenarios, each recorded at three clock starts, and 12 live interop
 scenarios pass), unit tests, a lossy-link benchmark, the C distribution,
-and the proofs listed in [DESIGN.md](DESIGN.md#what-is-proven). What follows is what is left,
-roughly in priority order.
+and the proofs listed in [DESIGN.md](DESIGN.md#what-is-proven). What
+follows is what is left, roughly in priority order.
+
+## Next step (handoff, 2026-09-26)
+
+Last done: the lossy link in `bench/Bench.lean` (it found the fragment
+assembler bug fixed in `9881b31`, see test/README.md "Fragment assembler
+lifetime") and the unit tests in `test/Unit.lean`. The testing gaps are
+closed apart from the candidate list below.
+
+Next: the first proof item, **sender-side window invariant**, in small
+steps, each one building and committed on its own:
+
+1. Read `Lenet/Proofs/Resources.lean` (item 2, staged reliable) and
+   `Lenet/Proofs/Channel.lean`. The staging bound the replay asserts
+   (`checkResourceBounds` in `test/Replay.lean`: at most
+   `freeReliableWindows * reliableWindowSize` staged per channel) may
+   follow from the receiver alone: `receiveReliableSpan` stages only
+   sequence numbers the window gate admits (a range of
+   `(freeReliableWindows - 1) * reliableWindowSize` values past the
+   frontier) and never the same one twice. Check that first; if it holds,
+   prove it and fix the Resources header, which says the sender side is
+   needed.
+2. Then the sender side proper: `Channel.acquireReliableWindow` /
+   `releaseReliableWindow` / `canSendReliable` and where `PackState.packCommand`
+   (`Lenet/Host.lean`) calls them. State that the in-flight reliable
+   sequence numbers of a channel never span more windows than the
+   receiver's gate admits, so everything the sender sends is in window.
+
+Checks before each commit: `lake build` (library and proofs, including the
+no-panic audit in `Proofs/Panic.lean`), `./.lake/build/bin/unit`,
+`./.lake/build/bin/replay test/traces`. For code changes also
+`make -C csrc check`, `make -C test interop` (needs ENet in `../enet`) and
+the bench. For a new test, break the code it guards once to see it fail.
 
 ## Testing gaps
 
