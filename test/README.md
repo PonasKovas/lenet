@@ -209,19 +209,22 @@ compatibility"). Open, undecided differences are listed in TODO.md.
   packets all carry (0, 0), so one dropped unsequenced packet takes every
   unsequenced packet queued right behind it along. Lenet drops only the
   packet the counter picked. Sender-side only, so invisible to interop.
-- **Receive window gate on unreliable commands (documented, not mirrored).**
-  ENet applies the same cyclic window gate to unreliable and
-  unreliable-fragment commands (anything but SEND_UNSEQUENCED,
-  `peer.c:869-883`). Lenet's `Channel.receiveUnreliable` accepts an
-  unreliable command whenever its unreliable sequence number beats the
-  channel's counter, ignoring the command's reliable sequence number.
-  Classification: hostile-input hardening only - legitimate senders emit
-  unreliable commands at (or within a window of) their current reliable
-  sequence number, so the gate never fires for them; the structural
-  difference (ENet queues out-of-order unreliable commands and dispatches
-  them when the reliable frontier advances, Lenet delivers by unreliable
-  sequence number alone) is interop-invisible in all recorded scenarios.
-  Not fixed; revisit only if hostile-input coverage demands it.
+- **Receive window gate on unreliable commands (lenet bug - fixed).** ENet
+  gates unreliable and unreliable-fragment commands by the reliable sequence
+  number they were sent after (`peer.c` queue_incoming_command,
+  `protocol.c` handle_send_unreliable_fragment): out of the receive window
+  is dropped, ahead of the dispatch frontier waits until the frontier gets
+  there (dispatch_incoming_unreliable_commands). Lenet ignored that number
+  and compared unreliable sequence numbers only, so with loss or reordering
+  it delivered a packet from before the last reliable one after newer ones,
+  and let one sent after a still-missing reliable command overtake it. Now
+  `Channel.receiveUnreliable` gates and stages like ENet, the stage capped at
+  `maximumStagedUnreliable` (1024) per channel, and `Peer.fragmentGateOk`
+  applies ENet's gate before unreliable fragments are reassembled.
+  Invisible to the loss-free corpus. One ordering case stays stricter than
+  ENet on purpose: ENet delivers an unreliable fragment set that completes
+  after newer packets went out, and moves the channel's unreliable counter
+  back; Lenet drops it.
 
 ## Live interop scenarios
 

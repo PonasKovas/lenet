@@ -27,6 +27,11 @@ admits 2^32, and the assembler's received-bitset is a boxed `Array Bool`, so
 an unguarded hostile `fragmentCount` near the wire maximum would allocate
 gigabytes before validation. -/
 def maximumReceivedFragmentCount : Nat := 65536
+/-- Cap on unreliable packets a channel holds back until the reliable
+command they were sent after is delivered. ENet bounds them only by its
+per-peer `maximumWaitingData`. Beyond the cap new ones are dropped, which
+unreliable delivery allows. -/
+def maximumStagedUnreliable : Nat := 1024
 
 /-! ### Sliding Window Parameters -/
 

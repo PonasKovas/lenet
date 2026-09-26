@@ -16,6 +16,14 @@ structure StagedReliable where
   packet : Packet
 deriving BEq, Inhabited
 
+/-- An unreliable delivery held back until the reliable dispatch frontier
+reaches `reliableSeq`, the reliable sequence number it was sent after. -/
+structure StagedUnreliable where
+  reliableSeq   : UInt16
+  unreliableSeq : UInt16
+  packet        : Packet
+deriving BEq, Inhabited
+
 /-- One channel of a connection: its sequence counters, the send-side
 reliable window accounting and the receive-side staging of out-of-order
 reliable deliveries. Channels are sequenced independently. -/
@@ -36,6 +44,9 @@ structure Channel where
   /-- Staged out-of-order reliable deliveries waiting for gaps in sequence
   numbers to be filled. -/
   stagedReliable                   : Array StagedReliable := #[]
+  /-- Unreliable deliveries sent after a reliable command that has not been
+  delivered yet; at most `maximumStagedUnreliable`, each key at most once. -/
+  stagedUnreliable                 : Array StagedUnreliable := #[]
 deriving BEq, Inhabited
 
 namespace Channel
@@ -215,15 +226,57 @@ def receiveReliable (c : Channel) (seq : UInt16) (packet : Packet) :
   receiveReliableSpan c seq 1 packet
 
 /--
-Processes an incoming unreliable packet on this channel.
-- If newer than `incomingUnreliableSequenceNumber`, advances sequence number and accepts.
-- If older / out-of-order, discards as stale.
+Processes an unreliable packet sent after reliable command `reliableSeq`
+with unreliable sequence number `seq` (ENet peer.c queue_incoming_command
+and dispatch_incoming_unreliable_commands).
+- If `reliableSeq` is outside the receive window, drops it: it belongs to a
+  reliable command already delivered (the packet is stale) or to one too far
+  ahead.
+- If `reliableSeq` is the dispatch frontier, delivers it when `seq` is newer
+  than `incomingUnreliableSequenceNumber`, and drops it otherwise.
+- If `reliableSeq` is ahead within the window, stages it until the frontier
+  gets there (`releaseStagedUnreliable`). A full stage or a duplicate drops it.
 -/
-def receiveUnreliable (c : Channel) (seq : UInt16) (packet : Packet) : Channel × Option Packet :=
-  if seq > c.incomingUnreliableSequenceNumber then
-    ({ c with incomingUnreliableSequenceNumber := seq }, some packet)
-  else
+def receiveUnreliable (c : Channel) (reliableSeq seq : UInt16) (packet : Packet) :
+    Channel × Option Packet :=
+  if !c.isIncomingReliableInWindow reliableSeq then
     (c, none)
+  else if reliableSeq == c.incomingReliableSequenceNumber then
+    if seq > c.incomingUnreliableSequenceNumber then
+      ({ c with incomingUnreliableSequenceNumber := seq }, some packet)
+    else
+      (c, none)
+  else if c.stagedUnreliable.size ≥ Constants.maximumStagedUnreliable ∨
+      c.stagedUnreliable.any (fun e => e.reliableSeq == reliableSeq ∧ e.unreliableSeq == seq) then
+    (c, none)
+  else
+    ({ c with stagedUnreliable := c.stagedUnreliable.push { reliableSeq, unreliableSeq := seq, packet } }, none)
+
+/-- After the dispatch frontier moved: delivers the staged unreliable packets
+sent after the new frontier, in unreliable sequence order, and drops the ones
+the frontier has passed (ENet dispatch_incoming_unreliable_commands, which
+dispatch_incoming_reliable_commands calls). -/
+def releaseStagedUnreliable (c : Channel) : Channel × Array Packet :=
+  if c.stagedUnreliable.isEmpty then (c, #[])
+  else
+    let (due, rest) := c.stagedUnreliable.partition (·.reliableSeq == c.incomingReliableSequenceNumber)
+    let kept := rest.filter (c.isIncomingReliableInWindow ·.reliableSeq)
+    let due := due.qsort (·.unreliableSeq < ·.unreliableSeq)
+    due.foldl (init := ({ c with stagedUnreliable := kept }, #[])) fun (c, released) e =>
+      if e.unreliableSeq > c.incomingUnreliableSequenceNumber then
+        ({ c with incomingUnreliableSequenceNumber := e.unreliableSeq }, released.push e.packet)
+      else
+        (c, released)
+
+/-- Processes a reliable delivery (`receiveReliableSpan`), then releases the
+unreliable packets staged for the new frontier. -/
+def receiveReliableAndRelease (c : Channel) (seq : UInt16) (span : Nat) (packet : Packet) :
+    Channel × Array Packet :=
+  let (c, delivered) := c.receiveReliableSpan seq span packet
+  if delivered.isEmpty then (c, #[])
+  else
+    let (c, released) := c.releaseStagedUnreliable
+    (c, delivered.map (·.2) ++ released)
 
 end Channel
 

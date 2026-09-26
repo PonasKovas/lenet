@@ -10,9 +10,6 @@ what is left, roughly in priority order.
 Not yet triaged as bugs or accepted; each needs a decision per
 DESIGN.md's rules.
 
-- **No window gate on unreliable commands.** Documented in
-  [test/README.md](test/README.md#divergence-triage); only matters for
-  hostile senders.
 - **Address check before negotiation.** ENet checks the sender address of
   every datagram for a peer; Lenet only once the remote peer ID is known.
 

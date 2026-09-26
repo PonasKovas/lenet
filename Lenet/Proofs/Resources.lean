@@ -31,7 +31,10 @@ The attacker-controlled memory surfaces and their bounds:
    The full window-span bound is asserted by the replay corpus
    (test/Replay.lean); proving it needs the sender-side window invariant
    (TODO.md).
-3. **Acknowledgement queue**: production is coupled to the driver's pump
+3. **Staged unreliable packets** (`Channel.stagedUnreliable`): capped at
+   `maximumStagedUnreliable` by `Channel.receiveUnreliable`, the only place
+   that grows it; asserted by the replay corpus.
+4. **Acknowledgement queue**: production is coupled to the driver's pump
    rate (≤ 32 acks per received datagram) and the packing loop drains up to
    `maximumPacketCommands` per tick; growth beyond a well-behaved pump is
    the same exposure as ENet's - documented, not capped (capping drops ACKs
@@ -179,14 +182,14 @@ gate passes, both match arms set `fragmentAssemblers :=
 assemblerArrayAfterDeliver xs params result`, which never exceeds
 `xs = (absorbFragment ...).1`, itself capped by `absorbFragment_cap_preserved`;
 when the gate fails the peer is returned unchanged. -/
-theorem handleFragment_cap_preserved (p : Peer) (channelId : UInt8)
+theorem handleFragment_cap_preserved (p : Peer) (channelId : UInt8) (reliableSeq : UInt16)
     (params : Protocol.FragmentParams) (unreliable : Bool)
     (hcap : p.fragmentAssemblers.size ≤ Constants.maximumFragmentAssemblers) :
-    (handleFragment p channelId params unreliable).1.fragmentAssemblers.size
+    (handleFragment p channelId reliableSeq params unreliable).1.fragmentAssemblers.size
       ≤ Constants.maximumFragmentAssemblers := by
   unfold handleFragment
-  by_cases hg : fragmentGateOk p channelId params unreliable = true
-  · rw [if_neg (by simp [hg] : ¬((!fragmentGateOk p channelId params unreliable) = true))]
+  by_cases hg : fragmentGateOk p channelId reliableSeq params unreliable = true
+  · rw [if_neg (by simp [hg] : ¬((!fragmentGateOk p channelId reliableSeq params unreliable) = true))]
     -- gate passed: the array is `assemblerArrayAfterDeliver` of the absorbed array
     generalize habs : absorbFragment p.fragmentAssemblers params = ab
     obtain ⟨xs, asm⟩ := ab
@@ -199,7 +202,7 @@ theorem handleFragment_cap_preserved (p : Peer) (channelId : UInt8)
     split
     all_goals (try rw [receiveOnChannel_fragmentAssemblers])
     all_goals exact Nat.le_trans (assemblerArrayAfterDeliver_size _ _ _) hxs
-  · rw [if_pos (by simp [hg] : ((!fragmentGateOk p channelId params unreliable) = true))]
+  · rw [if_pos (by simp [hg] : ((!fragmentGateOk p channelId reliableSeq params unreliable) = true))]
     exact hcap
 
 /-! ## Staged reliable packets -/

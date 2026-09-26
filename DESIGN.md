@@ -129,8 +129,11 @@ Memory an attacker can make a host hold is bounded:
   `maximumReceivedFragmentCount` (65536). ENet has no such cap.
 - **Staged reliable packets:** only in-window sequence numbers are staged,
   each at most once.
+- **Staged unreliable packets:** only those sent after an in-window reliable
+  command, each at most once, at most `maximumStagedUnreliable` (1024) per
+  channel. ENet bounds them only by `maximumWaitingData`.
 - **ACK queue:** not capped on purpose. It grows by at most 32 entries per
   received datagram and each service call drains it; capping it would only
   force retransmissions. This matches ENet.
 
-The replay checks all three bounds after every service step.
+The replay checks all four bounds after every service step.

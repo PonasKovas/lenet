@@ -338,12 +338,13 @@ private def collectOutgoing (st : ReplayState) (outs : Array (Address × ByteArr
 
 /-- Resource-safety tripwire (see Lenet/Proofs/Resources.lean): the corpus
 runs against these hard bounds after every service step. The assembler cap
-is enforced by `Peer.handleFragment`; staging is bounded by the receive-
-window gate; the ack queue is driver-rate-coupled (generous bound here). -/
+is enforced by `Peer.handleFragment`; reliable staging is bounded by the
+receive-window gate, unreliable staging by its cap; the ack queue is driver-rate-coupled (generous bound here). -/
 private def checkResourceBounds (h : Host) (st : ReplayState) : ReplayState :=
   if h.peers.any fun p => p.fragmentAssemblers.size > Constants.maximumFragmentAssemblers
       ∨ h.peers.any fun p => p.channels.any fun ch =>
           ch.stagedReliable.size > Constants.freeReliableWindows * Constants.reliableWindowSize
+            ∨ ch.stagedUnreliable.size > Constants.maximumStagedUnreliable
       ∨ h.peers.any fun p => p.acknowledgements.size > 65536 then
     { st with errors := st.errors.push "resource bound exceeded" }
   else st

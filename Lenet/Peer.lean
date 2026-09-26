@@ -350,18 +350,26 @@ def assemblerArrayAfterDeliver (xs : Array FragmentAssembler)
   | some (.ok (_, some _)) =>
     xs.filter (fun a => a.startSequenceNumber ≠ params.startSequenceNumber)
 
-/-- The reliable-fragment receive gate: unreliable fragments always pass;
-reliable fragments must be inside the receive window and not duplicate the
-dispatch frontier (protocol.c handle_send_fragment's cyclic window check plus
-peer.c queue_incoming_command's duplicate check) - anything else is a stale or
-duplicate fragment set and is dropped. -/
-def fragmentGateOk (p : Peer) (channelId : UInt8) (params : Protocol.FragmentParams)
-    (unreliable : Bool) : Bool :=
-  if unreliable then true
-  else
-    match p.channels[channelId.toNat]? with
-    | none => false
-    | some ch =>
+/-- The fragment receive gate; anything it rejects is a stale or duplicate
+fragment set and is dropped before reassembly.
+- Reliable fragments: the set's start sequence number must be inside the
+  receive window and not duplicate the dispatch frontier (protocol.c
+  handle_send_fragment's cyclic window check plus peer.c
+  queue_incoming_command's duplicate check).
+- Unreliable fragments: the reliable command they were sent after
+  (`reliableSeq`) must be inside the receive window, and a set sent after the
+  frontier must be newer than the last unreliable delivery (protocol.c
+  handle_send_unreliable_fragment). -/
+def fragmentGateOk (p : Peer) (channelId : UInt8) (reliableSeq : UInt16)
+    (params : Protocol.FragmentParams) (unreliable : Bool) : Bool :=
+  match p.channels[channelId.toNat]? with
+  | none => false
+  | some ch =>
+    if unreliable then
+      ch.isIncomingReliableInWindow reliableSeq ∧
+        !(reliableSeq == ch.incomingReliableSequenceNumber ∧
+          params.startSequenceNumber ≤ ch.incomingUnreliableSequenceNumber)
+    else
       ch.isIncomingReliableInWindow params.startSequenceNumber ∧
         params.startSequenceNumber ≠ ch.incomingReliableSequenceNumber
 
@@ -371,9 +379,9 @@ assembler is consumed and the packet goes through the channel's receive
 path; a reliable set occupies `fragmentCount` sequence numbers (ENet
 advances the dispatch frontier by the whole span). Fragments with invalid
 parameters (which ENet validates identically) are dropped. -/
-def handleFragment (p : Peer) (channelId : UInt8) (params : Protocol.FragmentParams)
-    (unreliable : Bool) : Peer × Array Event :=
-  if !fragmentGateOk p channelId params unreliable then
+def handleFragment (p : Peer) (channelId : UInt8) (reliableSeq : UInt16)
+    (params : Protocol.FragmentParams) (unreliable : Bool) : Peer × Array Event :=
+  if !fragmentGateOk p channelId reliableSeq params unreliable then
     (p, #[])
   else
     let (xs, assembler?) := absorbFragment p.fragmentAssemblers params
@@ -385,12 +393,11 @@ def handleFragment (p : Peer) (channelId : UInt8) (params : Protocol.FragmentPar
     | some (.ok (_, some data)) =>
       p.receiveOnChannel channelId fun ch =>
         if unreliable then
-          let (ch, delivered) := ch.receiveUnreliable params.startSequenceNumber (.unreliableFragment data)
+          let (ch, delivered) :=
+            ch.receiveUnreliable reliableSeq params.startSequenceNumber (.unreliableFragment data)
           (ch, delivered.toArray)
         else
-          let (ch, delivered) :=
-            ch.receiveReliableSpan params.startSequenceNumber params.fragmentCount.toNat (.reliable data)
-          (ch, delivered.map (·.2))
+          ch.receiveReliableAndRelease params.startSequenceNumber params.fragmentCount.toNat (.reliable data)
     | _ => (p, #[])
 
 /-- Handles a data command (send reliable/unreliable/unsequenced/fragment);
@@ -399,19 +406,20 @@ def handleData (p : Peer) (cmd : Protocol.Command) : Peer × Array Event :=
   match cmd.body with
   | .sendReliable data =>
     p.receiveOnChannel cmd.channelId fun ch =>
-      let (ch, delivered) := ch.receiveReliable cmd.reliableSequenceNumber (.reliable data)
-      (ch, delivered.map (·.2))
+      ch.receiveReliableAndRelease cmd.reliableSequenceNumber 1 (.reliable data)
   | .sendUnreliable seq data =>
     p.receiveOnChannel cmd.channelId fun ch =>
-      let (ch, delivered) := ch.receiveUnreliable seq (.unreliable data)
+      let (ch, delivered) := ch.receiveUnreliable cmd.reliableSequenceNumber seq (.unreliable data)
       (ch, delivered.toArray)
   | .sendUnsequenced group data =>
     match p.unsequencedWindow.checkAndAdd group with
     | some window =>
       ({ p with unsequencedWindow := window }, #[.receive p.peerId cmd.channelId (.unsequenced data)])
     | none => (p, #[])
-  | .sendFragment params => p.handleFragment cmd.channelId params (unreliable := false)
-  | .sendUnreliableFragment params => p.handleFragment cmd.channelId params (unreliable := true)
+  | .sendFragment params =>
+    p.handleFragment cmd.channelId cmd.reliableSequenceNumber params (unreliable := false)
+  | .sendUnreliableFragment params =>
+    p.handleFragment cmd.channelId cmd.reliableSequenceNumber params (unreliable := true)
   | _ => (p, #[])
 
 /-- Handles an ACK (ENet handle_acknowledge): updates the RTT, retires the
