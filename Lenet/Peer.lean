@@ -552,7 +552,9 @@ def handleAcknowledge (p : Peer) (now : UInt32) (channelId : UInt8) (seq sentTim
     Peer × Array Event × Bool :=
   -- the echoed sent time is the low 16 bits of our clock
   let sent := Time.fromWire now sentTime
-  if Time.less now sent then
+  -- a peer a DISCONNECT earlier in the datagram reset takes nothing more (ENet)
+  if p.state == .disconnected || p.state == .zombie then (p, #[], true)
+  else if Time.less now sent then
     (p, #[], true) -- acknowledges a send from the future: ignored (ENet)
   else
     let (p, acked?) := (p.updateRtt now (Time.difference now sent)).removeSentReliableCommand channelId seq

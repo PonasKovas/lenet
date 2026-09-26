@@ -77,6 +77,8 @@ theorem handleData_named (p : Peer) (cmd) : ∀ e ∈ (p.handleData cmd).2, even
 theorem handleAcknowledge_peerId (p : Peer) (n c s t) : (p.handleAcknowledge n c s t).1.peerId = p.peerId := by
   unfold handleAcknowledge; dsimp only; split
   · rfl
+  split
+  · rfl
   · have hq := removeSent_peerId (p.updateRtt n (Time.difference n (Time.fromWire n t))) c s
     rw [updateRtt_peerId] at hq
     generalize (p.updateRtt n _).removeSentReliableCommand c s = q at hq ⊢
@@ -86,6 +88,8 @@ theorem handleAcknowledge_peerId (p : Peer) (n c s t) : (p.handleAcknowledge n c
 theorem handleAcknowledge_named (p : Peer) (n c s t) :
     ∀ e ∈ (p.handleAcknowledge n c s t).2.1, eventPeer e = p.peerId := by
   unfold handleAcknowledge; dsimp only; split
+  · intro e he; simp at he
+  split
   · intro e he; simp at he
   · have hq := removeSent_peerId (p.updateRtt n (Time.difference n (Time.fromWire n t))) c s
     rw [updateRtt_peerId] at hq

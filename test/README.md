@@ -251,6 +251,11 @@ compatibility"). Open, undecided differences are listed in TODO.md.
   for events from a received datagram, missing timeouts and the remote
   DISCONNECT that completes once its ACK is out. `Host.service` now sets
   it too.
+- **ACK for a reset slot (lenet bug - fixed).** ENet's handle_acknowledge
+  returns at once for a disconnected or zombie peer. Lenet went on, so an
+  ACK after a DISCONNECT that reset the slot, in the same datagram, updated
+  the free slot's RTT and receive time, which the next connection on the
+  slot then started from. `Peer.handleAcknowledge` now returns early.
 - **Reassembly was quadratic (lenet bug - fixed).** Every fragment rebuilt
   the whole reassembly buffer (`copyBytes` by `extract` and append), and
   the buffer was shared (the assembler was read out of an array the peer

@@ -364,6 +364,19 @@ def hostTests : List Test := [
       expect (q.state == .disconnecting) "disconnect completed"
       let (_, evs) := Host.handlePeerDatagram p.clientP p.now serverAddr (dgram [ackOf 0xFF seq t]) 0
       expect (evs == #[.disconnect p.clientPeer 0]) "the ACK alone did not complete the disconnect" },
+  { name := "a slot reset by a DISCONNECT takes no later ACK of the same datagram"
+    run := fun _ => do
+      let p ← connected
+      let peer := p.clientP
+      -- a DISCONNECT from a client still connecting resets the slot; an ACK
+      -- after it in the datagram must not touch the free slot (ENet returns
+      -- early from handle_acknowledge)
+      let peer := { peer with state := .connecting }
+      let disc : Protocol.Command :=
+        { channelId := 0xFF, reliableSequenceNumber := 9, acknowledge := true, body := .disconnect 0 }
+      let (q, _) := Host.handlePeerDatagram peer (p.now + 100) serverAddr (dgram [disc, ackOf 0 1 p.now.toUInt16]) 0
+      expect (q.state == .disconnected) "slot not reset"
+      expect (q.lastReceiveTime == (Peer.reset peer).lastReceiveTime) "the ACK updated the free slot" },
   { name := "a disconnecting peer neither takes nor acknowledges data"
     run := fun _ => do
       let (p, _) ← disconnecting

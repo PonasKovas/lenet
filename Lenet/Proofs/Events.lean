@@ -157,6 +157,8 @@ theorem handleAcknowledge_wf (p : Peer) (n c s t) :
     EventsWf (phase p.state) (p.handleAcknowledge n c s t).2.1.toList (phase (p.handleAcknowledge n c s t).1.state) := by
   unfold handleAcknowledge; dsimp only; split
   · exact .nil
+  split
+  · exact .nil
   · generalize hq : (p.updateRtt n _).removeSentReliableCommand c s = q
     obtain ⟨q, acked⟩ := q
     have hs : q.state = p.state := by
