@@ -625,11 +625,14 @@ def checkPeerTimeouts (p : Peer) (now : UInt32) : Peer × Option Event :=
     -- enet_peer_reset, so the slot is immediately reusable.
     (Peer.reset p, some (Event.disconnect p.peerId 0))
   else
-    let newOutgoing := result.retransmits ++ p.outgoingCommands
+    -- ENet (check_timeouts): a retransmitted command leaves the in-flight
+    -- set, so its bytes stop counting as in transit until it is re-sent.
+    let retransmitted := result.retransmits.foldl (init := 0) (· + ·.fragmentLength)
     let pUpdated := { p with
-      sentReliableCommands := result.stillInFlight
-      outgoingCommands     := newOutgoing
-      earliestTimeout      := result.earliestTimeout
+      sentReliableCommands  := result.stillInFlight
+      outgoingCommands      := result.retransmits ++ p.outgoingCommands
+      earliestTimeout       := result.earliestTimeout
+      reliableDataInTransit := p.reliableDataInTransit - retransmitted
     }
     (pUpdated, none)
 
