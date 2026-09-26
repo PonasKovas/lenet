@@ -87,7 +87,7 @@ void lenet_initialize(void);
  * Creates a host. bind_ip/bind_port are informational (the socket is the
  * driver's); incoming_bw/outgoing_bw are bytes/second, 0 = unlimited;
  * mtu is clamped to [576, 4096] (0 = default 1392).
- * Returns NULL on failure.
+ * Returns NULL on failure, and when peer_count exceeds 4095 (as ENet).
  */
 lenet_host *lenet_host_create(uint32_t bind_ip, uint16_t bind_port,
                               size_t peer_count, size_t channel_limit,

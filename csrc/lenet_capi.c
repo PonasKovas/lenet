@@ -99,6 +99,8 @@ lenet_host *lenet_host_create(uint32_t bind_ip, uint16_t bind_port,
                               uint32_t incoming_bw, uint32_t outgoing_bw,
                               uint32_t mtu) {
     lenet_initialize();
+    /* peer ID 0xFFF addresses CONNECTs (ENet enet_host_create refuses too) */
+    if (peer_count > 0xFFF) return NULL;
     uint32_t seed = (uint32_t)time(NULL);
     if (mtu == 0) mtu = 1392;
     lean_object *r = lenet_ffi_host_create(bind_ip, bind_port, peer_count,

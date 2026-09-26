@@ -228,6 +228,14 @@ compatibility"). Open, undecided differences are listed in TODO.md.
   so a server application got disconnect events for connections it never
   heard of. `Host.checkPeerTimeouts` and `Peer.handleDisconnect` now reset
   such a peer without an event.
+- **More than 4095 peer slots (lenet bug - fixed).** ENet's
+  enet_host_create refuses more than ENET_PROTOCOL_MAXIMUM_PEER_ID (4095)
+  peers. Lenet took any count: slot 4095 then carried peer ID 0xFFF, the ID
+  CONNECTs are addressed to, so no datagram could reach it, and past 65536
+  slots the 16-bit peer IDs repeated, so two slots shared their events.
+  `Host.create` now caps the count at 4095 and `lenet_host_create` returns
+  NULL above it, as ENet does. A host-level event proof needs slot `i`
+  to hold peer ID `i`, which this makes true.
 - **Local disconnect (lenet bug - fixed).** ENet's enet_peer_disconnect
   does nothing for a peer already disconnecting, disconnected or a zombie;
   otherwise it drops everything queued or in flight (enet_peer_reset_queues)

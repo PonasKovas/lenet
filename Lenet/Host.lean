@@ -64,14 +64,17 @@ def windowSizeFor (hostOutBw : UInt32) (peerInBw : UInt32) : UInt32 :=
     else
       Nat.min peerInBw.toNat hostOutBw.toNat / scale * Constants.minimumWindowSize
 
-/-- Creates a host with `peerCount` peer slots. `channelLimit` 0 means the
-protocol maximum; `mtu` is clamped to [576, 4096] (ENet silently corrects
-out-of-range MTUs too). -/
+/-- Creates a host with `peerCount` peer slots, at most `maximumPeerId`
+(4095): peer ID 0xFFF addresses CONNECTs, so a slot with that ID could never
+be reached (ENet's enet_host_create refuses such counts). `channelLimit` 0
+means the protocol maximum; `mtu` is clamped to [576, 4096] (ENet silently
+corrects out-of-range MTUs too). -/
 def create (address : Address := {}) (peerCount : Nat := 32)
     (channelLimit : Nat := Constants.maximumChannelCount) (inBw : UInt32 := 0) (outBw : UInt32 := 0)
     (seed : UInt32 := 0x12345678) (mtu : UInt32 := Constants.defaultMtu.toUInt32) : Host :=
   { address
-    peers             := (Array.range peerCount).map fun idx => { peerId := idx.toUInt16 }
+    peers             :=
+      (Array.range (Nat.min peerCount Constants.maximumPeerId.toNat)).map fun idx => { peerId := idx.toUInt16 }
     channelLimit      :=
       if channelLimit == 0 ∨ channelLimit > Constants.maximumChannelCount then Constants.maximumChannelCount
       else channelLimit

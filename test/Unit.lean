@@ -234,6 +234,11 @@ def hostTests : List Test := [
       expect (p.client.send p.clientPeer 2 (pkt 10) matches .error (.invalidChannelId ..))
         "bad channel accepted"
       expect (p.client.send 1 0 (pkt 10) matches .error (.peerNotConnected 1)) "free slot accepted" },
+  { name := "a host has at most 4095 peer slots, none with the CONNECT peer ID"
+    run := fun _ => do
+      let h := Host.create clientAddr 5000
+      expect (h.peers.size == 4095) s!"{h.peers.size} slots"
+      expect (h.peers.all (·.peerId < Constants.maximumPeerId)) "a slot has peer ID 0xFFF" },
   { name := "connect fails when every slot is taken"
     run := fun _ => do
       let h := Host.create clientAddr 1

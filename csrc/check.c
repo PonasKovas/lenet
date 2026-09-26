@@ -8,6 +8,7 @@
 
 int main(void) {
     lenet_initialize();
+    CHECK(lenet_host_create(0, 0, 4096, 2, 0, 0, 0) == NULL, "more than 4095 peers must fail");
     lenet_host *h = lenet_host_create(0, 0, 16, 2, 0, 0, 0);
     CHECK(h != NULL, "create");
 
