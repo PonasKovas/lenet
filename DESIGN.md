@@ -91,7 +91,7 @@ default build and CI compile. The C library never includes them.
 | `Unsequenced`   | a group accepted once is always rejected afterwards (`checkAndAdd_idempotent`) |
 | `Time`          | time differences don't depend on when the clock started; 16-bit wire timestamps are recovered exactly (`fromWire_recovers`) |
 | `Deadline`      | `nextDeadline` is always one of the host's timers and no timer is earlier (`nextDeadline_mem`, `nextDeadline_earliest`) |
-| `Resources`     | the fragment-assembler cap holds (`handleFragment_cap_preserved`), assembler memory is fixed at creation, and staging grows by at most one entry per receive |
+| `Resources`     | the fragment-assembler cap holds (`handleFragment_cap_preserved`), assembler memory is fixed at creation, and a channel stages at most seven windows of reliable packets whatever the sender does (`stagedReliableInv_size`) |
 | `Panic`         | a build-time scan of every `Lenet.*` definition fails the build on any panicking construct; every division is listed with a proof its divisor is not zero |
 
 A kernel theorem cannot say "does not panic", because in Lean's logic
@@ -134,7 +134,9 @@ Memory an attacker can make a host hold is bounded:
   the fragment is dropped without an ACK, so the sender retransmits it
   later instead of losing it.
 - **Staged reliable packets:** only in-window sequence numbers are staged,
-  each at most once.
+  each at most once, and a delivery drops the ones its span jumped over, so
+  a channel never holds more than 28672 (seven windows). ENet keeps those
+  jumped-over packets, where they stall its dispatch.
 - **Staged unreliable packets:** only those sent after an in-window reliable
   command, each at most once, at most `maximumStagedUnreliable` (1024) per
   channel. ENet bounds them only by `maximumWaitingData`.

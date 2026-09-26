@@ -94,6 +94,12 @@ def isIncomingReliableInWindow (c : Channel) (seq : UInt16) : Bool :=
   let win      := if seq < c.incomingReliableSequenceNumber then rawWin + numWins else rawWin
   win ≥ curWin && win < curWin + freeWins - 1
 
+/-- Whether reliable sequence number `seq` is ahead of the dispatch frontier
+inside the receive window: what the receive path admits, and what staging
+keeps. -/
+def isReliableAhead (c : Channel) (seq : UInt16) : Bool :=
+  c.isIncomingReliableInWindow seq && seq != c.incomingReliableSequenceNumber
+
 /--
 Records that a reliable command has been sent in the sequence window of `seq`.
 -/
@@ -195,7 +201,10 @@ fragmented packet).
 - If in-order (`seq == incomingReliableSequenceNumber + 1`), delivers it,
   advancing the frontier by the whole span (peer.c
   `dispatch_incoming_reliable_commands`), and drains any contiguous staged
-  deliveries.
+  deliveries. Staged deliveries the frontier jumped over are dropped: a
+  span covers sequence numbers a hostile sender also used for a plain
+  packet, and nothing would ever drain those (ENet keeps them at the head
+  of its sorted queue, where they block dispatch until the numbers wrap).
 - If ahead within the window, stages it until preceding deliveries arrive.
 -/
 def receiveReliableSpan (c : Channel) (seq : UInt16) (span : Nat) (packet : Packet) :
@@ -207,12 +216,12 @@ def receiveReliableSpan (c : Channel) (seq : UInt16) (span : Nat) (packet : Pack
   else if seq == c.incomingReliableSequenceNumber + 1 then
     let (newSeq, drained, remainingStaged, _) :=
       drainContiguous (seq + (span - 1).toUInt16) c.stagedReliable
-    let updatedChannel := { c with
+    let advanced := { c with
       incomingReliableSequenceNumber   := newSeq
       incomingUnreliableSequenceNumber := 0
-      stagedReliable                   := remainingStaged
     }
-    (updatedChannel, #[(span, packet)] ++ drained)
+    ({ advanced with stagedReliable := remainingStaged.filter (advanced.isReliableAhead ·.seq) },
+      #[(span, packet)] ++ drained)
   else
     -- Out-of-order: store in staged list (avoiding duplicate sequence insertions)
     let alreadyStaged := c.stagedReliable.any (fun e => e.seq == seq)

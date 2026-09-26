@@ -13,24 +13,21 @@ assembler bug fixed in `9881b31`, see test/README.md "Fragment assembler
 lifetime") and the unit tests in `test/Unit.lean`. The testing gaps are
 closed apart from the candidate list below.
 
-Next: the first proof item, **sender-side window invariant**, in small
-steps, each one building and committed on its own:
+Done since: step 1 of the window invariant. The staging bound did not
+follow from the receiver: a reliable set's span could jump the frontier
+over a staged plain packet and strand it (test/README.md "Reliable packets
+staged inside a span"). Fixed, and `Proofs.stagedReliableInv_size` now
+proves at most `(freeReliableWindows - 1) * reliableWindowSize` staged per
+channel from the receiver alone.
 
-1. Read `Lenet/Proofs/Resources.lean` (item 2, staged reliable) and
-   `Lenet/Proofs/Channel.lean`. The staging bound the replay asserts
-   (`checkResourceBounds` in `test/Replay.lean`: at most
-   `freeReliableWindows * reliableWindowSize` staged per channel) may
-   follow from the receiver alone: `receiveReliableSpan` stages only
-   sequence numbers the window gate admits (a range of
-   `(freeReliableWindows - 1) * reliableWindowSize` values past the
-   frontier) and never the same one twice. Check that first; if it holds,
-   prove it and fix the Resources header, which says the sender side is
-   needed.
-2. Then the sender side proper: `Channel.acquireReliableWindow` /
-   `releaseReliableWindow` / `canSendReliable` and where `PackState.packCommand`
-   (`Lenet/Host.lean`) calls them. State that the in-flight reliable
-   sequence numbers of a channel never span more windows than the
-   receiver's gate admits, so everything the sender sends is in window.
+Next: the **sender-side window invariant** proper, in small steps, each
+one building and committed on its own. `Channel.acquireReliableWindow` /
+`releaseReliableWindow` / `canSendReliable` and where
+`PackState.packCommand` (`Lenet/Host.lean`) calls them. State that the
+in-flight reliable sequence numbers of a channel never span more windows
+than the receiver's gate admits, so everything the sender sends is in
+window. (The staging bound no longer depends on it; it is about honest
+senders never having their packets dropped by the gate.)
 
 Checks before each commit: `lake build` (library and proofs, including the
 no-panic audit in `Proofs/Panic.lean`), `./.lake/build/bin/unit`,
@@ -54,8 +51,11 @@ Worth adding there as they come up:
 ## Proofs
 
 - **Sender-side window invariant.** Connect `Peer.send`'s window discipline
-  (now that windows are really tracked) to the receiver's window gate, and
-  derive the staging bound the replay currently only asserts.
+  (now that windows are really tracked) to the receiver's window gate: an
+  honest sender's reliable commands always pass it.
+- **Peer-level staging bound.** `stagedReliableInv_size` is per channel;
+  lift `StagedReliableInv` to every channel of a peer through
+  `Peer.receiveOnChannel` and connect.
 - **Array-level assembler invariant.** Every assembler in
   `Peer.fragmentAssemblers` satisfies `Proofs.Reassembly.Inv`; the
   per-assembler lemmas exist, the lift over the array does not.

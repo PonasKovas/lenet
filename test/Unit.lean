@@ -141,6 +141,12 @@ def fragmentTests : List Test := [
       expect (p.acknowledgements.size == acks + 1) "the duplicate was not acked"
       let (_, evs) := feed p [reliableCmd 0 1 (bytes 3 1)]
       expect (received evs == #[(0, bytes 3 1), (0, whole 10 2)]) "expected the gap, then the set" },
+  { name := "a reliable packet staged inside a delivered set's span is dropped"
+    run := fun _ => do
+      -- seq 2 stages, then the set at 1..2 jumps the frontier over it
+      let (p, evs) := feed (← serverPeer) [reliableCmd 0 2 (bytes 3 1), relFrag 0 1 10 2 0, relFrag 0 1 10 2 1]
+      expect (received evs == #[(0, whole 10 2)]) "expected only the set"
+      expect (p.channels.all (·.stagedReliable.isEmpty)) "stale staged packet kept" },
   { name := "an incomplete unreliable set is discarded once a newer packet is delivered"
     run := fun _ => do
       let (p, _) := feed (← serverPeer) [unrelFrag 0 0 1 10 2 0]

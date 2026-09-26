@@ -256,6 +256,18 @@ compatibility"). Open, undecided differences are listed in TODO.md.
   command it failed to handle). Found by the benchmark's lossy link, where
   a reliable 4096 B run delivered 153 of 512 packets.
 
+- **Reliable packets staged inside a span (lenet bug - fixed).** A
+  reassembled reliable set moves the dispatch frontier over its whole span.
+  A hostile sender can first send a plain reliable packet numbered inside
+  that span; it stages, the set jumps over it, and nothing drains it again.
+  Repeated, this grows the stage past the seven-window bound the replay
+  asserted. ENet keeps such a packet at the head of its
+  sorted queue, where it stalls dispatch until the numbers wrap. An
+  in-order delivery now drops the staged packets that are no longer ahead
+  of the new frontier (`Channel.receiveReliableSpan`), which makes the
+  bound a theorem (`Proofs.stagedReliableInv_size`). Found while trying to
+  prove that bound.
+
 - **Address check before negotiation (lenet bug - fixed).** ENet drops a
   datagram for a peer unless it comes from the peer's address (or the peer
   was connected to the broadcast address), whether or not the remote peer ID

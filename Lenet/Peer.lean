@@ -324,8 +324,7 @@ def fragmentSetLive (ch : Channel) (origin : FragmentOrigin) (startSeq : UInt16)
         startSeq ≤ ch.incomingUnreliableSequenceNumber) &&
       !ch.stagedUnreliable.any fun e => e.reliableSeq == origin.reliableSeq && e.unreliableSeq == startSeq
   else
-    ch.isIncomingReliableInWindow startSeq && startSeq != ch.incomingReliableSequenceNumber &&
-      !ch.stagedReliable.any (·.seq == startSeq)
+    ch.isReliableAhead startSeq && !ch.stagedReliable.any (·.seq == startSeq)
 
 /-- Discards the assemblers of channel `channelId` whose set can no longer be
 delivered: the dispatch frontier or the last unreliable delivery moved past

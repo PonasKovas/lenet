@@ -24,13 +24,16 @@ The attacker-controlled memory surfaces and their bounds:
    all-elements-`Inv` preservation theorem is deferred; it is a mem-map
    composition of the elementwise lemmas proven here and in
    `Proofs/Reassembly.lean`.)
-2. **Staged reliable packets** (`Channel.stagedReliable`): the receive-window
+2. **Staged reliable packets** (`Channel.stagedReliable`): at most
+   `(freeReliableWindows - 1) * reliableWindowSize` per channel
+   (`stagedReliableInv_size`), whatever the sender does. The receive-window
    gate drops out-of-window seqs, the duplicate check keeps keys distinct,
-   draining only shrinks the staged array (`drainContiguousLoop_size`), and
-   one receive stages at most one entry (`receiveReliableSpan_staged_le`).
-   The full window-span bound is asserted by the replay corpus
-   (test/Replay.lean); proving it needs the sender-side window invariant
-   (TODO.md).
+   and an in-order delivery drops the entries its span jumped over, so
+   staged keys stay distinct and inside the window
+   (`StagedReliableInv`, kept by every receive:
+   `receiveReliableAndRelease_stagedReliableInv`,
+   `receiveUnreliable_stagedReliableInv`). The replay corpus asserts the
+   bound too.
 3. **Staged unreliable packets** (`Channel.stagedUnreliable`): capped at
    `maximumStagedUnreliable` by `Channel.receiveUnreliable`, the only place
    that grows it; asserted by the replay corpus.
@@ -263,8 +266,180 @@ theorem receiveReliableSpan_staged_le (c : Channel) (seq : UInt16) (span : Nat) 
         generalize drainContiguousLoop _ c.stagedReliable #[] c.stagedReliable.size 0 = r at this ⊢
         obtain ⟨_, _, rest, _⟩ := r
         simp only at this ⊢
-        omega
+        exact Nat.le_trans Array.size_filter_le (by omega)
       · simp only []
         split <;> simp
+
+/-! ## The staging bound -/
+
+/-- A sequence number the receive path admits lies fewer than
+`(freeReliableWindows - 1) * reliableWindowSize` numbers past the frontier
+(cyclically): the gate admits the frontier's window and the next six. -/
+theorem isReliableAhead_offset (c : Channel) (s : UInt16) (h : c.isReliableAhead s = true) :
+    (s - c.incomingReliableSequenceNumber).toNat
+      < (Constants.freeReliableWindows - 1) * Constants.reliableWindowSize := by
+  simp only [isReliableAhead, isIncomingReliableInWindow, Constants.reliableWindowSize,
+    Constants.reliableWindows, Constants.freeReliableWindows, Bool.and_eq_true,
+    bne_iff_ne, ne_eq] at h ⊢
+  obtain ⟨hw, -⟩ := h
+  have hs := UInt16.toNat_lt s
+  have hf := UInt16.toNat_lt c.incomingReliableSequenceNumber
+  rw [UInt16.toNat_sub]
+  split at hw
+  · next hlt =>
+    rw [UInt16.lt_iff_toNat_lt] at hlt
+    simp at hw
+    omega
+  · next hlt =>
+    rw [UInt16.lt_iff_toNat_lt] at hlt
+    simp at hw
+    omega
+
+/-- `isReliableAhead` reads only the dispatch frontier. -/
+theorem isReliableAhead_congr {c d : Channel}
+    (h : c.incomingReliableSequenceNumber = d.incomingReliableSequenceNumber) (s : UInt16) :
+    c.isReliableAhead s = d.isReliableAhead s := by
+  simp [isReliableAhead, isIncomingReliableInWindow, h]
+
+/-- The staging invariant: staged sequence numbers are distinct, and each
+is still ahead of the frontier inside the receive window. -/
+def StagedReliableInv (c : Channel) : Prop :=
+  (c.stagedReliable.toList.map (·.seq)).Nodup ∧
+    ∀ e ∈ c.stagedReliable, c.isReliableAhead e.seq = true
+
+/-- The staging bound: distinct sequence numbers inside the window span
+number at most the span. -/
+theorem stagedReliableInv_size {c : Channel} (h : StagedReliableInv c) :
+    c.stagedReliable.size ≤ (Constants.freeReliableWindows - 1) * Constants.reliableWindowSize := by
+  obtain ⟨hnd, hahead⟩ := h
+  let off (e : StagedReliable) : Nat := (e.seq - c.incomingReliableSequenceNumber).toNat
+  have hnd' : (c.stagedReliable.toList.map off).Nodup := by
+    rw [List.Nodup, List.pairwise_map] at hnd ⊢
+    refine hnd.imp fun {a b} hab heq => hab ?_
+    have : a.seq - c.incomingReliableSequenceNumber = b.seq - c.incomingReliableSequenceNumber :=
+      UInt16.toNat_inj.mp heq
+    rw [← UInt16.sub_add_cancel a.seq c.incomingReliableSequenceNumber, this,
+      UInt16.sub_add_cancel]
+  have hsub : c.stagedReliable.toList.map off
+      ⊆ List.range ((Constants.freeReliableWindows - 1) * Constants.reliableWindowSize) := by
+    intro n hn
+    obtain ⟨e, he, rfl⟩ := List.mem_map.mp hn
+    exact List.mem_range.mpr (isReliableAhead_offset c e.seq (hahead e (Array.mem_toList_iff.mp he)))
+  have := hnd'.length_le_of_subset hsub
+  simpa using this
+
+/-- What the drain leaves staged is a sublist of what was staged. -/
+theorem drainContiguousLoop_sublist : ∀ (f : Nat) (cur : UInt16) (staged : Array StagedReliable)
+    (del : Array (Nat × Packet)) (adv : Nat),
+    (drainContiguousLoop cur staged del f adv).2.2.1.toList.Sublist staged.toList := by
+  intro f
+  induction f with
+  | zero => intro cur staged del adv; simp [drainContiguousLoop]
+  | succ f ih =>
+    intro cur staged del adv
+    simp only [drainContiguousLoop]
+    split
+    · next idx _ =>
+      split
+      · next hidx =>
+        refine (ih _ _ _ _).trans ?_
+        rw [Array.toList_eraseIdx]
+        exact List.eraseIdx_sublist _ _
+      · exact List.Sublist.refl _
+    · exact List.Sublist.refl _
+
+/-- Every reliable receive keeps the staging invariant: staging adds only an
+admitted, new sequence number, and an in-order delivery keeps only the
+entries still ahead of the new frontier. -/
+theorem receiveReliableSpan_stagedReliableInv {c : Channel} (h : StagedReliableInv c)
+    (seq : UInt16) (span : Nat) (packet : Packet) : StagedReliableInv (receiveReliableSpan c seq span packet).1 := by
+  obtain ⟨hnd, hahead⟩ := h
+  unfold receiveReliableSpan
+  split
+  · exact ⟨hnd, hahead⟩
+  · next hwin =>
+    split
+    · exact ⟨hnd, hahead⟩
+    · next hdup =>
+      split
+      · simp only [drainContiguous]
+        have hsub := drainContiguousLoop_sublist c.stagedReliable.size (seq + (span - 1).toUInt16)
+          c.stagedReliable #[] 0
+        generalize drainContiguousLoop _ c.stagedReliable #[] c.stagedReliable.size 0 = r at hsub ⊢
+        obtain ⟨newSeq, _, rest, _⟩ := r
+        simp only at hsub ⊢
+        refine ⟨?_, ?_⟩
+        · rw [Array.toList_filter]
+          exact hnd.sublist ((List.filter_sublist).map _ |>.trans (hsub.map _))
+        · intro e he
+          exact (Array.mem_filter.mp he).2
+      · simp only []
+        split
+        · exact ⟨hnd, hahead⟩
+        · next hany =>
+          refine ⟨?_, ?_⟩
+          · simp only [Array.toList_push, List.map_append, List.map_cons, List.map_nil]
+            refine List.nodup_append.mpr ⟨hnd, by simp, ?_⟩
+            intro a ha b hb
+            simp only [List.mem_singleton] at hb
+            subst hb
+            intro heq
+            subst heq
+            obtain ⟨e, he, rfl⟩ := List.mem_map.mp ha
+            exact hany (Array.any_eq_true'.mpr ⟨e, Array.mem_toList_iff.mp he, by simp⟩)
+          · intro e he
+            simp only [Array.mem_push] at he
+            rcases he with he | rfl
+            · exact hahead e he
+            · show c.isReliableAhead seq = true
+              simp only [Bool.not_eq_true'] at hwin
+              simp only [beq_iff_eq] at hdup
+              simp [isReliableAhead, hdup]
+              simpa using hwin
+
+/-- Releasing staged unreliable packets leaves reliable staging and the
+frontier alone. -/
+theorem releaseStagedUnreliable_reliable (c : Channel) :
+    (releaseStagedUnreliable c).1.stagedReliable = c.stagedReliable ∧
+      (releaseStagedUnreliable c).1.incomingReliableSequenceNumber = c.incomingReliableSequenceNumber := by
+  unfold releaseStagedUnreliable
+  split
+  · exact ⟨rfl, rfl⟩
+  · simp only []
+    refine Array.foldl_induction
+      (motive := fun _ (r : Channel × Array Packet) => r.1.stagedReliable = c.stagedReliable ∧
+        r.1.incomingReliableSequenceNumber = c.incomingReliableSequenceNumber)
+      ⟨rfl, rfl⟩ ?_
+    intro i r hr
+    obtain ⟨ch, rel⟩ := r
+    simp only [] at hr ⊢
+    split <;> exact hr
+
+/-- A fresh channel stages nothing. -/
+theorem stagedReliableInv_default : StagedReliableInv ({} : Channel) := by
+  simp [StagedReliableInv]
+
+/-- The channel's reliable receive path keeps the staging invariant. -/
+theorem receiveReliableAndRelease_stagedReliableInv {c : Channel} (h : StagedReliableInv c)
+    (seq : UInt16) (span : Nat) (packet : Packet) : StagedReliableInv (receiveReliableAndRelease c seq span packet).1 := by
+  have h' := receiveReliableSpan_stagedReliableInv h seq span packet
+  unfold receiveReliableAndRelease
+  generalize receiveReliableSpan c seq span packet = r at h' ⊢
+  obtain ⟨c', dels⟩ := r
+  simp only [] at h' ⊢
+  split
+  · exact h'
+  · obtain ⟨hs, hf⟩ := releaseStagedUnreliable_reliable c'
+    obtain ⟨hnd, hahead⟩ := h'
+    refine ⟨by simpa [hs] using hnd, fun e he => ?_⟩
+    rw [isReliableAhead_congr hf]
+    exact hahead e (hs ▸ he)
+
+/-- Unreliable receives never touch reliable staging. -/
+theorem receiveUnreliable_stagedReliableInv {c : Channel} (h : StagedReliableInv c)
+    (reliableSeq seq : UInt16) (packet : Packet) : StagedReliableInv (receiveUnreliable c reliableSeq seq packet).1 := by
+  unfold receiveUnreliable
+  repeat' split
+  all_goals exact h
 
 end Lenet.Proofs
