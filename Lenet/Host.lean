@@ -370,6 +370,10 @@ structure PackState where
   /-- A reliable command hit a still-occupied sequence window: later reliable
   channel commands wait too, so none overtakes it (ENet's `windowWrap`). -/
   windowWrap        : Bool := false
+  /-- A reliable data command was held back (window or congestion): every
+  later one waits too. ENet keeps them in their own list and stops reading
+  it for the pass (`currentSendReliableCommand = end`). -/
+  reliableHeld      : Bool := false
   /-- The peer's `packetThrottleCounter`, advanced per unreliable packet. -/
   throttleCounter   : UInt32
   /-- Channel and start sequence number of the unreliable fragment set whose
@@ -436,6 +440,14 @@ def packAck (mtu : UInt32) (st : PackState) (ack : Acknowledgement) : PackState 
   if st.full ∨ !st.fits mtu cmd then { st with full := true }
   else { st.pack cmd with packedAcks := st.packedAcks + 1 }
 
+/-- Whether `cmd` carries application data (ENet: `packet != NULL`), as
+opposed to a control command. -/
+def carriesPacket (cmd : Protocol.Command) : Bool :=
+  match cmd.body with
+  | .sendReliable .. | .sendUnreliable .. | .sendUnsequenced .. | .sendFragment ..
+  | .sendUnreliableFragment .. => true
+  | _ => false
+
 /-- Packs one queued command for peer `p` (ENet check_outgoing_commands). A
 reliable command stays queued while its sequence window is not free or while
 the congestion window is exhausted; an unreliable one may be dropped by
@@ -445,17 +457,20 @@ def packCommand (p : Peer) (now : UInt32) (st : PackState) (outCmd : OutgoingCom
   -- the command's data channel; control commands (channel 0xFF) have none
   let channel? := if cmd.acknowledge then st.channels[cmd.channelId.toNat]? else none
   let firstSend := outCmd.sendAttempts == 0
+  let reliableData := cmd.acknowledge && carriesPacket cmd
   if st.continuesDroppedSet cmd then st
   else if st.full then st.defer outCmd
+  else if reliableData && st.reliableHeld then st.defer outCmd
   else if channel?.isSome && st.windowWrap then st.defer outCmd
   else if channel?.any (fun ch => firstSend && !ch.canSendReliable cmd.reliableSequenceNumber) then
-    { st with windowWrap := true }.defer outCmd
+    { st with windowWrap := true, reliableHeld := true }.defer outCmd
   -- congestion: reliable payload in flight may not exceed the throttle-scaled
-  -- receive window (but always admits one MTU)
-  else if cmd.acknowledge && outCmd.fragmentLength > 0 &&
+  -- receive window (but always admits one MTU). ENet checks every command
+  -- with a packet, so an empty one waits too while too much is in flight.
+  else if reliableData &&
       p.reliableDataInTransit + st.inTransitAdd + outCmd.fragmentLength >
         Nat.max ((p.packetThrottle * p.windowSize) / Constants.packetThrottleScale).toNat p.mtu.toNat then
-    st.defer outCmd
+    { st with reliableHeld := true }.defer outCmd
   else if !st.fits p.mtu cmd then { st with full := true }.defer outCmd
   else if !cmd.acknowledge then st.packUnreliable p cmd -- fire-and-forget
   else

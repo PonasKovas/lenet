@@ -228,6 +228,23 @@ compatibility"). Open, undecided differences are listed in TODO.md.
   so a server application got disconnect events for connections it never
   heard of. `Host.checkPeerTimeouts` and `Peer.handleDisconnect` now reset
   such a peer without an event.
+- **Reliable packets overtaking a held one (lenet bug - fixed).** ENet
+  queues reliable data commands in their own list
+  (`outgoingSendReliableCommands`), and once one of them is held back, by
+  its sequence window or by congestion, check_outgoing_commands stops
+  reading that list for the pass. So no reliable packet goes out before an
+  earlier one, on any channel. Lenet only held back the one command: behind
+  a large packet that did not fit the congestion window, smaller reliable
+  packets still went out. That breaks the order the window accounting
+  relies on, and the large packet can starve while the ones behind it fill
+  the window. `PackState.reliableHeld` now holds back every later reliable
+  data command, as ENet does. Control commands and unreliable packets still
+  go, in ENet too. The corpus never congests a sender that far.
+- **Empty reliable packets and congestion (lenet bug - fixed).** ENet runs
+  its congestion check on every command with a packet, empty or not. Lenet
+  skipped it when the payload was empty, so while more bytes were in flight
+  than the window allows (after the throttle falls on an RTT spike) an empty
+  reliable packet went out where ENet holds it back.
 - **More than 4095 peer slots (lenet bug - fixed).** ENet's
   enet_host_create refuses more than ENET_PROTOCOL_MAXIMUM_PEER_ID (4095)
   peers. Lenet took any count: slot 4095 then carried peer ID 0xFFF, the ID

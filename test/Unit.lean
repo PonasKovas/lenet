@@ -264,6 +264,29 @@ def hostTests : List Test := [
       expect (received p.serverEvents == #[(0, bytes 100 3)]) "not delivered exactly once"
       expect (p.clientP.reliableDataInTransit == 0) "in-transit bytes left after the ack"
       expect (p.clientP.channels.all (·.reliableWindows.all (· == 0))) "window slot left after the ack" },
+  { name := "an empty reliable packet waits while the bytes in flight exceed the window"
+    run := fun _ => do
+      let p ← send (← send (← send (← connected) (pkt 1000)) (pkt 1000)) (pkt 1000)
+      let p := p.round dropAll
+      expect (p.clientP.reliableDataInTransit == 3000) "the three packets are not in flight"
+      -- the window shrinks below what is in flight (ENet: the throttle falls on an RTT spike)
+      let p := { p with client := p.client.modifyPeer p.clientPeer ({ · with packetThrottle := 0 }) }
+      let p ← send p (pkt 0)
+      let (q, cmds) := Host.packOutgoingCommands p.clientP p.now
+      -- ENet checks every command with a packet, empty or not (check_outgoing_commands)
+      expect (!cmds.any (·.body matches .sendReliable ..)) "empty packet sent past the congestion window"
+      expect (q.outgoingCommands.size == 1) "empty packet not left queued" },
+  { name := "a reliable packet held back by congestion holds back every later one"
+    run := fun _ => do
+      let p := (← send (← connected) (pkt 1000)).round dropAll
+      -- the window shrinks to one MTU (1392): 1000 in flight + 500 is over, + 100 is not
+      let p := { p with client := p.client.modifyPeer p.clientPeer ({ · with packetThrottle := 0 }) }
+      let p ← send (← send p (pkt 500)) (pkt 100) (ch := 1)
+      let (q, cmds) := Host.packOutgoingCommands p.clientP p.now
+      -- ENet stops taking from its reliable send list for the pass
+      -- (check_outgoing_commands: currentSendReliableCommand = end)
+      expect (!cmds.any (·.body matches .sendReliable ..)) "a later reliable packet overtook the held one"
+      expect (q.outgoingCommands.size == 2) "both packets not left queued" },
   { name := "a peer that never answers times out between the minimum and maximum"
     run := fun _ => do
       let p ← send (← connected) (pkt 100)
