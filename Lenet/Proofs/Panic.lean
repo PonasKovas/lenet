@@ -1,19 +1,30 @@
-import Lenet.Constants
-import Lenet.Host
+import Lean
+import Lenet
 
 /-!
 # Panic-site audit
 
-After the Phase 1 conventions (DESIGN.md 1.7), the only runtime panic source
-left in `Lenet/` is division by zero: all array indexing is proof-carrying by
-construction (checked at elaboration), `getElem!`/`unsafe`/`partial` are
-banned by the gate, and every loop is structural or fuel-bounded (termination
-is checked by the kernel).
+Two layers:
 
-This module names every division site with its non-zero-divisor proof. A new
-unguarded division site fails review by its absence here.
+* **Build-time panic audit** (`run_meta` below, the no-panics composition
+  over `Host.handleDatagram` / `Host.service` and every other entry point):
+  every definition under `Lenet.*` (1250+, all of the core, the C-facing FFI
+  glue included) is scanned, and the build fails if any of them references a
+  panicking primitive (`panic*`, `sorryAx`, `outOfBounds`, or any `…!`
+  accessor such as `getElem!` / `Option.get!`) or is `unsafe`, `partial`
+  (compiled to `opaque`) or `implemented_by`-swapped. Scanning *every*
+  `Lenet.*` definition, not a reachability slice, makes the check closed
+  under composition: whatever an entry point calls inside Lenet is itself
+  scanned, and calls leaving Lenet can only reach a panicking library path
+  through a `…!` name. A kernel theorem cannot state this - in Lean's logic
+  `panic!` *is* `default` - so the audit is the formal statement. Not
+  covered (not panics): stack depth and allocation failure.
+* **Divisor audit** (the lemmas below): Lean's `/` never panics (`x / 0 =
+  0`), but a silent zero would be a logic bug where ENet crashes. Every
+  division site is named with its non-zero-divisor proof.
 
-Division sites (all divisors are compile-time constants or guarded):
+A new unguarded division site fails review by its absence here. Division
+sites (all divisors are compile-time constants or guarded):
 
 1. `Channel.windowIndex` / `isIncomingReliableInWindow` / `canSendReliable`
    - divisors `reliableWindowSize` (4096) and `reliableWindows` (16).
@@ -29,6 +40,38 @@ Division sites (all divisors are compile-time constants or guarded):
 -/
 
 namespace Lenet.Proofs
+
+open Lean in
+/-- Names that can panic at runtime (or stand for a missing proof). -/
+def isPanicking (n : Name) : Bool :=
+  n == ``panic || n == ``panicCore || n == ``panicWithPos || n == ``panicWithPosWithDecl ||
+  n == ``sorryAx || n == ``outOfBounds ||
+  (match n with
+   | .str _ s => s.endsWith "!"
+   | _ => false)
+
+open Lean Meta in
+run_meta do
+  let env ← getEnv
+  let mut scanned : Array Name := #[]
+  let mut bad : Array MessageData := #[]
+  for (n, ci) in env.constants.toList do
+    unless (`Lenet).isPrefixOf n do continue
+    if (`Lenet.Proofs).isPrefixOf n then continue
+    scanned := scanned.push n
+    if ci.isUnsafe then bad := bad.push m!"{n}: unsafe"
+    if ci matches .opaqueInfo _ then bad := bad.push m!"{n}: opaque (partial?)"
+    if (Compiler.implementedByAttr.getParam? env n).isSome then
+      bad := bad.push m!"{n}: implemented_by"
+    if let some v := ci.value? (allowOpaque := true) then
+      for c in v.getUsedConstants do
+        if isPanicking c then bad := bad.push m!"{n}: references {c}"
+  -- guard against a vacuous scan (renamed namespace, dropped import)
+  for entry in [``Host.handleDatagram, ``Host.service, ``Host.nextDeadline, ``Host.connect,
+      ``Host.send, ``Peer.send, ``Protocol.Datagram.decodeWith, ``Protocol.Datagram.encodeWith] do
+    unless scanned.contains entry do throwError m!"panic audit: entry point {entry} not scanned"
+  unless bad.isEmpty do
+    throwError m!"panic audit failed:{indentD (MessageData.joinSep bad.toList Format.line)}"
 
 /-! ## Per-site non-zero-divisor lemmas -/
 

@@ -31,4 +31,19 @@ def greaterEqual (a b : UInt32) : Bool :=
 def difference (a b : UInt32) : UInt32 :=
   if (a - b) >= overflow then b - a else a - b
 
+/-- The earlier of two timestamps under the wrap-aware order (`less`); ties
+keep `a`. Plain `min` is wrong here: across the 2^32 wrap a numerically
+smaller timestamp can be the *later* one. -/
+@[inline]
+def earliest (a b : UInt32) : UInt32 :=
+  if less b a then b else a
+
+/-- Fold step for "earliest of a set of timestamps": `acc` is the earliest so
+far (`none` for the empty set). -/
+@[inline]
+def earliestSome (acc : Option UInt32) (t : UInt32) : Option UInt32 :=
+  some (match acc with
+    | some v => earliest v t
+    | none => t)
+
 end Lenet.Time

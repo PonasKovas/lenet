@@ -792,33 +792,25 @@ advances):
   (`lastReceiveTime + pingInterval`)
 - bandwidth-throttle epoch boundary (`epoch + interval`)
 
-The returned value is a lower bound semantics-wise: servicing *at or after*
-the deadline triggers the pending work. Timestamps are UInt32 milliseconds
-and may wrap; drivers comparing deadlines must use the same wrap-aware
-arithmetic as `Lenet.Time`.
+The returned value is the wrap-aware earliest of these timers
+(`Time.earliest`, not numeric `min` - see `Proofs/Deadline.lean`): no
+scheduled timer is earlier than it, so servicing *at or after* the deadline
+never skips pending work. Timestamps are UInt32 milliseconds and may wrap;
+drivers comparing deadlines must use the same wrap-aware arithmetic as
+`Lenet.Time`.
 -/
 def nextDeadline (h : Host) : Option UInt32 :=
   let peerDeadline := h.peers.foldl (init := none) fun (acc : Option UInt32) p =>
     -- retransmit boundaries of in-flight reliable commands
     let inFlight := p.sentReliableCommands.foldl (init := acc) fun a outCmd =>
-      some (match a with
-        | some v => min v (outCmd.sentTime + outCmd.roundTripTimeout)
-        | none => outCmd.sentTime + outCmd.roundTripTimeout)
+      Time.earliestSome a (outCmd.sentTime + outCmd.roundTripTimeout)
     -- keepalive boundary: only peers that could actually ping right now
-    let inFlight :=
-      if p.state == .connected ∧ p.outgoingCommands.isEmpty ∧ p.sentReliableCommands.isEmpty then
-        some (match inFlight with
-          | some v => min v (p.lastReceiveTime + p.pingInterval)
-          | none => p.lastReceiveTime + p.pingInterval)
-      else
-        inFlight
-    inFlight
-  let epochDeadline : Option UInt32 :=
-    some (h.bandwidthThrottleEpoch + Constants.bandwidthThrottleInterval)
-  match peerDeadline, epochDeadline with
-  | some d, some e => some (min d e)
-  | some d, none => some d
-  | none, e => e
+    if p.state == .connected ∧ p.outgoingCommands.isEmpty ∧ p.sentReliableCommands.isEmpty then
+      Time.earliestSome inFlight (p.lastReceiveTime + p.pingInterval)
+    else
+      inFlight
+  -- the bandwidth-throttle epoch boundary is always scheduled
+  Time.earliestSome peerDeadline (h.bandwidthThrottleEpoch + Constants.bandwidthThrottleInterval)
 
 end Host
 

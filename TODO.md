@@ -36,11 +36,13 @@ compatibility testing works), then come back here.
 - Live interop: 12/12 PASS. C API distribution builds and self-checks.
 - Phase 1 (code quality) is done: typed errors, `Vector`-backed fixed-size
   windows, no panicking constructs, conventions in DESIGN.md 1.7.
-- Phase 2 (formal proofs) first pass is done: separate `LenetProofs` lib in
-  CI - codec reader algebra + parse fuel adequacy, reassembly invariant +
-  completion soundness, channel drain/advance theorems + wrap-boundary pin,
-  time translation invariance, unsequenced idempotence, divisor audit (see
-  the Phase 2 section for the deferred remainder).
+- Phase 2 (formal proofs) second pass is done: separate `LenetProofs` lib in
+  CI - full wire-datagram codec roundtrip (incl. checksum verification),
+  parse fuel adequacy, reassembly invariant + completion soundness, channel
+  drain/advance theorems + wrap-boundary pin, `nextDeadline` earliest-timer
+  contract (found + fixed a wrap bug), build-time panic audit over all of
+  `Lenet.*`, time translation invariance, unsequenced idempotence, divisor
+  audit. Only the Peer-level window-skew invariant (stretch) remains.
 
 ## Roadmap
 
@@ -126,7 +128,7 @@ delivery; no-panics across `Host.handleDatagram` / `Host.service`.
 **Exit criteria:** proofs compile and are maintained in CI; corpus still
 passes (proofs must not break the tested behavior).
 
-**Progress (first pass):** separate `LenetProofs` lib (in defaultTargets, so
+**Progress (two passes):** separate `LenetProofs` lib (in defaultTargets, so
 CI builds it; the C distribution never compiles proofs). Proven so far:
 
 - Wave 0 (fix + pin): ENet's cyclic receive-window gate applied to
@@ -136,6 +138,21 @@ CI builds it; the C distribution never compiles proofs). Proven so far:
   byte layout with field-level write/read inverses (`write_read_u16/u32`,
   bv_decide for the fixed-width identities); `parseCommands` fuel adequacy
   (fuel = payload size achieves the maximal parse).
+- Roundtrip (`Proofs/Roundtrip.lean`): a reader/writer algebra (`Reads` /
+  `Writes` / `RoundTrip` + the `RoundTrip.step` composition lemma, peeled
+  field by field by the `rt_field`/`rt_body` tactics). Every command kind
+  roundtrips (`rt_command`, payload ≤ 0xFFFF), canonical headers roundtrip
+  (`rt_header`: 12-bit peer ID, 2-bit session), `parseCommands` recovers the
+  exact command sequence (`parseCommands_cmdsBytes`), and `wire_roundtrip`
+  covers the host's real pair - `decodeWith checksumEnabled (some
+  connectIdOf) none` on `encodeWith none connectId` - including passing
+  checksum verification when both sides agree on the connectID.
+- Deadline (`Proofs/Deadline.lean`): `nextDeadline` is always scheduled and
+  is one of the host's timers (`nextDeadline_mem`), and no timer is
+  wrap-aware earlier than it when the timers share a 24h window
+  (`nextDeadline_earliest`). **Bug found and fixed:** the fold used numeric
+  `min`, wrong across the 2^32 ms wrap (every ~49.7 days: could return a
+  deadline later than a pending timer); it now folds `Time.earliest`.
 - Reassembly (`Proofs/Reassembly.lean`): the bitmap/counter invariant
   (`fragmentsRemaining + received.count = fragmentCount`) established by
   `init` and preserved by `addFragment`; write-bounds; completion soundness
@@ -149,21 +166,18 @@ CI builds it; the C distribution never compiles proofs). Proven so far:
 - Unsequenced (`Proofs/Unsequenced.lean`): `checkAndAdd` idempotence in all
   three acceptance cases (re-receiving an accepted group is always a
   duplicate).
-- Panic (`Proofs/Panic.lean`): the divisor audit - every division site named
-  with its non-zero-divisor proof; a new unguarded division fails review by
-  its absence here. Combined with Phase 1's conventions (proof-carrying
-  indexing, no getElem!/unsafe/partial), this is the no-panics gate.
+- Panic (`Proofs/Panic.lean`): the no-panics composition as a build-time
+  audit - every `Lenet.*` definition (1250+) is scanned and the build fails
+  on any reference to `panic*`/`sorryAx`/`outOfBounds`/a `…!` accessor, or
+  any `unsafe`/`partial`/`implemented_by` definition (a kernel theorem
+  cannot state this: in Lean's logic `panic!` is `default`). Plus the
+  divisor audit - every division site named with its non-zero-divisor
+  proof.
 
-**Remaining for the full exit criteria (deferred, in order of value):**
-- roundtrip composition theorems at the full-`Datagram` level (the
-  per-command groundwork is done; needs a reader-algebra composition lemma
-  for multi-field payloads)
-- `nextDeadline` upper-bound property (fold-is-min; driver-facing)
+**Remaining (stretch, deferred):**
 - Peer-level window-skew invariant connecting `Peer.send`'s window
-  discipline to the receive-path preconditions (stretch; cut from the
-  first pass)
-- formal no-panics composition over `Host.handleDatagram` / `Host.service`
-  (the ingredient lemmas exist; needs the top-level statement)
+  discipline to the receive-path preconditions (cut from both passes; the
+  staging bound it would give is asserted by the replay corpus instead)
 
 ### Phase 3 — Performance
 
@@ -238,8 +252,6 @@ one thread (or external serialization).
   DESIGN.md 1.4. Compressed datagrams are rejected.
 - **Sequence-wrap golden traces** (~65k commands per channel needed; the
   wrap logic is exercised by proofs instead).
-- **Packet loss / reordering chaos scenarios** (recording is
-  non-deterministic; the replay needs determinism).
 - **Packet loss / reordering chaos scenarios** (recording is
   non-deterministic; the replay needs determinism).
 - **Resource-exhaustion *parity***: matching ENet's exact memory behavior
