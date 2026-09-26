@@ -225,7 +225,20 @@ def fragmentValidationTests : List Test := [
       let (q, _, reading) := peer.handleCommand 2000 (set (5 * 1024 * 1024)) (some 0)
       expect (reading && q.fragmentAssemblers.size == 1) "a 5 MB set was refused"
       let (q, _, reading) := peer.handleCommand 2000 (set (Constants.maximumPacketSize + 1)) (some 0)
-      expect (!reading && q.fragmentAssemblers.isEmpty) "a set over 32 MB was taken" } ]
+      expect (!reading && q.fragmentAssemblers.isEmpty) "a set over 32 MB was taken" },
+  { name := "no new fragmented packet once the assemblers hold 32 MB"
+    run := fun _ => do
+      let peer ← serverPeer
+      let set (start : UInt16) (total : Nat) : Protocol.Command :=
+        let cmd := relFrag 0 start 5 2 0
+        { cmd with body := .sendFragment { fragParams start 5 2 0 with totalLength := total.toUInt32 } }
+      let half := Constants.maximumWaitingData / 2
+      let (peer, _) := feed peer [set 1 half, set 3 half]
+      expect (peer.fragmentAssemblers.size == 2) "the first two sets were refused"
+      -- ENet queue_incoming_command: totalWaitingData >= maximumWaitingData
+      -- refuses a new packet (notifyError)
+      let (q, _, reading) := peer.handleCommand 2000 (set 5 100) (some 0)
+      expect (!reading && q.fragmentAssemblers.size == 2) "a set over the budget was taken" } ]
 
 def deliveredGroups (p : Peer) (groups : List UInt16) : List UInt16 :=
   let (_, delivered) := groups.foldl (init := (p, [])) fun (p, acc) g =>

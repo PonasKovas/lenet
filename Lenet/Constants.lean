@@ -15,6 +15,9 @@ def maximumPeerId : UInt16 := 0x0FFF
 /-- The largest packet `Peer.send` takes and a receiver assembles
 (`FragmentAssembler.init`): ENet's default `host->maximumPacketSize`. -/
 def maximumPacketSize : Nat := 32 * 1024 * 1024
+/-- A peer starts no new fragmented packet once its assemblers hold this
+many bytes (ENet's default `host->maximumWaitingData`). -/
+def maximumWaitingData : Nat := 32 * 1024 * 1024
 def maximumFragmentCount : Nat := 1024 * 1024
 /-- Cap on concurrently-assembling fragmented packets per peer. ENet has no
 explicit cap; its effective bound is the receive window span with each

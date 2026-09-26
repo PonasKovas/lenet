@@ -134,7 +134,10 @@ Memory an attacker can make a host hold is bounded:
   `maximumReceivedFragmentCount` (65536). ENet has no such cap. When it is
   full, a new set evicts the oldest unreliable one; if all 32 are reliable,
   the fragment is dropped without an ACK, so the sender retransmits it
-  later instead of losing it.
+  later instead of losing it. On top, ENet's byte budget: no new set starts
+  once the assemblers hold `maximumWaitingData` (32 MB), so they hold less
+  than 64 MB per peer (the proven bound is still the per-assembler one,
+  32 × 32 MB; see TODO.md).
 - **Staged reliable packets:** only in-window sequence numbers are staged,
   each at most once, and a delivery drops the ones its span jumped over, so
   a channel never holds more than 28672 (seven windows). ENet keeps those

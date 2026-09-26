@@ -435,13 +435,19 @@ def assemblerRoom (xs : Array FragmentAssembler) : Option (Array FragmentAssembl
     | some i => some (xs.eraseIdx i)
     | none => none
 
+/-- The bytes the assemblers in `xs` hold for their packets. -/
+def waitingBytes (xs : Array FragmentAssembler) : Nat :=
+  xs.foldl (fun n a => n + a.totalLength) 0
+
 /-- Absorbs a fragment into the assembler array: finds the assembler for the
 set (`origin`, `params.startSequenceNumber`), or creates one when there is
-room (`assemblerRoom`) and the fragment count is within
-`maximumReceivedFragmentCount` - robustness guards, DESIGN.md, deliberately
-stricter than ENet whose pending-assembler growth is bounded only by its
-window span. Returns the (possibly changed) array and the assembler to
-deliver to. -/
+room (`assemblerRoom`), the fragment count is within
+`maximumReceivedFragmentCount` and the assemblers hold less than
+`maximumWaitingData` bytes. The byte budget is ENet's
+(queue_incoming_command refuses a new packet once `totalWaitingData`
+reaches `maximumWaitingData`); the other two are robustness guards,
+DESIGN.md, stricter than ENet. Returns the (possibly changed) array and the
+assembler to deliver to. -/
 def absorbFragment (xs : Array FragmentAssembler) (origin : FragmentOrigin)
     (params : Protocol.FragmentParams) : Array FragmentAssembler × Option FragmentAssembler :=
   match xs.find? (fun a => a.origin == origin && a.startSequenceNumber == params.startSequenceNumber) with
@@ -454,6 +460,8 @@ def absorbFragment (xs : Array FragmentAssembler) (origin : FragmentOrigin)
       match assemblerRoom xs with
       | none => (xs, none)
       | some room =>
+        if waitingBytes room ≥ Constants.maximumWaitingData then (xs, none)
+        else
         match FragmentAssembler.init params.startSequenceNumber params.totalLength.toNat
             params.fragmentCount.toNat with
         | .ok newAsm =>

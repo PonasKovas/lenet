@@ -166,6 +166,8 @@ theorem absorbFragment_cap_preserved (xs : Array FragmentAssembler) (origin : Fr
       · next room hroom =>
         have hlt := assemblerRoom_size hroom hcap
         split
+        · exact hcap
+        split
         · simp only [Array.size_push]
           omega
         · exact hcap
@@ -768,6 +770,8 @@ theorem absorbFragment_ok {xs : Array FragmentAssembler} (hxs : ∀ a ∈ xs, As
       split
       · exact ⟨hxs, fun a ha => by cases ha⟩
       · next room hroom =>
+        split
+        · exact ⟨hxs, fun a ha => by cases ha⟩
         split
         · next newAsm hinit =>
           have hnew : AssemblerOk { newAsm with origin } := by

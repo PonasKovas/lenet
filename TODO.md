@@ -73,6 +73,12 @@ as bugs show where the corpus is blind.
 
 ## Proofs
 
+- **Waiting-data budget.** `Peer.absorbFragment` starts no set once the
+  assemblers hold `maximumWaitingData`, so they stay under 64 MB per peer,
+  but the proofs only bound each assembler (32 × 32 MB). Proving the
+  budget needs "at most one assembler per set" (`assemblerArrayAfterDeliver`
+  replaces every assembler with the set's key), kept by `absorbFragment`
+  (it creates one only when `find?` found none) and by the filters.
 - **Sender-side window span.** The in-flight reliable commands of a channel
   span at most seven windows (the stronger "always in the receiver's
   window" is false, for ENet too). The argument: first sends go in sequence

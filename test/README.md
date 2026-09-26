@@ -251,6 +251,13 @@ compatibility"). Open, undecided differences are listed in TODO.md.
   for events from a received datagram, missing timeouts and the remote
   DISCONNECT that completes once its ACK is out. `Host.service` now sets
   it too.
+- **Waiting-data budget (lenet bug - fixed).** ENet's
+  queue_incoming_command refuses a new packet once the peer's
+  `totalWaitingData` reaches `maximumWaitingData` (32 MB). Lenet had no
+  byte budget, only its cap of 32 assemblers, which with 32 MB packets let
+  a peer hold 1 GB. `Peer.absorbFragment` now starts no set once the
+  assemblers hold 32 MB (a refused fragment is not acknowledged). ENet
+  also counts staged and undelivered packets; Lenet bounds those by count.
 - **Fragment validation (lenet bug - fixed, hostile input).** ENet refuses
   an empty fragment and one whose total length or fragment count differs
   from the set under way (no ACK, the rest of the datagram dropped). Lenet
