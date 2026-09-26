@@ -482,9 +482,11 @@ def packOutgoingCommands (p : Peer) (now : UInt32) : Peer × Array Protocol.Comm
   -- update in place instead of being copied
   let p := { p with sentReliableCommands := #[], channels := #[] }
   let withAcks := p.acknowledgements.foldl (PackState.packAck p.mtu) initial
+  -- read before the command fold, which then holds the only reference
+  let packedAcks := withAcks.packedAcks
   let final := p.outgoingCommands.foldl (PackState.packCommand p now) withAcks
   let updatedPeer := { p with
-    acknowledgements      := p.acknowledgements.drop withAcks.packedAcks
+    acknowledgements      := p.acknowledgements.drop packedAcks
     outgoingCommands      := final.remainingOutgoing
     sentReliableCommands  := final.sentReliables
     channels              := final.channels
