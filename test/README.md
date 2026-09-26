@@ -251,6 +251,13 @@ compatibility"). Open, undecided differences are listed in TODO.md.
   for events from a received datagram, missing timeouts and the remote
   DISCONNECT that completes once its ACK is out. `Host.service` now sets
   it too.
+- **No maximum packet size on send (lenet bug - fixed).** ENet's
+  enet_peer_send refuses packets over `host->maximumPacketSize` (32 MB by
+  default). Lenet only capped the fragment count, which allows about
+  1.4 GB. `Peer.sendError?` now refuses packets over 32 MB
+  (`packetTooLarge`). A Lenet receiver still assembles at most 4 MB (a
+  resource cap, DESIGN.md), so a larger reliable packet sent to Lenet is
+  never acknowledged.
 - **Client's connect event data (lenet bug - fixed).** ENet's client
   reports its connect event with data 0: enet_host_connect puts the data in
   the CONNECT and leaves the peer's eventData at its reset value. Lenet

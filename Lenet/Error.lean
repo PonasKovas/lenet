@@ -17,6 +17,8 @@ inductive LenetError where
   /-- `Peer.send` of a packet whose payload would need more than
   `Constants.maximumFragmentCount` fragments. -/
   | tooManyFragments (size : Nat)
+  /-- `Peer.send` of a packet larger than `Constants.maximumPacketSize`. -/
+  | packetTooLarge (size : Nat)
 deriving Repr, BEq, Inhabited
 
 instance : ToString LenetError where
@@ -26,5 +28,6 @@ instance : ToString LenetError where
     | .peerNotConnected p         => s!"cannot send packet: peer {p} is not connected"
     | .invalidChannelId p c n     => s!"invalid channel ID {c} for peer {p} (peer has {n} channels)"
     | .tooManyFragments sz        => s!"packet of {sz} bytes exceeds maximum allowable fragment count"
+    | .packetTooLarge sz          => s!"packet of {sz} bytes exceeds the maximum packet size"
 
 end Lenet

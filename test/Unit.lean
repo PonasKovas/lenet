@@ -246,13 +246,16 @@ def disconnecting : Except String (Pair × UInt16) := do
   return (p, d.command.reliableSequenceNumber)
 
 def hostTests : List Test := [
-  { name := "send rejects a bad peer, a bad channel and an unconnected peer"
+  { name := "send rejects a bad peer, a bad channel, an unconnected peer and an oversized packet"
     run := fun _ => do
       let p ← connected
       expect (p.client.send 99 0 (pkt 10) matches .error (.invalidPeerId 99)) "bad peer accepted"
       expect (p.client.send p.clientPeer 2 (pkt 10) matches .error (.invalidChannelId ..))
         "bad channel accepted"
-      expect (p.client.send 1 0 (pkt 10) matches .error (.peerNotConnected 1)) "free slot accepted" },
+      expect (p.client.send 1 0 (pkt 10) matches .error (.peerNotConnected 1)) "free slot accepted"
+      -- ENet enet_peer_send refuses packets over host->maximumPacketSize (32 MB)
+      let big : Packet := { data := ByteArray.mk (Array.replicate (Constants.maximumPacketSize + 1) 0) }
+      expect (p.client.send p.clientPeer 0 big matches .error (.packetTooLarge ..)) "oversized packet accepted" },
   { name := "a host has at most 4095 peer slots, none with the CONNECT peer ID"
     run := fun _ => do
       let h := Host.create clientAddr 5000

@@ -12,6 +12,10 @@ def maximumWindowSize : Nat := 65536
 def minimumChannelCount : Nat := 1
 def maximumChannelCount : Nat := 255
 def maximumPeerId : UInt16 := 0x0FFF
+/-- The largest packet `Peer.send` takes (ENet's default
+`host->maximumPacketSize`). A Lenet receiver assembles at most
+`maximumMtu * 1024` bytes (`FragmentAssembler.init`). -/
+def maximumPacketSize : Nat := 32 * 1024 * 1024
 def maximumFragmentCount : Nat := 1024 * 1024
 /-- Cap on concurrently-assembling fragmented packets per peer. ENet has no
 explicit cap; its effective bound is the receive window span with each

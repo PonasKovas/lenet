@@ -263,14 +263,16 @@ def packetCommand (p : Peer) (channel : Channel) (channelId : UInt8) (packet : P
         body := .sendUnsequenced group packet.data })
 
 /-- Why `send` refuses `packet` on `channelId`, if it does: the peer is not
-connected, has no such channel, or the packet needs more than
-`maximumFragmentCount` fragments. Only reads the peer. -/
+connected, has no such channel, the packet is larger than
+`maximumPacketSize` or needs more than `maximumFragmentCount` fragments
+(ENet enet_peer_send). Only reads the peer. -/
 def sendError? (p : Peer) (channelId : UInt8) (packet : Packet) (hasChecksum : Bool := false) :
     Option LenetError :=
   let fragmentLength := p.maxFragmentPayload hasChecksum
   if p.state ≠ .connected then some (.peerNotConnected p.peerId)
   else if p.channels.size ≤ channelId.toNat then
     some (.invalidChannelId p.peerId channelId p.channels.size)
+  else if packet.data.size > Constants.maximumPacketSize then some (.packetTooLarge packet.data.size)
   else if packet.data.size > fragmentLength ∧
       (packet.data.size + fragmentLength - 1) / fragmentLength > Constants.maximumFragmentCount then
     some (.tooManyFragments packet.data.size)
