@@ -1,9 +1,10 @@
 # Open work
 
 Done so far: full ENet 1.3.x interop except compression (21 golden-trace
-scenarios and 12 live interop scenarios pass), the C distribution, and the
-proofs listed in [DESIGN.md](DESIGN.md#what-is-proven). What follows is
-what is left, roughly in priority order.
+scenarios, each recorded at three clock starts, and 12 live interop
+scenarios pass), the C distribution, and the proofs listed in
+[DESIGN.md](DESIGN.md#what-is-proven). What follows is what is left,
+roughly in priority order.
 
 ## Testing gaps
 
@@ -11,9 +12,6 @@ Several bugs fixed recently were invisible to the corpus: RTT samples broke
 after 65 s of uptime, retransmissions leaked in-transit bytes, the sender's
 reliable windows were never occupied. They share causes worth fixing:
 
-- **Clocks start at 0 and traces are short.** Replaying every trace with
-  the clock shifted (for example to just before the 2^32 ms wrap, and past
-  65 s) would exercise the wrap and 16-bit timestamp paths on real traffic.
 - **No loss.** A deterministic lossy link in the benchmark's in-process
   pair (drop every n-th datagram) would exercise retransmission, backoff
   and the window accounting, with the same "no packet lost or corrupted"

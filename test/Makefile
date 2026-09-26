@@ -4,7 +4,8 @@
 #   make               -> builds c/harness (the trace recorder)
 #   make c/interop     -> builds the live interop runner
 #   make interop       -> runs every interop scenario
-#   make traces        -> records all scenario traces into traces/
+#   make traces        -> records all scenario traces into traces/, once
+#                         with ENet's clock at 0 and once per CLOCK_OFFSETS
 #   make record SCENARIO=connect
 #   make clean
 
@@ -22,6 +23,10 @@ CFLAGS := -O1 -g -Wall -DHAS_FCNTL=1 -DHAS_POLL=1 -DHAS_GETADDRINFO=1 \
           -DHAS_SOCKLEN_T=1 -DHAS_MSGHDR_FLAGS=1 -I$(ENET_DIR)/include
 
 SCENARIOS := connect send_c2s send_s2c frag fragthen disc_client disc_server idle timeout checksum bandwidth unfrag disclater multip inject multichannel dup reconnect retimeout mtu576 throttleconf
+# ENet clock start times (ms) for the extra recordings: just before the
+# 16-bit sent-time wrap and just before the 32-bit clock wrap. Must match
+# Replay.clockOffsets.
+CLOCK_OFFSETS := 65203 4294966963
 INTEROP_SCENARIOS := connect connect_r send frag disconnect disconnect_r timeout checksum bandwidth disclater multip unfrag
 
 .PHONY: all traces record interop clean FORCE
@@ -50,7 +55,8 @@ c/interop: c/interop.c $(ENET_LIB) ../csrc/build/liblenet.a
 
 traces: $(HARNESS)
 	@mkdir -p traces
-	@for s in $(SCENARIOS); do ./$(HARNESS) record $$s; done
+	@for s in $(SCENARIOS); do ./$(HARNESS) record $$s; \
+	  for o in $(CLOCK_OFFSETS); do ./$(HARNESS) record $$s $$o; done; done
 
 record: $(HARNESS)
 	@mkdir -p traces

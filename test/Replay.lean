@@ -94,6 +94,8 @@ inductive Line where
   | api (ms : UInt32) (role : Role) (call : ApiCall)
   | ev (ms : UInt32) (role : Role) (e : ExpEvent)
   | dat (ms : UInt32) (dir : Dir) (bytes : ByteArray)
+  /-- ENet's clock at the start of the recording (`O <ms>`, absent for 0). -/
+  | offset (ms : UInt32)
   /-- Recording end marker (`T <ms>`): the harness pumped until this wall
   time; ENet was silent between the last recorded line and here. -/
   | end (ms : UInt32)
@@ -112,10 +114,11 @@ private def hexVal (c : Char) : Nat :=
   if c.isDigit then n - 48 else if n ≥ 97 then n - 87 else n - 55
 
 private def parseHex (s : String) : ByteArray :=
-  let cs := s.toList
-  let n := cs.length / 2
-  (List.range n).foldl (init := ByteArray.empty) fun acc i =>
-    acc.push (UInt8.ofNat (hexVal cs[2*i]! * 16 + hexVal cs[2*i+1]!))
+  go s.toList ByteArray.empty
+where
+  go : List Char → ByteArray → ByteArray
+    | hi :: lo :: rest, acc => go rest (acc.push (UInt8.ofNat (hexVal hi * 16 + hexVal lo)))
+    | _, acc => acc
 
 private def parseU16 (s : String) : UInt16 := (s.toNat? |>.getD 0).toUInt16
 private def parseU32 (s : String) : UInt32 := (s.toNat? |>.getD 0).toUInt32
@@ -210,6 +213,9 @@ def parseLine (s : String) : Option Line := do
   | "T" => do
       let msNat ← (ts[1]? >>= (·.toNat?))
       some (.end msNat.toUInt32)
+  | "O" => do
+      let msNat ← (ts[1]? >>= (·.toNat?))
+      some (.offset msNat.toUInt32)
   | _ => none
 
 def parseTrace (text : String) : Array Line :=
@@ -313,6 +319,10 @@ structure ReplayState where
   recordedConnectIds : List UInt32 := []
   /-- Address this role's client connects through (proxy or proxy2). -/
   connectAddr : Address := proxyAddr
+  /-- ENet's clock at the start of the recording (the trace's `O` line):
+  added to every time the host sees. The replay's own clock and the trace
+  times stay relative to the start. -/
+  offset : UInt32 := 0
 
 structure ReplayResult where
   role : Role
@@ -352,7 +362,7 @@ private def checkResourceBounds (h : Host) (st : ReplayState) : ReplayState :=
 private def service (st : ReplayState) (now : UInt32) : ReplayState :=
   if st.stoppedFlag then st
   else
-    let (h, outs, evs) := st.host.service now
+    let (h, outs, evs) := st.host.service (now + st.offset)
     collectOutgoing
       (checkResourceBounds h
         { st with host := h, now := max st.now now, events := st.events ++ evs }) outs
@@ -374,6 +384,9 @@ private def tickDeadlines (st : ReplayState) (ms : UInt32) : ReplayState :=
         match st.host.nextDeadline with
         | none => st
         | some d =>
+          -- back on the replay's clock; a deadline before the replay started
+          -- is overdue
+          let d := if d - st.offset ≥ 0x80000000 then 0 else d - st.offset
           if d ≥ ms then st
           else
             let t := max d (st.now + 1)
@@ -437,11 +450,12 @@ private def step (role : Role) (st : ReplayState) (line : Line) : ReplayState :=
           let st2 := service st' ms
           if st2.stoppedFlag then st2
           else
-            let (h, evs) := st2.host.handleDatagram ms (fromAddrOf dir) bytes
+            let (h, evs) := st2.host.handleDatagram (ms + st2.offset) (fromAddrOf dir) bytes
             service { st2 with host := h, events := st2.events ++ evs } ms
       else
         service (tickDeadlines st ms) ms
     | .end _ => st -- handled by tailService after the fold
+    | .offset _ => st -- read by replayRole
 
 def initialHost (scenario : String) (role : Role) : Host :=
   let (inBw, outBw, chl, mtu) := scenarioHostConfig scenario
@@ -483,9 +497,13 @@ private def tailService (st : ReplayState) (endMs : UInt32) : ReplayState :=
   else tickDeadlines st endMs
 
 def replayRole (scenario : String) (role : Role) (lines : Array Line) : ReplayResult :=
+  let offset := lines.findSome? (fun | .offset ms => some ms | _ => none) |>.getD 0
   let hasChecksum := scenarioChecksum scenario
-  let st0 := lines.foldl (step role) {
+  -- the harness pumps ENet from time 0, so its first service (which starts
+  -- the bandwidth-throttle epoch) happens then, not at the first trace line
+  let st0 := lines.foldl (step role) <| service (now := 0) {
     host := initialHost scenario role
+    offset
     decodeChecksummed := hasChecksum
     recordedConnectIds := if role == .server then [] else traceConnectIds hasChecksum role lines
     connectAddr := (roleAddrs role).1
@@ -571,18 +589,23 @@ private def cmdDiffOf (exp act : Array Protocol.Command) : Option (Nat × String
       else some s!"ENet:  {e}\n         lenet: {a}"
     | none, none => none
 
-private def replayAndReport (scenario : String) (lines : Array Line) : IO Bool := do
+/-- Replays every role of a scenario recorded with ENet's clock starting at
+`offset` and reports: each role on its own line for the unshifted
+recording, one line for all roles of a shifted one that passes. -/
+private def replayAndReport (scenario : String) (lines : Array Line) (offset : UInt32 := 0) :
+    IO Bool := do
   let results := [Role.client, Role.client2, Role.server].map (fun r => replayRole scenario r lines)
+  let shifted := if offset == 0 then "" else s!" @{offset}"
   let mut allOk := true
   for res in results do
-    let label := s!"{scenario}/{res.role.label}"
+    let label := s!"{scenario}/{res.role.label}{shifted}"
     let maxLen := res.emitted.foldl (init := 0) fun acc b => max acc b.size
     let sizeOk := maxLen ≤ 4096
     let eventDiff := eventDiffOf res.expEvents res.events
     let cmdDiff := cmdDiffOf res.expCmds res.outCmds
     let ok := eventDiff.isNone && cmdDiff.isNone && res.errors.isEmpty && res.expDecodeErrors.isEmpty && sizeOk
     if ok then
-      IO.println s!"  PASS {label}  (events={res.events.size}, commands={res.outCmds.size}, datagrams={res.emitted.size})"
+      if offset == 0 then IO.println s!"  PASS {label}  (events={res.events.size}, commands={res.outCmds.size}, datagrams={res.emitted.size})"
     else
       allOk := false
       IO.println s!"  FAIL {label}"
@@ -603,7 +626,14 @@ private def replayAndReport (scenario : String) (lines : Array Line) : IO Bool :
           let a := res.outCmds[i]?.map maskCmd |>.getD "—"
           IO.println s!"    [{i}] ENet:  {e}"
           IO.println s!"        lenet: {a}"
+  if allOk && offset != 0 then IO.println s!"  PASS {scenario}{shifted} (all roles)"
   pure allOk
+
+/-- ENet clock start times every scenario is recorded at (`<name>@<offset>`
+traces; test/Makefile `CLOCK_OFFSETS`). Traces are short, so from 0 they
+never reach the 16-bit sent-time wrap (65536 ms) or the 32-bit clock wrap;
+these starts put both inside every trace. -/
+def clockOffsets : Array UInt32 := #[0, 65536 - 333, 0 - 333]
 
 def scenarioNames : Array String :=
   #["connect", "send_c2s", "send_s2c", "frag", "fragthen", "disc_client",
@@ -619,12 +649,12 @@ def main (args : List String) : IO UInt32 := do
   let wanted := if args.length > 1 then (args.drop 1).toArray else scenarioNames
   let mut allOk := true
   for name in wanted do
-    let path := s!"{dir}/{name}.trace"
-    let text ← IO.FS.readFile path
-    let lines := parseTrace text
-    IO.println s!"{name} ({lines.size} trace lines)"
-    let ok ← replayAndReport name lines
-    if !ok then allOk := false
+    for offset in clockOffsets do
+      let path := if offset == 0 then s!"{dir}/{name}.trace" else s!"{dir}/{name}@{offset}.trace"
+      let lines := parseTrace (← IO.FS.readFile path)
+      if offset == 0 then IO.println s!"{name} ({lines.size} trace lines)"
+      let ok ← replayAndReport name lines offset
+      if !ok then allOk := false
   if allOk then
     IO.println "ALL PASS"
     return 0

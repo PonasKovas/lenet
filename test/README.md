@@ -7,7 +7,15 @@ C library, not against a spec. There are three parts:
    two clients) in one process and routes their UDP traffic through logging
    proxy sockets. Each scripted scenario is saved as a readable trace in
    `traces/`: the API calls (with the peer they act on), ENet's events, and
-   every datagram's bytes.
+   every datagram's bytes. Every scenario is recorded three times: with
+   ENet's clock starting at 0 (`<name>.trace`), and starting just before
+   the 16-bit sent-time wrap at 65536 ms and just before the 32-bit clock
+   wrap (`<name>@<start>.trace`, whose `O <start>` line gives the clock
+   start; trace times stay relative to it). The traces are only a few
+   seconds long, so without the shifted clocks they never reach either wrap.
+   On a shifted clock ENet really does behave differently. For example, a
+   client pings right after connecting, because `lastReceiveTime = 0`
+   stands for "nothing received yet".
 2. **Replayer** (`Replay.lean`, the `replay` executable). Feeds each trace
    into Lenet's `Host`, once per role, at the recorded times, applying the
    recorded API calls, and compares Lenet's events and outgoing commands
@@ -42,9 +50,11 @@ make -C test interop           # builds everything, runs all scenarios
 # re-record the traces (only when scenarios change; not byte-reproducible,
 # since recording uses the real clock and ENet's randomness)
 make -C test traces
+./test/c/harness record idle 65203   # one scenario, ENet's clock starting at 65203 ms
 ```
 
-Each scenario prints one PASS/FAIL line (per role for the replay); the exit
+Each scenario prints one PASS/FAIL line (per role for the replay, one line
+per shifted clock); the exit
 code is 0 only if all pass. The replay is fully deterministic: no sockets,
 no real time.
 

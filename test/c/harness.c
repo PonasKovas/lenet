@@ -733,8 +733,8 @@ static void hex_decode(const char *hex, unsigned char *out, size_t len) {
 }
 
 int main(int argc, char **argv) {
-    if (argc != 3 || strcmp(argv[1], "record") != 0) {
-        fprintf(stderr, "usage: harness record <scenario>\n"
+    if ((argc != 3 && argc != 4) || strcmp(argv[1], "record") != 0) {
+        fprintf(stderr, "usage: harness record <scenario> [clock-offset-ms]\n"
                         "scenarios: connect send_c2s send_s2c frag fragthen "
                         "disc_client disc_server idle timeout checksum "
                         "bandwidth unfrag disclater multip inject "
@@ -743,6 +743,8 @@ int main(int argc, char **argv) {
         return 1;
     }
     const char *want = argv[2];
+    /* ENet's clock starts here; trace times stay relative to the start */
+    enet_uint32 offset = argc == 4 ? (enet_uint32) strtoul(argv[3], NULL, 10) : 0;
 
     if (enet_initialize() != 0) {
         fprintf(stderr, "enet_initialize failed\n");
@@ -751,15 +753,20 @@ int main(int argc, char **argv) {
     payloads_init();
 
     char path[256];
-    snprintf(path, sizeof path, "traces/%s.trace", want);
+    if (offset == 0)
+        snprintf(path, sizeof path, "traces/%s.trace", want);
+    else
+        snprintf(path, sizeof path, "traces/%s@%u.trace", want, offset);
     trace_file = fopen(path, "w");
     if (trace_file == NULL) { perror("fopen"); return 1; }
 
     /* fixed script seed so traces are reproducible run-to-run */
-    enet_time_set(0);
+    enet_time_set(offset);
     clock_gettime(CLOCK_MONOTONIC, &t_start);
 
     fprintf(trace_file, "V lenet-trace-1\n");
+    if (offset != 0)
+        fprintf(trace_file, "O %u\n", offset);
 
     const Scenario *found = NULL;
     for (size_t i = 0; i < sizeof scenarios / sizeof scenarios[0]; i++)
