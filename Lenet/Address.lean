@@ -1,10 +1,8 @@
 namespace Lenet
 
-/--
-Portable Internet address structure representing an IPv4 endpoint.
-`host` is stored as a 32-bit integer in network byte order (little-endian octet layout in memory),
-and `port` is in host byte order.
--/
+/-- An IPv4 endpoint. `host` holds the address in network byte order (the
+first octet in the low byte, as ENet stores it); `port` is in host byte
+order. -/
 structure Address where
   host : UInt32 := 0
   port : UInt16 := 0

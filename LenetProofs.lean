@@ -1,5 +1,3 @@
--- Root of the `LenetProofs` library: formal proofs over the Lenet sans-I/O
--- core. See DESIGN.md 1.2 (invariants) and TODO.md Phase 2 (scope).
 import Lenet.Proofs.Codec
 import Lenet.Proofs.Roundtrip
 import Lenet.Proofs.Reassembly
@@ -9,3 +7,10 @@ import Lenet.Proofs.Deadline
 import Lenet.Proofs.Unsequenced
 import Lenet.Proofs.Panic
 import Lenet.Proofs.Resources
+
+/-!
+# LenetProofs
+
+Machine-checked properties of the Lenet core; DESIGN.md summarizes what is
+proven. A separate library, so the C distribution never compiles proofs.
+-/
