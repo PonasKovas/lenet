@@ -287,6 +287,31 @@ def hostTests : List Test := [
       expect (received p.serverEvents == #[(0, bytes 100 3)]) "queued packet not delivered first"
       expect (p.serverEvents.back? == some (.disconnect p.serverPeer 7)) "server saw no disconnect"
       expect (p.clientEvents.any (· matches .disconnect ..)) "client saw no disconnect" },
+  { name := "the throttle falls on an RTT spike, climbs back, and stops at its limit"
+    run := fun _ => do
+      let p : Peer := { (← serverPeer) with
+        lastRoundTripTime := 50, lastRoundTripTimeVariance := 5
+        packetThrottle := 32, packetThrottleLimit := 32
+        packetThrottleAcceleration := 2, packetThrottleDeceleration := 3 }
+      let steps : List UInt32 := [100, 100, 58, 40, 40, 40, 40]
+      let (_, seen) := steps.foldl (init := (p, (#[] : Array UInt32))) fun (p, seen) rtt =>
+        let p := p.throttle rtt
+        (p, seen.push p.packetThrottle)
+      -- above 50 + 2 * 5 falls by 3, within it holds, at or below 50 climbs by 2
+      expect (seen == #[29, 26, 26, 28, 30, 32, 32]) s!"throttle went {seen}"
+      let p := Peer.throttle { p with packetThrottle := 1 } 100
+      expect (p.packetThrottle == 0) "throttle did not floor at 0"
+      let p := Peer.throttle { p with lastRoundTripTime := 5, lastRoundTripTimeVariance := 5 } 100
+      expect (p.packetThrottle == 32) "a steady link did not reset the throttle to its limit" },
+  { name := "at a throttle of 8/32, 9 of 32 unreliable packets go out"
+    run := fun _ => do
+      let p ← connected
+      let p := { p with client := p.client.modifyPeer p.clientPeer fun peer =>
+        { peer with packetThrottle := 8, packetThrottleLimit := 8, packetThrottleCounter := 0 } }
+      let p ← (List.range 32).foldlM (init := p) fun p _ => send p (pkt 10 .unreliable)
+      let p := p.rounds 5
+      let got := (received p.serverEvents).size
+      expect (got == 9) s!"{got} of 32 delivered" },
   { name := "service before nextDeadline does nothing; at it, the resend goes out"
     run := fun _ => do
       let p := (← send (← connected) (pkt 100)).round dropAll
