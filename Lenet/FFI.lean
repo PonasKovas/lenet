@@ -60,8 +60,12 @@ def hostConnect (ctx : HostRef) (ip : UInt32) (port : UInt16) (channelCount : US
 def hostSend (ctx : HostRef) (peerId : UInt16) (channelId : UInt8) (flags : UInt32) (data : ByteArray) :
     IO Int32 := do
   let packet : Packet := { data, delivery := DeliveryMode.fromFlags flags }
-  let sent ← tryModifyHost ctx fun h => (h.send peerId channelId packet).map ((·, ()))
-  return if sent.isSome then 0 else -1
+  -- `trySend` hands the host back even on error, so the context is never
+  -- held twice and the host updates in place
+  let sent ← ctx.modifyGet fun c =>
+    let (host, result) := c.host.trySend peerId channelId packet
+    (result, { c with host })
+  return if sent matches .ok () then 0 else -1
 
 @[export lenet_ffi_host_broadcast]
 def hostBroadcast (ctx : HostRef) (channelId : UInt8) (flags : UInt32) (data : ByteArray) : IO Unit :=

@@ -211,27 +211,46 @@ def packetCommand (p : Peer) (channel : Channel) (channelId : UInt8) (packet : P
       { channelId, reliableSequenceNumber := 0, unsequenced := true,
         body := .sendUnsequenced group packet.data })
 
-/-- Queues `packet` on `channelId` (ENet enet_peer_send). Packets larger
-than `maxFragmentPayload` are split into fragments: reliable ones unless the
-packet explicitly allows unreliable fragmentation. -/
-def send (p : Peer) (channelId : UInt8) (packet : Packet) (hasChecksum : Bool := false) :
-    Except LenetError Peer := do
-  if p.state ≠ .connected then
-    throw (.peerNotConnected p.peerId)
-  let some channel := p.channels[channelId.toNat]?
-    | throw (.invalidChannelId p.peerId channelId p.channels.size)
+/-- Why `send` refuses `packet` on `channelId`, if it does: the peer is not
+connected, has no such channel, or the packet needs more than
+`maximumFragmentCount` fragments. Only reads the peer. -/
+def sendError? (p : Peer) (channelId : UInt8) (packet : Packet) (hasChecksum : Bool := false) :
+    Option LenetError :=
   let fragmentLength := p.maxFragmentPayload hasChecksum
-  if packet.data.size > fragmentLength then
-    let fragmentCount := (packet.data.size + fragmentLength - 1) / fragmentLength
-    if fragmentCount > Constants.maximumFragmentCount then
-      throw (.tooManyFragments packet.data.size)
-    let (channel, fragments) := fragmentCommands channel channelId packet fragmentLength fragmentCount
-    return fragments.foldl queueOutgoingCommand
+  if p.state ≠ .connected then some (.peerNotConnected p.peerId)
+  else if p.channels.size ≤ channelId.toNat then
+    some (.invalidChannelId p.peerId channelId p.channels.size)
+  else if packet.data.size > fragmentLength ∧
+      (packet.data.size + fragmentLength - 1) / fragmentLength > Constants.maximumFragmentCount then
+    some (.tooManyFragments packet.data.size)
+  else none
+
+/-- Queues `packet` on `channelId` (ENet enet_peer_send), once `sendError?`
+has accepted it; a channel the peer does not have leaves it unchanged.
+Packets larger than `maxFragmentPayload` are split into fragments: reliable
+ones unless the packet explicitly allows unreliable fragmentation. -/
+def enqueue (p : Peer) (channelId : UInt8) (packet : Packet) (hasChecksum : Bool := false) : Peer :=
+  match p.channels[channelId.toNat]? with
+  | none => p
+  | some channel =>
+    let fragmentLength := p.maxFragmentPayload hasChecksum
+    if packet.data.size > fragmentLength then
+      let fragmentCount := (packet.data.size + fragmentLength - 1) / fragmentLength
+      let (channel, fragments) := fragmentCommands channel channelId packet fragmentLength fragmentCount
+      fragments.foldl queueOutgoingCommand
+        { p with channels := p.channels.setIfInBounds channelId.toNat channel }
+    else
+      let (p, channel, cmd) := p.packetCommand channel channelId packet
       { p with channels := p.channels.setIfInBounds channelId.toNat channel }
-  else
-    let (p, channel, cmd) := p.packetCommand channel channelId packet
-    return { p with channels := p.channels.setIfInBounds channelId.toNat channel }
-      |>.queueOutgoingCommand { command := cmd, fragmentLength := packet.data.size }
+        |>.queueOutgoingCommand { command := cmd, fragmentLength := packet.data.size }
+
+/-- Queues `packet` on `channelId` (`enqueue`), or says why not
+(`sendError?`). -/
+def send (p : Peer) (channelId : UInt8) (packet : Packet) (hasChecksum : Bool := false) :
+    Except LenetError Peer :=
+  match p.sendError? channelId packet hasChecksum with
+  | some e => .error e
+  | none => .ok (p.enqueue channelId packet hasChecksum)
 
 /-! ## Round-trip time and throttle -/
 

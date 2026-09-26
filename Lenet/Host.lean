@@ -161,14 +161,20 @@ def connect (h : Host) (remoteAddress : Address) (channelCount : Nat := 2) (data
   }.queueControlCommand (.connect params data)
   return (h.modifyPeer p.peerId fun _ => p, p.peerId)
 
-/-- Queues `packet` for peer `peerId` on `channelId`. -/
-def send (h : Host) (peerId : UInt16) (channelId : UInt8) (packet : Packet) : Except LenetError Host :=
+/-- Queues `packet` for peer `peerId` on `channelId`, or says why not; the
+host comes back either way (unchanged on error), so a caller never needs to
+keep the old one and the update stays in place. -/
+def trySend (h : Host) (peerId : UInt16) (channelId : UInt8) (packet : Packet) :
+    Host × Except LenetError Unit :=
   let checksumEnabled := h.checksumEnabled
-  let (h, result) := h.withPeer (α := Except LenetError Unit) peerId.toNat
-    (.error (.invalidPeerId peerId)) fun p =>
-    match p.send channelId packet checksumEnabled with
-    | .ok p => (p, .ok ())
-    | .error e => (p, .error e)
+  h.withPeer peerId.toNat (.error (.invalidPeerId peerId)) fun p =>
+    match p.sendError? channelId packet checksumEnabled with
+    | some e => (p, .error e)
+    | none => (p.enqueue channelId packet checksumEnabled, .ok ())
+
+/-- Queues `packet` for peer `peerId` on `channelId` (`trySend`). -/
+def send (h : Host) (peerId : UInt16) (channelId : UInt8) (packet : Packet) : Except LenetError Host :=
+  let (h, result) := h.trySend peerId channelId packet
   result.map fun () => h
 
 /-- Queues `packet` for every connected peer. Peers whose send fails (e.g. a
@@ -176,10 +182,8 @@ channel they do not have) are skipped, as ENet's enet_host_broadcast does. -/
 def broadcast (h : Host) (channelId : UInt8) (packet : Packet) : Host :=
   let checksumEnabled := h.checksumEnabled
   (h.mapPeers () fun p () =>
-    if p.state == .connected then
-      match p.send channelId packet checksumEnabled with
-      | .ok p => (p, ())
-      | .error _ => (p, ())
+    if p.state == .connected && (p.sendError? channelId packet checksumEnabled).isNone then
+      (p.enqueue channelId packet checksumEnabled, ())
     else (p, ())).1
 
 /-- Starts a graceful disconnect of `peerId`, sending `data` with it. -/

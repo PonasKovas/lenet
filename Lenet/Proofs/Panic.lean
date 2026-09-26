@@ -35,8 +35,9 @@ sites (all divisors are compile-time constants or guarded):
    `isEmpty` check) and the in-transit bytes (divided only when they exceed
    the per-peer share, so positive); `Host.incomingBandwidthShare` - the
    remaining-peer count (guarded by the `== 0` check).
-6. `Peer.send` - divisor `Peer.maxFragmentPayload` (positive: MTU minus
-   overhead when that is positive, else the constant 500).
+6. `Peer.sendError?` / `Peer.enqueue` - divisor `Peer.maxFragmentPayload`
+   (positive: MTU minus overhead when that is positive, else the constant
+   500).
 7. `Peer.updateRtt` - divisors 4, 8, 2 (literals).
 8. `Checksum`/codec/reassembly paths contain no divisions.
 -/
@@ -98,7 +99,7 @@ they exceed the per-peer share. -/
 theorem divInTransit {inTransit share : UInt32} (h : ¬ inTransit ≤ share) : inTransit ≠ 0 := by
   intro h0; subst h0; exact h (UInt32.zero_le)
 
-/-- Site 6: `Peer.send`'s fragment length is positive. -/
+/-- Site 6: the fragment length `sendError?` and `enqueue` divide by is positive. -/
 theorem divFragmentLength (p : Peer) (hasChecksum : Bool) : p.maxFragmentPayload hasChecksum ≠ 0 := by
   unfold Peer.maxFragmentPayload
   generalize 4 + 24 + (if hasChecksum then 4 else 0) = overhead

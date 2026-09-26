@@ -616,21 +616,31 @@ theorem packetCommand_channels (p : Peer) (c : Channel) (channelId : UInt8) (pac
   split <;> rfl
 
 /-- Queuing a packet only renumbers the channel's outgoing side. -/
+theorem enqueue_peerStagedInv {p : Peer} (h : PeerStagedInv p) (channelId : UInt8)
+    (packet : Packet) (hasChecksum : Bool) : PeerStagedInv (p.enqueue channelId packet hasChecksum) := by
+  unfold Peer.enqueue
+  split
+  · exact h
+  · next channel hget =>
+    have hmem := Array.mem_of_getElem? hget
+    dsimp only
+    split
+    all_goals
+      intro ch hch
+      simp only [foldl_queueOutgoingCommand_channels, queueOutgoingCommand_channels,
+        packetCommand_channels] at hch
+      refine setIfInBounds_stagedReliableInv h _ ?_ ch hch
+      first
+        | exact fragmentCommands_stagedReliableInv (h _ hmem) ..
+        | exact packetCommand_stagedReliableInv _ (h _ hmem) ..
+
 theorem send_peerStagedInv {p p' : Peer} (h : PeerStagedInv p) {channelId : UInt8} {packet : Packet}
     {hasChecksum : Bool} (hs : p.send channelId packet hasChecksum = .ok p') : PeerStagedInv p' := by
   unfold Peer.send at hs
-  simp only [bind, Except.bind, pure, Except.pure] at hs
-  repeat' split at hs
-  all_goals cases hs
-  all_goals
-    intro ch hch
-    simp only [foldl_queueOutgoingCommand_channels, queueOutgoingCommand_channels,
-      packetCommand_channels] at hch
-    have hmem := Array.mem_of_getElem? ‹p.channels[channelId.toNat]? = some _›
-    refine setIfInBounds_stagedReliableInv h _ ?_ ch hch
-    first
-      | exact fragmentCommands_stagedReliableInv (h _ hmem) ..
-      | exact packetCommand_stagedReliableInv _ (h _ hmem) ..
+  split at hs
+  · cases hs
+  · cases hs
+    exact enqueue_peerStagedInv h _ _ _
 
 theorem packAck_channels (mtu : UInt32) (st : Host.PackState) (ack : Acknowledgement) :
     (Host.PackState.packAck mtu st ack).channels = st.channels := by

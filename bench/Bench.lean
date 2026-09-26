@@ -133,10 +133,10 @@ structure RunResult where
 queued (send can fail only if the harness itself is broken). -/
 private def sendBatch (h : Host) (peer : UInt16) (ch : UInt8) (mode : DeliveryMode)
     (payload : ByteArray) (n : Nat) : Host × Nat :=
-  (List.range n).foldl (init := (h, 0)) fun acc _ =>
-    match acc.1.send peer ch { data := payload, delivery := mode } with
-    | .ok h' => (h', acc.2 + 1)
-    | .error _ => (acc.1, acc.2)
+  (List.range n).foldl (init := (h, 0)) fun (h, sent) _ =>
+    match h.trySend peer ch { data := payload, delivery := mode } with
+    | (h, .ok ()) => (h, sent + 1)
+    | (h, .error _) => (h, sent)
 
 /-- One throughput run: `batches` batches of `batchSize` packets, each
 batch fully pumped at 50 ms simulated-clock steps. `seed` offsets the
@@ -330,9 +330,9 @@ private def lossyRun (mode : DeliveryMode) (template : ByteArray) (batches batch
           let (client, sentNow) := (List.range batchSize).foldl (init := (client, 0))
             fun (h, n) i =>
               let pkt := { data := taggedPayload template (b * batchSize + i), delivery := mode }
-              match h.send clientPeer 0 pkt with
-              | .ok h => (h, n + 1)
-              | .error _ => (h, n)
+              match h.trySend clientPeer 0 pkt with
+              | (h, .ok ()) => (h, n + 1)
+              | (h, .error _) => (h, n)
           let (p, now, st) :=
             settleLossy dropEvery template 100000 { client, server, clientPeer, serverPeer } now st
           (p, now, sent + sentNow, st)
