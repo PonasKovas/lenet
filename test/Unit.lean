@@ -215,7 +215,17 @@ def fragmentValidationTests : List Test := [
       expect (!reading && evs.isEmpty) "mismatched fragment taken"
       expect (q.acknowledgements.size == peer.acknowledgements.size) "mismatched fragment acknowledged"
       let (_, evs) := feed peer [relFrag 0 1 5 2 1]
-      expect (evs.size == 1) "the set no longer completes" } ]
+      expect (evs.size == 1) "the set no longer completes" },
+  { name := "a receiver assembles packets up to ENet's 32 MB"
+    run := fun _ => do
+      let peer ← serverPeer
+      let set (total : Nat) : Protocol.Command :=
+        let cmd := relFrag 0 1 5 2 0
+        { cmd with body := .sendFragment { fragParams 1 5 2 0 with totalLength := total.toUInt32 } }
+      let (q, _, reading) := peer.handleCommand 2000 (set (5 * 1024 * 1024)) (some 0)
+      expect (reading && q.fragmentAssemblers.size == 1) "a 5 MB set was refused"
+      let (q, _, reading) := peer.handleCommand 2000 (set (Constants.maximumPacketSize + 1)) (some 0)
+      expect (!reading && q.fragmentAssemblers.isEmpty) "a set over 32 MB was taken" } ]
 
 def deliveredGroups (p : Peer) (groups : List UInt16) : List UInt16 :=
   let (_, delivered) := groups.foldl (init := (p, [])) fun (p, acc) g =>

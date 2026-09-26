@@ -272,9 +272,9 @@ compatibility"). Open, undecided differences are listed in TODO.md.
   enet_peer_send refuses packets over `host->maximumPacketSize` (32 MB by
   default). Lenet only capped the fragment count, which allows about
   1.4 GB. `Peer.sendError?` now refuses packets over 32 MB
-  (`packetTooLarge`). A Lenet receiver still assembles at most 4 MB (a
-  resource cap, DESIGN.md), so a larger reliable packet sent to Lenet is
-  never acknowledged.
+  (`packetTooLarge`), and a Lenet receiver assembles up to the same 32 MB
+  (it capped at 4 MB before, so a larger reliable packet between two Lenet
+  hosts was never acknowledged).
 - **Client's connect event data (lenet bug - fixed).** ENet's client
   reports its connect event with data 0: enet_host_connect puts the data in
   the CONNECT and leaves the peer's eventData at its reset value. Lenet

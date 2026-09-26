@@ -130,7 +130,7 @@ Memory an attacker can make a host hold is bounded:
 
 - **Fragment assemblers:** at most `maximumFragmentAssemblers` (32) per peer
   are in progress. Each one allocates its full packet up front, capped by
-  the validated total length (4 MB) and a fragment count of at most
+  the validated total length (32 MB, ENet's `maximumPacketSize`) and a fragment count of at most
   `maximumReceivedFragmentCount` (65536). ENet has no such cap. When it is
   full, a new set evicts the oldest unreliable one; if all 32 are reliable,
   the fragment is dropped without an ACK, so the sender retransmits it

@@ -43,7 +43,7 @@ def copyBytes (dst : ByteArray) (dstOffset : Nat) (src : ByteArray) : ByteArray 
 Initializes a new `FragmentAssembler` for a fragmented packet.
 Performs strict validation on fragment parameters to prevent memory overruns.
 -/
-def init (startSequenceNumber : UInt16) (totalLength : Nat) (fragmentCount : Nat) (maxPacketSize : Nat := Constants.maximumMtu * 1024) : Except CodecError FragmentAssembler := do
+def init (startSequenceNumber : UInt16) (totalLength : Nat) (fragmentCount : Nat) (maxPacketSize : Nat := Constants.maximumPacketSize) : Except CodecError FragmentAssembler := do
   if fragmentCount == 0 then
     throw (CodecError.custom "Fragment count must be greater than 0")
   if fragmentCount > Constants.maximumFragmentCount then

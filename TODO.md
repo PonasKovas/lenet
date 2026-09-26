@@ -41,11 +41,8 @@ Done this session:
   data (0, as ENet; the live `connect` scenario expected the old value),
   the 32 MB send limit, header bytes, and fragment validation. Four ENet
   quirks are recorded as not copied.
-- Open design question: a Lenet receiver assembles at most 4 MB (a
-  resource cap), while its sender now takes up to ENet's 32 MB, so a
-  reliable packet of 4-32 MB between two Lenet hosts is never acknowledged
-  and the connection times out. Either the sender refuses above 4 MB (and
-  Lenet-to-ENet loses 4-32 MB packets), or the receiver cap goes up.
+- Receiver cap raised to ENet's 32 MB (was 4 MB), the user's call, so
+  sender and receiver agree.
 - A proof hazard worth knowing: never let the kernel compare `h` with a
   host whose `randomSeed` was advanced (`h.randomSeed + 0x6D2B79F5`). It
   unfolds the addition one successor at a time, with no heartbeat limit,

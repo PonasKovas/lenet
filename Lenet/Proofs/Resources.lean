@@ -22,7 +22,7 @@ The attacker-controlled memory surfaces and their bounds:
    keeps `Proofs.Inv` (Proofs/Reassembly.lean) and those bounds, and the cap holds
    (`AssemblersOk`, `handleFragment_assemblersOk`,
    `assemblerOk_footprint`). Worst-case attacker-triggered footprint per
-   peer: `cap × (maximumMtu * 1024 + maximumReceivedFragmentCount)` - a
+   peer: `cap × (maximumPacketSize + maximumReceivedFragmentCount)` - a
    constant, not a function of attack duration.
 2. **Staged reliable packets** (`Channel.stagedReliable`): at most
    `(freeReliableWindows - 1) * reliableWindowSize` per channel
@@ -734,7 +734,7 @@ theorem init_shape {ssn : UInt16} {tl fc m : Nat} {a : FragmentAssembler}
 /-- One assembler: the reassembly invariant, and the allocation bounds its
 creation enforced. -/
 def AssemblerOk (a : FragmentAssembler) : Prop :=
-  Inv a ∧ a.totalLength ≤ Constants.maximumMtu * 1024 ∧
+  Inv a ∧ a.totalLength ≤ Constants.maximumPacketSize ∧
     a.fragmentCount ≤ Constants.maximumReceivedFragmentCount
 
 theorem addFragment_ok {a a' : FragmentAssembler} {n off : Nat} {d : ByteArray}
@@ -874,10 +874,10 @@ theorem receiveOnChannel_assemblersOk {p : Peer} (h : AssemblersOk p) (channelId
 theorem assemblersOk_reset (p : Peer) : AssemblersOk p.reset := by
   simp [AssemblersOk, Peer.reset, Constants.maximumFragmentAssemblers]
 
-/-- Each assembler's memory: at most `maximumMtu * 1024` buffer bytes and
+/-- Each assembler's memory: at most `maximumPacketSize` buffer bytes and
 `maximumReceivedFragmentCount` bitset slots. -/
 theorem assemblerOk_footprint {a : FragmentAssembler} (h : AssemblerOk a) :
-    a.buffer.size ≤ Constants.maximumMtu * 1024 ∧
+    a.buffer.size ≤ Constants.maximumPacketSize ∧
       a.received.size ≤ Constants.maximumReceivedFragmentCount := by
   obtain ⟨⟨hr, hb, -⟩, htl, hfc⟩ := h
   exact ⟨hb ▸ htl, hr ▸ hfc⟩
