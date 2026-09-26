@@ -81,11 +81,14 @@ datagrams into the other host. Returns whether anything was emitted
 (the quiescence signal for `pump`). -/
 private def pumpOnce (p : BenchPair) (now : UInt32) (payload : ByteArray)
     (st : PumpStats) : BenchPair × PumpStats × Bool :=
-  let (c, couts, cevs) := p.client.service now
-  let (s, souts, _sevs) := p.server.service now
+  -- take the hosts out of the pair so each is held once and updates in
+  -- place, as through the C API
+  let { client, server, clientPeer, serverPeer } := p
+  let (c, couts, cevs) := client.service now
+  let (s, souts, _sevs) := server.service now
   let (s2, st1) := feed s now clientAddr couts payload st
   let (c2, st2) := feed c now serverAddr souts payload st1
-  ({ p with client := c2, server := s2 }, countEvs cevs payload st2,
+  ({ client := c2, server := s2, clientPeer, serverPeer }, countEvs cevs payload st2,
     couts.size + souts.size > 0)
 
 /-- Pumps until the pair is quiescent (a round with no emitted datagrams),
@@ -149,8 +152,9 @@ where
   go : Nat → BenchPair → UInt32 → PumpStats → Nat → Bool → RunResult
     | 0, _, _, st, sent, failed => { sent, received := st.received, bad := st.bad, sendFailed := failed }
     | b + 1, p, now, st, sent, failed =>
-      let (client, sentNow) := sendBatch p.client p.clientPeer 0 mode payload batchSize
-      let (p1, st1) := pump { p with client } now payload st
+      let { client, server, clientPeer, serverPeer } := p
+      let (client, sentNow) := sendBatch client clientPeer 0 mode payload batchSize
+      let (p1, st1) := pump { client, server, clientPeer, serverPeer } now payload st
       go b p1 (now + 50) st1 (sent + sentNow)
         (failed ∨ sentNow ≠ batchSize)
 
@@ -202,8 +206,9 @@ where
   go : Nat → BenchPair → UInt32 → PumpStats → Nat → Bool → RunResult
     | 0, _, _, st, sent, failed => { sent, received := st.received, bad := st.bad, sendFailed := failed }
     | b + 1, p, now, st, sent, failed =>
-      let (client, sentNow) := sendBatch p.client p.clientPeer 0 .reliable (mkPayload 1200) batchSize
-      let (p1, st1) := pump { p with client } now (mkPayload 1200) st
+      let { client, server, clientPeer, serverPeer } := p
+      let (client, sentNow) := sendBatch client clientPeer 0 .reliable (mkPayload 1200) batchSize
+      let (p1, st1) := pump { client, server, clientPeer, serverPeer } now (mkPayload 1200) st
       go b p1 (now + 50) st1 (sent + sentNow) (failed ∨ sentNow ≠ batchSize)
 
 /-! ## Lossy-link scenarios
@@ -283,12 +288,13 @@ private def settleLossy (dropEvery : Nat) (template : ByteArray) :
     Nat → BenchPair → UInt32 → LossyStats → BenchPair × UInt32 × LossyStats
   | 0, p, now, st => (p, now, st)
   | fuel + 1, p, now, st =>
-    let (c, couts, cevs) := p.client.service now
-    let (s, souts, sevs) := p.server.service now
+    let { client, server, clientPeer, serverPeer } := p
+    let (c, couts, cevs) := client.service now
+    let (s, souts, sevs) := server.service now
     let st := countLossyEvs template (cevs ++ sevs) st
     let (s, st) := feedLossy dropEvery template s now clientAddr couts st
     let (c, st) := feedLossy dropEvery template c now serverAddr souts st
-    let p := { p with client := c, server := s }
+    let p := { client := c, server := s, clientPeer, serverPeer }
     if st.disconnects > 0 then (p, now, st)
     else if couts.size + souts.size > 0 then settleLossy dropEvery template fuel p (now + 1) st
     else if drained p then (p, now, st)
@@ -320,13 +326,15 @@ private def lossyRun (mode : DeliveryMode) (template : ByteArray) (batches batch
       fun (p, now, sent, st) b =>
         if st.disconnects > 0 then (p, now, sent, st)
         else
-          let (client, sentNow) := (List.range batchSize).foldl (init := (p.client, 0))
+          let { client, server, clientPeer, serverPeer } := p
+          let (client, sentNow) := (List.range batchSize).foldl (init := (client, 0))
             fun (h, n) i =>
               let pkt := { data := taggedPayload template (b * batchSize + i), delivery := mode }
-              match h.send p.clientPeer 0 pkt with
+              match h.send clientPeer 0 pkt with
               | .ok h => (h, n + 1)
               | .error _ => (h, n)
-          let (p, now, st) := settleLossy dropEvery template 100000 { p with client } now st
+          let (p, now, st) :=
+            settleLossy dropEvery template 100000 { client, server, clientPeer, serverPeer } now st
           (p, now, sent + sentNow, st)
     { sent, stats := st, elapsed := (now - now0).toNat
       clean := drained p ∧ clean p.client p.clientPeer ∧ clean p.server p.serverPeer }
