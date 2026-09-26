@@ -23,7 +23,9 @@ The attacker-controlled memory surfaces and their bounds:
    (`AssemblersOk`, `handleFragment_assemblersOk`,
    `assemblerOk_footprint`). Worst-case attacker-triggered footprint per
    peer: `cap × (maximumPacketSize + maximumReceivedFragmentCount)` - a
-   constant, not a function of attack duration.
+   constant, not a function of attack duration. In bytes held, tighter:
+   under `maximumWaitingData + maximumPacketSize` (`handleFragment_waiting`,
+   `waitingOk_footprint`), ENet's budget.
 2. **Staged reliable packets** (`Channel.stagedReliable`): at most
    `(freeReliableWindows - 1) * reliableWindowSize` per channel
    (`stagedReliableInv_size`), whatever the sender does. The receive-window
@@ -710,7 +712,8 @@ theorem peerStagedInv_size {p : Peer} (h : PeerStagedInv p) :
 /-! ## Every assembler, per peer
 
 The writers of `Peer.fragmentAssemblers` are `Peer.handleFragment` and
-`Peer.receiveOnChannel` (pruning); `Peer.reset` clears it. -/
+`Peer.receiveOnChannel` (pruning); `Peer.reset` and `Peer.resetQueues`
+clear it. -/
 
 open Peer FragmentAssembler
 
@@ -885,5 +888,235 @@ theorem assemblerOk_footprint {a : FragmentAssembler} (h : AssemblerOk a) :
       a.received.size ≤ Constants.maximumReceivedFragmentCount := by
   obtain ⟨⟨hr, hb, -⟩, htl, hfc⟩ := h
   exact ⟨hb ▸ htl, hr ▸ hfc⟩
+
+/-! ## The waiting-data budget
+
+ENet's `maximumWaitingData`: `absorbFragment` starts no set once the
+assemblers hold that many bytes, so they never hold more than one packet
+beyond it. Replacing a set's assembler in place keeps the count, because
+the assemblers of one set agree on its length (`SetsAgree`: a set gets a
+new assembler only when it has none). -/
+
+theorem waitingBytes_eq (xs : Array FragmentAssembler) :
+    waitingBytes xs = (xs.toList.map (·.totalLength)).sum := by
+  unfold waitingBytes
+  rw [← Array.foldl_toList]
+  suffices ∀ (l : List FragmentAssembler) (n : Nat),
+      l.foldl (fun n a => n + a.totalLength) n = n + (l.map (·.totalLength)).sum by
+    simpa using this xs.toList 0
+  intro l
+  induction l with
+  | nil => intro n; simp
+  | cons a l ih => intro n; simp [ih]; omega
+
+theorem waitingBytes_push (xs : Array FragmentAssembler) (a : FragmentAssembler) :
+    waitingBytes (xs.push a) = waitingBytes xs + a.totalLength := by
+  simp [waitingBytes_eq]
+
+theorem waitingBytes_filter (xs : Array FragmentAssembler) (f : FragmentAssembler → Bool) :
+    waitingBytes (xs.filter f) ≤ waitingBytes xs := by
+  simp only [waitingBytes_eq, Array.toList_filter]
+  induction xs.toList with
+  | nil => simp
+  | cons a l ih => by_cases h : f a <;> simp [h] <;> omega
+
+theorem waitingBytes_map (xs : Array FragmentAssembler) (f : FragmentAssembler → FragmentAssembler)
+    (hf : ∀ a ∈ xs, (f a).totalLength = a.totalLength) : waitingBytes (xs.map f) = waitingBytes xs := by
+  simp only [waitingBytes_eq, Array.toList_map, List.map_map]
+  congr 1
+  apply List.map_congr_left
+  intro a ha
+  exact hf a (Array.mem_toList_iff.mp ha)
+
+/-- Assemblers of one set agree on its total length. -/
+def SetsAgree (xs : Array FragmentAssembler) : Prop :=
+  ∀ a ∈ xs, ∀ b ∈ xs, a.origin = b.origin → a.startSequenceNumber = b.startSequenceNumber →
+    a.totalLength = b.totalLength
+
+theorem SetsAgree.filter {xs : Array FragmentAssembler} (h : SetsAgree xs) (f : FragmentAssembler → Bool) :
+    SetsAgree (xs.filter f) := fun a ha b hb =>
+  h a (Array.mem_of_mem_filter ha) b (Array.mem_of_mem_filter hb)
+
+/-- The budget: what the assemblers hold stays below `maximumWaitingData`
+plus one packet. -/
+def WaitingOk (xs : Array FragmentAssembler) : Prop :=
+  SetsAgree xs ∧ waitingBytes xs < Constants.maximumWaitingData + Constants.maximumPacketSize
+
+theorem WaitingOk.filter {xs : Array FragmentAssembler} (h : WaitingOk xs) (f : FragmentAssembler → Bool) :
+    WaitingOk (xs.filter f) :=
+  ⟨h.1.filter f, Nat.lt_of_le_of_lt (waitingBytes_filter xs f) h.2⟩
+
+theorem init_start {ssn : UInt16} {tl fc m : Nat} {a : FragmentAssembler}
+    (h : FragmentAssembler.init ssn tl fc m = .ok a) : a.startSequenceNumber = ssn := by
+  unfold FragmentAssembler.init at h
+  simp only [bind, Except.bind, pure, Except.pure] at h
+  repeat' split at h
+  all_goals cases h
+  all_goals rfl
+
+theorem addFragment_key {a a' : FragmentAssembler} {n off : Nat} {d : ByteArray}
+    {r : Option ByteArray} (h : a.addFragment n off d = .ok (a', r)) :
+    a'.origin = a.origin ∧ a'.startSequenceNumber = a.startSequenceNumber ∧ a'.totalLength = a.totalLength := by
+  unfold FragmentAssembler.addFragment at h
+  simp only [bind, Except.bind, pure, Except.pure] at h
+  repeat' split at h
+  all_goals cases h
+  all_goals exact ⟨rfl, rfl, rfl⟩
+
+/-- Absorbing a fragment keeps the budget, and hands back an assembler of the
+set that is in the array. -/
+theorem absorbFragment_waiting {xs : Array FragmentAssembler} (hxs : WaitingOk xs)
+    (origin : FragmentOrigin) (params : Protocol.FragmentParams) :
+    WaitingOk (absorbFragment xs origin params).1 ∧
+      ∀ a, (absorbFragment xs origin params).2 = some a →
+        a ∈ (absorbFragment xs origin params).1 ∧ a.origin = origin ∧
+          a.startSequenceNumber = params.startSequenceNumber := by
+  unfold absorbFragment
+  split
+  · next asm hfind =>
+    refine ⟨hxs, fun a ha => ?_⟩
+    cases ha
+    have hp := Array.find?_some hfind
+    simp only [Bool.and_eq_true, beq_iff_eq] at hp
+    exact ⟨Array.mem_of_find?_eq_some hfind, hp.1, hp.2⟩
+  · next hfind =>
+    split
+    · exact ⟨hxs, fun a ha => by cases ha⟩
+    · split
+      · exact ⟨hxs, fun a ha => by cases ha⟩
+      · next room hroom =>
+        split
+        · exact ⟨hxs, fun a ha => by cases ha⟩
+        · next hbudget =>
+          split
+          · next newAsm hinit =>
+            have htl := (init_bounds hinit).2.1
+            have hts := (init_shape hinit).1
+            have hstart := init_start hinit
+            have hnone : ∀ b ∈ xs, ¬(b.origin = origin ∧ b.startSequenceNumber = params.startSequenceNumber) := by
+              intro b hb hk
+              have := Array.find?_eq_none.mp hfind b hb
+              simp [hk] at this
+            refine ⟨⟨?_, ?_⟩, fun a ha => ?_⟩
+            · intro a ha b hb ho hs
+              rcases Array.mem_push.mp ha with ha | rfl <;> rcases Array.mem_push.mp hb with hb | rfl
+              · exact hxs.1 a (assemblerRoom_sub hroom a ha) b (assemblerRoom_sub hroom b hb) ho hs
+              · exact absurd ⟨ho, hs.trans hstart⟩ (hnone a (assemblerRoom_sub hroom a ha))
+              · exact absurd ⟨ho.symm, hs.symm.trans hstart⟩ (hnone b (assemblerRoom_sub hroom b hb))
+              · rfl
+            · rw [waitingBytes_push]
+              show waitingBytes room + newAsm.totalLength < _
+              omega
+            · cases ha
+              exact ⟨Array.mem_push_self, rfl, hstart⟩
+          · exact ⟨hxs, fun a ha => by cases ha⟩
+
+/-- Delivering keeps the budget when the updated assembler belongs to the set
+and keeps its length: every assembler of the set it replaces has that
+length too (`SetsAgree`). -/
+theorem assemblerArrayAfterDeliver_waiting {xs : Array FragmentAssembler} (hxs : WaitingOk xs)
+    (origin : FragmentOrigin) (params : Protocol.FragmentParams)
+    {result : Option (Except CodecError (FragmentAssembler × Option ByteArray))}
+    (hres : ∀ u r, result = some (.ok (u, r)) →
+      u.origin = origin ∧ u.startSequenceNumber = params.startSequenceNumber ∧
+        ∃ a ∈ xs, a.origin = origin ∧ a.startSequenceNumber = params.startSequenceNumber ∧
+          a.totalLength = u.totalLength) :
+    WaitingOk (assemblerArrayAfterDeliver xs origin params result) := by
+  unfold assemblerArrayAfterDeliver
+  split
+  · exact hxs
+  · exact hxs
+  · next u =>
+    obtain ⟨huo, hus, a, ha, hao, has, hat⟩ := hres u none rfl
+    -- every assembler of the set has the set's length
+    have hset : ∀ b ∈ xs, (b.origin == origin && b.startSequenceNumber == params.startSequenceNumber) = true →
+        b.totalLength = u.totalLength := by
+      intro b hb hk
+      simp only [Bool.and_eq_true, beq_iff_eq] at hk
+      rw [← hat]; exact hxs.1 b hb a ha (hk.1.trans hao.symm) (hk.2.trans has.symm)
+    refine ⟨?_, ?_⟩
+    · intro b hb c hc ho hs
+      obtain ⟨b', hb', rfl⟩ := Array.mem_map.mp hb
+      obtain ⟨c', hc', rfl⟩ := Array.mem_map.mp hc
+      by_cases kb : (b'.origin == origin && b'.startSequenceNumber == params.startSequenceNumber) = true <;>
+        by_cases kc : (c'.origin == origin && c'.startSequenceNumber == params.startSequenceNumber) = true <;>
+        simp only [kb, kc, if_true, if_false, Bool.false_eq_true] at ho hs ⊢
+      all_goals first
+        | rfl
+        | exact hxs.1 b' hb' c' hc' ho hs
+        | (exfalso; apply kc; simp only [Bool.and_eq_true, beq_iff_eq]
+           exact ⟨ho.symm.trans huo, hs.symm.trans hus⟩)
+        | (exfalso; apply kb; simp only [Bool.and_eq_true, beq_iff_eq]
+           exact ⟨ho.trans huo, hs.trans hus⟩)
+    · rw [waitingBytes_map]
+      · exact hxs.2
+      · intro b hb
+        split
+        · next hk => exact (hset b hb hk).symm
+        · rfl
+  · exact hxs.filter _
+
+theorem pruneAssemblers_waiting {p : Peer} (h : WaitingOk p.fragmentAssemblers) (channelId : UInt8) :
+    WaitingOk (p.pruneAssemblers channelId).fragmentAssemblers := by
+  unfold pruneAssemblers
+  split
+  · split
+    · exact h
+    · exact h.filter _
+  · exact h
+
+theorem receiveOnChannel_waiting {p : Peer} (h : WaitingOk p.fragmentAssemblers) (channelId : UInt8)
+    (receive : Channel → Channel × Array Packet) :
+    WaitingOk (p.receiveOnChannel channelId receive).1.fragmentAssemblers := by
+  unfold receiveOnChannel
+  split
+  · split
+    refine pruneAssemblers_waiting ?_ _
+    exact h
+  · exact h
+
+/-- **The fragment path keeps the waiting-data budget.** -/
+theorem handleFragment_waiting {p : Peer} (h : WaitingOk p.fragmentAssemblers) (channelId : UInt8)
+    (reliableSeq : UInt16) (params : Protocol.FragmentParams) (unreliable : Bool) :
+    WaitingOk (handleFragment p channelId reliableSeq params unreliable).1.fragmentAssemblers := by
+  unfold handleFragment
+  split
+  · exact h
+  split
+  · exact h
+  · dsimp only
+    obtain ⟨hxs, hasm⟩ := absorbFragment_waiting h (fragmentOrigin channelId reliableSeq unreliable) params
+    have hdel := assemblerArrayAfterDeliver_waiting hxs (fragmentOrigin channelId reliableSeq unreliable) params
+      (result := (absorbFragment p.fragmentAssemblers (fragmentOrigin channelId reliableSeq unreliable) params).2.bind
+        fun asm =>
+          if asm.totalLength != params.totalLength.toNat || asm.fragmentCount != params.fragmentCount.toNat then
+            some (.error (.custom "fragment does not match its set"))
+          else some (asm.addFragment params.fragmentNumber.toNat params.fragmentOffset.toNat params.data))
+      (fun u r hr => by
+        cases hopt : (absorbFragment p.fragmentAssemblers (fragmentOrigin channelId reliableSeq unreliable) params).2 with
+        | none => rw [hopt] at hr; cases hr
+        | some asm =>
+          rw [hopt] at hr
+          simp only [Option.bind_some] at hr
+          split at hr
+          · cases hr
+          · obtain ⟨hmem, ho, hs⟩ := hasm asm hopt
+            obtain ⟨ko, ks, kt⟩ := addFragment_key (Option.some.inj hr)
+            exact ⟨ko.trans ho, ks.trans hs, asm, hmem, ho, hs, kt.symm⟩)
+    split
+    · exact receiveOnChannel_waiting hdel _ _
+    · exact hdel
+    · exact hdel
+
+theorem waitingOk_empty : WaitingOk #[] :=
+  ⟨fun a ha => by simp at ha, by simp [waitingBytes, Constants.maximumWaitingData, Constants.maximumPacketSize]⟩
+
+theorem waitingOk_reset (p : Peer) : WaitingOk p.reset.fragmentAssemblers := waitingOk_empty
+
+theorem waitingOk_resetQueues (p : Peer) : WaitingOk p.resetQueues.fragmentAssemblers := waitingOk_empty
+
+/-- The bytes a peer's assemblers can be made to hold: under 64 MB. -/
+theorem waitingOk_footprint {xs : Array FragmentAssembler} (h : WaitingOk xs) :
+    waitingBytes xs < Constants.maximumWaitingData + Constants.maximumPacketSize := h.2
 
 end Lenet.Proofs

@@ -91,7 +91,7 @@ default build and CI compile. The C library never includes them.
 | `Unsequenced`   | a group accepted once is always rejected afterwards (`checkAndAdd_idempotent`) |
 | `Time`          | time differences don't depend on when the clock started; 16-bit wire timestamps are recovered exactly (`fromWire_recovers`) |
 | `Deadline`      | `nextDeadline` is always one of the host's timers and no timer is earlier (`nextDeadline_mem`, `nextDeadline_earliest`) |
-| `Resources`     | the fragment-assembler cap holds and every assembler stays well formed with its memory fixed at creation (`handleFragment_assemblersOk`), and a channel stages at most seven windows of reliable packets whatever the sender does (`stagedReliableInv_size`) |
+| `Resources`     | the fragment-assembler cap holds and every assembler stays well formed with its memory fixed at creation (`handleFragment_assemblersOk`), the assemblers hold under 64 MB per peer (`handleFragment_waiting`), and a channel stages at most seven windows of reliable packets whatever the sender does (`stagedReliableInv_size`) |
 | `Events`        | every per-peer step keeps the peer's events consistent: connect only when not already connected, receives only while connected, no way back but a disconnect (`handleCommand_wf`, `checkPeerTimeouts_wf`, `pollPeer_wf`) |
 | `HostEvents`    | the same for the whole host: from `Host.create`, after any sequence of received datagrams, `service` calls and application calls, every peer slot's events are consistent, so between two connects of a slot there is always a disconnect (`run_wf`, `EventsWf.disconnect_between`) |
 | `Panic`         | a build-time scan of every `Lenet.*` definition fails the build on any panicking construct; every division is listed with a proof its divisor is not zero |
@@ -136,8 +136,7 @@ Memory an attacker can make a host hold is bounded:
   the fragment is dropped without an ACK, so the sender retransmits it
   later instead of losing it. On top, ENet's byte budget: no new set starts
   once the assemblers hold `maximumWaitingData` (32 MB), so they hold less
-  than 64 MB per peer (the proven bound is still the per-assembler one,
-  32 × 32 MB; see TODO.md).
+  than 64 MB per peer (`handleFragment_waiting`).
 - **Staged reliable packets:** only in-window sequence numbers are staged,
   each at most once, and a delivery drops the ones its span jumped over, so
   a channel never holds more than 28672 (seven windows). ENet keeps those

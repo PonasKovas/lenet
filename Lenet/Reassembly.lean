@@ -13,7 +13,7 @@ structure FragmentOrigin where
   /-- For an unreliable set, the reliable command it was sent after; 0 for a
   reliable set. -/
   reliableSeq : UInt16 := 0
-deriving BEq, Inhabited
+deriving DecidableEq, Inhabited
 
 /--
 State machine for assembling a fragmented packet from incoming fragment commands.
