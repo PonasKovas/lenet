@@ -339,7 +339,8 @@ def hostTests : List Test := [
       -- the window shrinks below what is in flight (ENet: the throttle falls on an RTT spike)
       let p := { p with client := p.client.modifyPeer p.clientPeer ({ · with packetThrottle := 0 }) }
       let p ← send p (pkt 0)
-      let (q, cmds) := Host.packOutgoingCommands p.clientP p.now
+      let (q, datagrams) := Host.packOutgoingCommands p.clientP p.now
+      let cmds := datagrams.flatten
       -- ENet checks every command with a packet, empty or not (check_outgoing_commands)
       expect (!cmds.any (·.body matches .sendReliable ..)) "empty packet sent past the congestion window"
       expect (q.outgoingCommands.size == 1) "empty packet not left queued" },
@@ -349,7 +350,8 @@ def hostTests : List Test := [
       -- the window shrinks to one MTU (1392): 1000 in flight + 500 is over, + 100 is not
       let p := { p with client := p.client.modifyPeer p.clientPeer ({ · with packetThrottle := 0 }) }
       let p ← send (← send p (pkt 500)) (pkt 100) (ch := 1)
-      let (q, cmds) := Host.packOutgoingCommands p.clientP p.now
+      let (q, datagrams) := Host.packOutgoingCommands p.clientP p.now
+      let cmds := datagrams.flatten
       -- ENet stops taking from its reliable send list for the pass
       -- (check_outgoing_commands: currentSendReliableCommand = end)
       expect (!cmds.any (·.body matches .sendReliable ..)) "a later reliable packet overtook the held one"

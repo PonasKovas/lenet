@@ -693,11 +693,14 @@ theorem send_peerStagedInv {p p' : Peer} (h : PeerStagedInv p) {channelId : UInt
   · cases hs
     exact enqueue_peerStagedInv h _ _ _
 
+theorem nextDatagram_channels (st : Host.PackState) : st.nextDatagram.channels = st.channels := by
+  unfold Host.PackState.nextDatagram; split <;> rfl
+
 theorem packAck_channels (mtu : UInt32) (st : Host.PackState) (ack : Acknowledgement) :
     (Host.PackState.packAck mtu st ack).channels = st.channels := by
   unfold Host.PackState.packAck
   dsimp only
-  split <;> rfl
+  (repeat' split) <;> simp [Host.PackState.pack, nextDatagram_channels]
 
 theorem packUnreliable_channels (p : Peer) (st : Host.PackState) (cmd : Protocol.Command) :
     (st.packUnreliable p cmd).channels = st.channels := by
@@ -712,15 +715,23 @@ theorem packCommand_stagedReliableInv (p : Peer) (now : UInt32) (st : Host.PackS
     ∀ ch ∈ (st.packCommand p now outCmd).channels, StagedReliableInv ch := by
   unfold Host.PackState.packCommand
   dsimp only
+  -- a new datagram keeps the channels
+  have h' : ∀ ch ∈ (if st.fits p.mtu outCmd.command then st else st.nextDatagram).channels,
+      StagedReliableInv ch := by
+    split
+    · exact h
+    · rw [nextDatagram_channels]; exact h
+  generalize (if st.fits p.mtu outCmd.command then st else st.nextDatagram) = st' at h' ⊢
   repeat' split
   all_goals first
     | exact h
-    | (rw [packUnreliable_channels]; exact h)
+    | exact h'
+    | (rw [packUnreliable_channels]; exact h')
     | (intro ch hch
        simp only at hch
        rcases mem_modify_or hch with hch | ⟨c, hc, rfl⟩
-       · exact h ch hch
-       · exact acquireReliableWindow_stagedReliableInv (h c hc) _)
+       · exact h' ch hch
+       · exact acquireReliableWindow_stagedReliableInv (h' c hc) _)
 
 /-- Packing a datagram only occupies sender-side windows. -/
 theorem packOutgoingCommands_peerStagedInv {p : Peer} (h : PeerStagedInv p) (now : UInt32) :

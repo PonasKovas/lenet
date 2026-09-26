@@ -85,41 +85,36 @@ as bugs show where the corpus is blind.
 
 ## Performance
 
-Baseline (`./.lake/build/bin/bench`, median of 3 runs of the bench's own
-median of 5, i5-8350U @ 1.7 GHz, Lean 4.33.1; run-to-run noise is about
-10%). Before the in-place peer updates of 2026-09-26 it was ~233k / ~420k /
-~255k / ~43k / ~59k pkts/s, idle ~2.7 µs, loaded ~276 µs.
+Baseline (`./.lake/build/bin/bench`, two runs, i5-8350U @ 1.7 GHz, Lean
+4.33.1, 2026-09-26 after the one-pass packing; run-to-run noise is about
+10%, and this machine ran ~25% slower than usual all day, so compare
+against a fresh run of the old code, not these numbers):
 
-| scenario               | pkts/s | MB/s | ns/pkt |
-|------------------------|--------|------|--------|
-| reliable 1200B         | ~318k  | ~380 | ~3150  |
-| unreliable 1200B       | ~518k  | ~620 | ~1930  |
-| unsequenced 1200B      | ~343k  | ~410 | ~2920  |
-| reliable 4096B (frag)  | ~49k   | ~200 | ~20400 |
-| unrelfrag 4096B (frag) | ~64k   | ~263 | ~15500 |
+| scenario               | pkts/s | ns/pkt |
+|------------------------|--------|--------|
+| reliable 1200B         | ~280k  | ~3550  |
+| unreliable 1200B       | ~480k  | ~2080  |
+| unsequenced 1200B      | ~290k  | ~3480  |
+| reliable 4096B (frag)  | ~62k   | ~16200 |
+| unrelfrag 4096B (frag) | ~88k   | ~11400 |
 
-Service tick: idle pair ~2.2 µs, loaded (64 reliable sends) ~206 µs.
+Service tick: idle pair ~3.1 µs, loaded (64 reliable sends) ~226 µs. One
+reliable packet end to end: 1 MB ~5 ms, 4 MB ~24 ms, 16 MB ~230 ms.
+
+Measured back to back on the same machine, the one-pass packing (every
+datagram of a service in one scan of the queue, where the scan per
+datagram was quadratic in the queue) took reliable 1200B from ~214k to
+~285k, the loaded tick from ~300 to ~225 µs, and 16 MB from 2.5 s to
+0.23 s; in-place reassembly took 4 MB from 3.3 s to 0.17 s before that.
 
 What the profile shows now: most time is allocation and freeing, spread
 thin. Lean updates an array or record in place only while one reference
 holds it, so a value read out of a container that still holds it, or kept
 alive for an error branch, gets copied on its next change. To find such a
 copy, wrap the value in `dbgTraceIfShared "tag" x` for a moment and count
-the messages a bench run prints. Known costs left:
+the messages a bench run prints (that is how the reassembly copies were
+found). Known costs left:
 
-- **Sending a large packet is quadratic.** `packOutgoingCommands` folds
-  over the whole outgoing queue for every datagram, so a 16 MB packet
-  (about 12,000 fragments, one per datagram) rescans a queue of thousands
-  each time: `packCommand` is a quarter of the profile. ENet's linked
-  lists stop at `break` and cut the reliable list instead. Bench, large
-  packets: 1 MB ~16 ms, 4 MB ~170 ms, 16 MB ~2.5 s. The fix is a queue
-  that packing need not rebuild, for example ENet's split into a
-  reliable-data list and the rest.
-- Receiving a large packet is linear since 2026-09-26: `Host.withPeer`
-  and `Peer.handleFragment` take the peer, the assembler array and the
-  assembler out before changing them (`takeAt`), so each fragment is
-  copied into the buffer in place (before: 4 MB took 3.3 s). This costs the
-  small-packet rows 2-5%, measured back to back.
 - Tried and dropped: `Peer.enqueue` and `Peer.receiveOnChannel` copy the
   channel record on each send and receive. Removing those copies with an
   out-of-line swap made the bench 1-4% slower, not faster.

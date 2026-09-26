@@ -423,17 +423,18 @@ def handleDatagram (h : Host) (now : UInt32) (fromAddr : Address) (bytes : ByteA
 
 /-! ## Sending -/
 
-/-- State of `packOutgoingCommands` while it fills one datagram. -/
+/-- State of `packOutgoingCommands` while it fills datagrams. -/
 structure PackState where
   packedAcks        : Nat := 0
+  /-- The datagrams already full. -/
+  datagrams         : Array (Array Protocol.Command) := #[]
+  /-- The datagram being filled. -/
   commandsToPack    : Array Protocol.Command := #[]
   remainingOutgoing : Array OutgoingCommand := #[]
   sentReliables     : Array OutgoingCommand
   channels          : Array Channel
   inTransitAdd      : Nat := 0
   packetSize        : Nat := 0
-  /-- The datagram is full: every later command waits for the next one. -/
-  full              : Bool := false
   /-- A reliable command hit a still-occupied sequence window: later reliable
   channel commands wait too, so none overtakes it (ENet's `windowWrap`). -/
   windowWrap        : Bool := false
@@ -453,6 +454,15 @@ namespace PackState
 @[inline] def fits (st : PackState) (mtu : UInt32) (cmd : Protocol.Command) : Bool :=
   st.commandsToPack.size < Constants.maximumPacketCommands ∧
     st.packetSize + cmd.wireSize ≤ mtu.toNat
+
+/-- The size of an empty datagram: ENetProtocolHeader (peer ID + sent time). -/
+def headerSize : Nat := 4
+
+/-- Closes the datagram being filled (if it holds anything) and starts the
+next one. -/
+@[inline] def nextDatagram (st : PackState) : PackState :=
+  if st.commandsToPack.isEmpty then st
+  else { st with datagrams := st.datagrams.push st.commandsToPack, commandsToPack := #[], packetSize := headerSize }
 
 /-- Adds `cmd` to the datagram. -/
 @[inline] def pack (st : PackState) (cmd : Protocol.Command) : PackState :=
@@ -504,8 +514,8 @@ def packAck (mtu : UInt32) (st : PackState) (ack : Acknowledgement) : PackState 
     channelId              := ack.channelId
     reliableSequenceNumber := ack.reliableSequenceNumber
     body                   := .acknowledge ack.reliableSequenceNumber ack.sentTime }
-  if st.full ∨ !st.fits mtu cmd then { st with full := true }
-  else { st.pack cmd with packedAcks := st.packedAcks + 1 }
+  let st := if st.fits mtu cmd then st else st.nextDatagram
+  if st.fits mtu cmd then { st.pack cmd with packedAcks := st.packedAcks + 1 } else st
 
 /-- Whether `cmd` carries application data (ENet: `packet != NULL`), as
 opposed to a control command. -/
@@ -518,7 +528,8 @@ def carriesPacket (cmd : Protocol.Command) : Bool :=
 /-- Packs one queued command for peer `p` (ENet check_outgoing_commands). A
 reliable command stays queued while its sequence window is not free or while
 the congestion window is exhausted; an unreliable one may be dropped by
-the packet throttle (`packUnreliable`). -/
+the packet throttle (`packUnreliable`). A command that does not fit the
+datagram goes into the next one. -/
 def packCommand (p : Peer) (now : UInt32) (st : PackState) (outCmd : OutgoingCommand) : PackState :=
   let cmd := outCmd.command
   -- the command's data channel; control commands (channel 0xFF) have none
@@ -526,7 +537,6 @@ def packCommand (p : Peer) (now : UInt32) (st : PackState) (outCmd : OutgoingCom
   let firstSend := outCmd.sendAttempts == 0
   let reliableData := cmd.acknowledge && carriesPacket cmd
   if st.continuesDroppedSet cmd then st
-  else if st.full then st.defer outCmd
   else if reliableData && st.reliableHeld then st.defer outCmd
   else if channel?.isSome && st.windowWrap then st.defer outCmd
   else if channel?.any (fun ch => firstSend && !ch.canSendReliable cmd.reliableSequenceNumber) then
@@ -538,7 +548,9 @@ def packCommand (p : Peer) (now : UInt32) (st : PackState) (outCmd : OutgoingCom
       p.reliableDataInTransit + st.inTransitAdd + outCmd.fragmentLength >
         Nat.max ((p.packetThrottle * p.windowSize) / Constants.packetThrottleScale).toNat p.mtu.toNat then
     { st with reliableHeld := true }.defer outCmd
-  else if !st.fits p.mtu cmd then { st with full := true }.defer outCmd
+  else
+  let st := if st.fits p.mtu cmd then st else st.nextDatagram
+  if !st.fits p.mtu cmd then st.defer outCmd -- larger than a datagram: never
   else if !cmd.acknowledge then st.packUnreliable p cmd -- fire-and-forget
   else
     -- reliable: occupy its sequence window on first send, and track it for
@@ -562,13 +574,20 @@ def packCommand (p : Peer) (now : UInt32) (st : PackState) (outCmd : OutgoingCom
 
 end PackState
 
-/-- Packs pending ACKs and outgoing commands for a peer into one datagram,
-following ENet's rules: ACKs first, then queued commands in order, at most
-`maximumPacketCommands` within the peer MTU. Returns the updated peer and
-the commands to send. -/
-def packOutgoingCommands (p : Peer) (now : UInt32) : Peer × Array Protocol.Command :=
+/-- Packs pending ACKs and outgoing commands for a peer into datagrams,
+following ENet's rules: ACKs first, then queued commands in order, each
+datagram at most `maximumPacketCommands` within the peer MTU. Returns the
+updated peer and the datagrams' commands.
+
+One pass fills every datagram. ENet makes a pass per datagram
+(CONTINUE_SENDING), each from the start of its lists; what it held back in
+one pass it holds back again in the next (in-flight bytes and occupied
+windows only grow within a service), so the datagrams are the same, and a
+large packet's thousands of fragments are scanned once rather than once per
+datagram. -/
+def packOutgoingCommands (p : Peer) (now : UInt32) : Peer × Array (Array Protocol.Command) :=
   let initial : PackState := {
-    packetSize      := 4 -- ENetProtocolHeader (peer ID + sent time)
+    packetSize      := PackState.headerSize
     sentReliables   := p.sentReliableCommands
     channels        := p.channels
     throttleCounter := p.packetThrottleCounter
@@ -588,7 +607,7 @@ def packOutgoingCommands (p : Peer) (now : UInt32) : Peer × Array Protocol.Comm
     reliableDataInTransit := p.reliableDataInTransit + final.inTransitAdd
     packetThrottleCounter := final.throttleCounter
   }
-  (updatedPeer, final.commandsToPack)
+  (updatedPeer, final.nextDatagram.datagrams)
 
 /-- The datagram carrying `commands` to peer `p`, encoded. -/
 def encodeDatagram (p : Peer) (now : UInt32) (checksumEnabled : Bool)
@@ -630,9 +649,9 @@ where
         if p.state == .disconnectLater ∧ p.outgoingCommands.isEmpty ∧ p.sentReliableCommands.isEmpty then
           p.queueDisconnect p.eventData
         else p
-      let (p, commands) := packOutgoingCommands p now
-      if !commands.isEmpty then
-        go fuel p (datagrams.push (p.address, encodeDatagram p now checksumEnabled commands))
+      let (p, packed) := packOutgoingCommands p now
+      if !packed.isEmpty then
+        go fuel p (datagrams ++ packed.map fun commands => (p.address, encodeDatagram p now checksumEnabled commands))
       else if p.state == .acknowledgingDisconnect ∧ p.acknowledgements.isEmpty then
         (p.reset, datagrams, #[.disconnect p.peerId p.eventData])
       else if p.state == .zombie then
