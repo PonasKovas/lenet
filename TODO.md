@@ -20,14 +20,23 @@ staged inside a span"). Fixed, and `Proofs.stagedReliableInv_size` now
 proves at most `(freeReliableWindows - 1) * reliableWindowSize` staged per
 channel from the receiver alone.
 
-Next: the **sender-side window invariant** proper, in small steps, each
-one building and committed on its own. `Channel.acquireReliableWindow` /
-`releaseReliableWindow` / `canSendReliable` and where
-`PackState.packCommand` (`Lenet/Host.lean`) calls them. State that the
-in-flight reliable sequence numbers of a channel never span more windows
-than the receiver's gate admits, so everything the sender sends is in
-window. (The staging bound no longer depends on it; it is about honest
-senders never having their packets dropped by the gate.)
+Then step 2 turned out false as stated. "Everything the sender sends is
+in the receiver's window" does not hold, for ENet either. `canSendReliable`
+at the start of window `w` only asks windows `w .. w+9` to be empty, so
+in-flight commands may sit in the six windows `w-6 .. w-1`. The receiver
+admits its frontier's window and the next six. Reachable example: 1..4095
+acked, 4096 lost, 4097..28671 in flight but for one acked number in window
+6. The sender may send 28672 (`canSendReliable` is true), the receiver's
+frontier is 4095 and its gate refuses 28672. Nothing breaks: it is not
+acked and is resent once 4096 gets through. Lenet matches ENet here, so
+there is nothing to fix.
+
+What is true, sender side only: when a reliable command is first sent,
+every command still in flight on its channel is fewer than seven windows
+(28672 numbers) behind it. Proving that needs an invariant tying
+`Channel.reliableWindows` to `Peer.sentReliableCommands` through
+`packCommand`, `removeSentReliableCommand`, retransmission and reset.
+Undecided whether that is worth it; the other proof items may pay more.
 
 Checks before each commit: `lake build` (library and proofs, including the
 no-panic audit in `Proofs/Panic.lean`), `./.lake/build/bin/unit`,
@@ -50,9 +59,9 @@ Worth adding there as they come up:
 
 ## Proofs
 
-- **Sender-side window invariant.** Connect `Peer.send`'s window discipline
-  (now that windows are really tracked) to the receiver's window gate: an
-  honest sender's reliable commands always pass it.
+- **Sender-side window span.** The in-flight reliable commands of a channel
+  span fewer than seven windows (see the handoff note: the stronger "always
+  in the receiver's window" is false, for ENet too).
 - **Peer-level staging bound.** `stagedReliableInv_size` is per channel;
   lift `StagedReliableInv` to every channel of a peer through
   `Peer.receiveOnChannel` and connect.
