@@ -79,6 +79,46 @@ def hostDisconnect (ctx : HostRef) (peerId : UInt16) (data : UInt32) : IO Unit :
 def hostDisconnectLater (ctx : HostRef) (peerId : UInt16) (data : UInt32) : IO Unit :=
   modifyHost ctx (·.disconnectLater peerId data)
 
+@[export lenet_ffi_peer_disconnect_now]
+def peerDisconnectNow (ctx : HostRef) (peerId : UInt16) (data : UInt32) : IO Unit :=
+  modifyHost ctx (·.disconnectNow peerId data)
+
+@[export lenet_ffi_peer_reset]
+def peerReset (ctx : HostRef) (peerId : UInt16) : IO Unit :=
+  modifyHost ctx (·.resetPeer peerId)
+
+@[export lenet_ffi_peer_ping]
+def peerPing (ctx : HostRef) (peerId : UInt16) : IO Unit :=
+  modifyHost ctx (·.ping peerId)
+
+@[export lenet_ffi_peer_ping_interval]
+def peerPingInterval (ctx : HostRef) (peerId : UInt16) (interval : UInt32) : IO Unit :=
+  modifyHost ctx (·.setPingInterval peerId interval)
+
+@[export lenet_ffi_host_bandwidth_limit]
+def hostBandwidthLimit (ctx : HostRef) (incoming outgoing : UInt32) : IO Unit :=
+  modifyHost ctx (·.bandwidthLimit incoming outgoing)
+
+@[export lenet_ffi_host_channel_limit]
+def hostChannelLimit (ctx : HostRef) (limit : USize) : IO Unit :=
+  modifyHost ctx (·.setChannelLimit limit.toNat)
+
+/-- ENet's `ENetPeerState` number of a state (Lenet has no
+CONNECTION_PENDING (3) or CONNECTION_SUCCEEDED (4)). -/
+def stateCode : PeerState → UInt32
+  | .disconnected => 0 | .connecting => 1 | .acknowledgingConnect => 2 | .connected => 5
+  | .disconnectLater => 6 | .disconnecting => 7 | .acknowledgingDisconnect => 8 | .zombie => 9
+
+/-- Peer `peerId` as `(state, ip, port, rtt, rtt variance, packet throttle)`,
+or none for an unknown peer ID. -/
+@[export lenet_ffi_peer_info]
+def peerInfo (ctx : HostRef) (peerId : UInt16) :
+    IO (Option (UInt32 × UInt32 × UInt16 × UInt32 × UInt32 × UInt32)) := do
+  let c ← ctx.get
+  return c.host.peers[peerId.toNat]?.map fun p =>
+    (stateCode p.state, p.address.host, p.address.port, p.roundTripTime, p.roundTripTimeVariance,
+      p.packetThrottle)
+
 @[export lenet_ffi_host_enable_checksum]
 def hostEnableChecksum (ctx : HostRef) : IO Unit :=
   modifyHost ctx ({ · with checksumEnabled := true })
@@ -101,6 +141,16 @@ def hostHandleDatagram (ctx : HostRef) (now ip : UInt32) (port : UInt16) (data :
 def hostService (ctx : HostRef) (now : UInt32) : IO Unit :=
   ctx.modify fun c =>
     let (host, datagrams, events) := c.host.service now
+    { host
+      pendingPackets := enqueueAll c.pendingPackets datagrams
+      pendingEvents  := enqueueAll c.pendingEvents events }
+
+/-- ENet's enet_host_flush: sends what is queued now, without the timers of
+`service`. -/
+@[export lenet_ffi_host_flush]
+def hostFlush (ctx : HostRef) (now : UInt32) : IO Unit :=
+  ctx.modify fun c =>
+    let (host, datagrams, events) := c.host.pollOutgoing now
     { host
       pendingPackets := enqueueAll c.pendingPackets datagrams
       pendingEvents  := enqueueAll c.pendingEvents events }

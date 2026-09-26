@@ -536,6 +536,38 @@ def hostTests : List Test := [
       let p ← send p (pkt 10)
       let (_, outs, _) := p.client.service p.now
       expect ((headers outs).any (·.sentTime.isSome)) "reliable datagram without a sent time" },
+  { name := "disconnectNow sends one DISCONNECT and frees the slot without an event"
+    run := fun _ => do
+      let p ← send (← connected) (pkt 100)
+      let p := { p with client := p.client.disconnectNow p.clientPeer 7 }
+      -- ENet enet_peer_disconnect_now: queues dropped, one unacknowledged
+      -- DISCONNECT, reset without an event
+      expect (p.clientP.outgoingCommands.size == 1) "queue not dropped"
+      let p := p.rounds 5
+      expect (p.clientP.state == .disconnected) "slot not freed"
+      expect p.clientEvents.isEmpty "the client saw an event"
+      expect (received p.serverEvents).isEmpty "a packet queued before it was sent"
+      expect (p.serverEvents == #[.disconnect p.serverPeer 7]) "the server saw no disconnect" },
+  { name := "resetPeer frees the slot at once, sending nothing"
+    run := fun _ => do
+      let p ← connected
+      let h := p.client.resetPeer p.clientPeer
+      expect (h.peers[p.clientPeer.toNat]!.state == .disconnected) "slot not freed"
+      let (_, outs, evs) := h.service p.now
+      expect (outs.isEmpty && evs.isEmpty) "reset sent or reported something" },
+  { name := "ping, ping interval, bandwidth and channel limits follow ENet"
+    run := fun _ => do
+      let p ← connected
+      let h := p.client.ping p.clientPeer
+      expect (h.peers[p.clientPeer.toNat]!.outgoingCommands.any (·.command.body matches .ping)) "no PING queued"
+      let h := (p.client.setPingInterval p.clientPeer 250).setPingInterval 1 0
+      expect (h.peers[p.clientPeer.toNat]!.pingInterval == 250) "ping interval not set"
+      expect (h.peers[1]!.pingInterval == Constants.defaultPingInterval) "0 did not mean the default"
+      let h := p.client.bandwidthLimit 1000 2000
+      expect (h.incomingBandwidth == 1000 && h.outgoingBandwidth == 2000 && h.recalculateBandwidthLimits)
+        "bandwidth limit not applied"
+      expect ((p.client.setChannelLimit 0).channelLimit == 255 && (p.client.setChannelLimit 4).channelLimit == 4)
+        "channel limit not clamped" },
   { name := "a peer that never answers times out between the minimum and maximum"
     run := fun _ => do
       let p ← send (← connected) (pkt 100)

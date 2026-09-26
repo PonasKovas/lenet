@@ -132,6 +132,9 @@ the messages a bench run prints. Known costs left:
 - **Typed Lean API.** The Lean surface is the raw `Host` functions. A thin
   typed layer (peer and channel handles instead of `UInt16`/`UInt8`,
   events as a stream) would make Lenet pleasant to use from Lean itself.
+- **ENet API parity** (2026-09-26): disconnect_now, peer reset, ping,
+  ping interval, bandwidth limit, channel limit, flush and a peer-info
+  getter now exist in Lean (`Host.*`) and C (`lenet.h`).
 - **lenet-rs** (async Rust bindings over the C API) lives in its own
   repository. Anything it needs from the C API gets added here first.
 - **Shared library** once Lean ships a `-fPIC` runtime.

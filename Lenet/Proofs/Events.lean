@@ -149,7 +149,8 @@ theorem isConnected_up {p : Peer} (h : p.isConnected = true) : (phase p.state) =
 /-- Starting a disconnect never changes the phase: a connected peer goes
 disconnecting, a handshaking one goes zombie. -/
 theorem queueDisconnect_phase (p : Peer) (d) : (phase (p.queueDisconnect d).state) = (phase p.state) := by
-  cases hs : p.state <;> simp +decide [queueDisconnect, hs, phase, queueControlCommand, queueOutgoingCommand, resetQueues]
+  cases hs : p.state <;> simp +decide [queueDisconnect, hs, phase, queueControlCommand, queueOutgoingCommand, resetQueues,
+    sendLastDisconnect]
 
 /-- An ACK completes a server handshake (connect) or a disconnect
 (disconnect), or changes no phase. -/

@@ -134,6 +134,16 @@ def resetQueues (p : Peer) : Peer :=
     channels              := #[]
     fragmentAssemblers    := #[] }
 
+/-- Queues one unacknowledged DISCONNECT and leaves the peer `zombie`:
+`Host.pollPeer` resets it without an event once the DISCONNECT is out (ENet
+sends it and resets at once; there is no socket to flush here). -/
+def sendLastDisconnect (p : Peer) (data : UInt32) : Peer :=
+  -- numbered like every command on channel 0xFF (ENet setup_outgoing_command)
+  let seq : UInt16 := p.outgoingControlSeq + 1
+  { p with outgoingControlSeq := seq, state := .zombie }.queueOutgoingCommand
+    { command := { channelId := 0xFF, reliableSequenceNumber := seq, unsequenced := true
+                   body := .disconnect data } }
+
 /-- Starts a disconnect (ENet enet_peer_disconnect). Nothing happens when
 one is already under way or the slot is free. Otherwise everything queued
 or in flight is dropped (`resetQueues`) and DISCONNECT is
@@ -148,12 +158,17 @@ def queueDisconnect (p : Peer) (data : UInt32) : Peer :=
     let p := p.resetQueues
     if state == .connected || state == .disconnectLater then
       { p with state := .disconnecting }.queueControlCommand (.disconnect data)
-    else
-      -- numbered like every command on channel 0xFF (ENet setup_outgoing_command)
-      let seq : UInt16 := p.outgoingControlSeq + 1
-      { p with outgoingControlSeq := seq, state := .zombie }.queueOutgoingCommand
-        { command := { channelId := 0xFF, reliableSequenceNumber := seq, unsequenced := true
-                       body := .disconnect data } }
+    else p.sendLastDisconnect data
+
+/-- ENet enet_peer_disconnect_now: ends the connection without waiting and
+without an event (the application asked for it). A connection still up
+drops its queues and sends one unacknowledged DISCONNECT (`sendLastDisconnect`);
+a peer already disconnecting just resets. -/
+def disconnectNow (p : Peer) (data : UInt32) : Peer :=
+  match p.state with
+  | .disconnected | .zombie => p
+  | .disconnecting => p.reset
+  | _ => p.resetQueues.sendLastDisconnect data
 
 /-- Queues an acknowledgement for the remote peer. -/
 def queueAck (p : Peer) (ack : Acknowledgement) : Peer :=

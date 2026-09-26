@@ -211,6 +211,40 @@ def disconnectLater (h : Host) (peerId : UInt16) (data : UInt32 := 0) : Host :=
     else
       p.queueDisconnect data
 
+/-- ENet's enet_peer_disconnect_now: ends the connection at once, without an
+event; a connection still up sends one last DISCONNECT on the next
+`service` (`Peer.disconnectNow`). -/
+def disconnectNow (h : Host) (peerId : UInt16) (data : UInt32 := 0) : Host :=
+  h.modifyPeer peerId (·.disconnectNow data)
+
+/-- ENet's enet_peer_reset: frees the slot at once; nothing is sent and
+nothing reported. -/
+def resetPeer (h : Host) (peerId : UInt16) : Host :=
+  h.modifyPeer peerId Peer.reset
+
+/-- ENet's enet_peer_ping: queues a PING for a connected peer (an RTT sample
+without waiting for the keepalive). -/
+def ping (h : Host) (peerId : UInt16) : Host :=
+  h.modifyPeer peerId fun p => if p.state == .connected then p.queueControlCommand .ping else p
+
+/-- ENet's enet_peer_ping_interval: how long a peer may be idle before the
+keepalive PING; 0 means the default. -/
+def setPingInterval (h : Host) (peerId : UInt16) (interval : UInt32) : Host :=
+  h.modifyPeer peerId fun p =>
+    { p with pingInterval := if interval == 0 then Constants.defaultPingInterval else interval }
+
+/-- ENet's enet_host_bandwidth_limit: new host bandwidths (bytes/second, 0 =
+unlimited); the next throttle epoch sends every peer its new limit. -/
+def bandwidthLimit (h : Host) (incoming outgoing : UInt32) : Host :=
+  { h with incomingBandwidth := incoming, outgoingBandwidth := outgoing, recalculateBandwidthLimits := true }
+
+/-- ENet's enet_host_channel_limit: the most channels an incoming connection
+gets; 0 or more than 255 means 255. -/
+def setChannelLimit (h : Host) (limit : Nat) : Host :=
+  { h with channelLimit :=
+      if limit == 0 ∨ limit > Constants.maximumChannelCount then Constants.maximumChannelCount
+      else Nat.max limit Constants.minimumChannelCount }
+
 /-- ENet's enet_peer_throttle_configure: sets the local throttle parameters
 and sends them to the remote peer. -/
 def throttleConfigure (h : Host) (peerId : UInt16) (interval accel decel : UInt32) : Host :=

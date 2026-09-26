@@ -65,6 +65,31 @@ typedef struct {
     uint32_t data;
 } lenet_event;
 
+/** Peer states, numbered as ENet's ENetPeerState (Lenet has no
+ * CONNECTION_PENDING = 3 or CONNECTION_SUCCEEDED = 4). */
+enum {
+    LENET_PEER_STATE_DISCONNECTED            = 0,
+    LENET_PEER_STATE_CONNECTING              = 1,
+    LENET_PEER_STATE_ACKNOWLEDGING_CONNECT   = 2,
+    LENET_PEER_STATE_CONNECTED               = 5,
+    LENET_PEER_STATE_DISCONNECT_LATER        = 6,
+    LENET_PEER_STATE_DISCONNECTING           = 7,
+    LENET_PEER_STATE_ACKNOWLEDGING_DISCONNECT = 8,
+    LENET_PEER_STATE_ZOMBIE                  = 9
+};
+
+/** A peer as the application may inspect it. `ip` is in network byte
+ * order, `port` in host byte order; times in ms; the packet throttle is
+ * out of 32 (ENet's ENET_PEER_PACKET_THROTTLE_SCALE). */
+typedef struct {
+    uint32_t state;                    /* LENET_PEER_STATE_* */
+    uint32_t ip;
+    uint16_t port;
+    uint32_t round_trip_time;
+    uint32_t round_trip_time_variance;
+    uint32_t packet_throttle;
+} lenet_peer_info;
+
 /** Outgoing datagram to transmit over the driver's UDP socket.
  * `ip` is in network byte order, `port` in host byte order.
  * `data` points to an internal buffer that is valid until the next
@@ -125,6 +150,34 @@ void lenet_host_disconnect(lenet_host *host, uint16_t peer_id, uint32_t data);
  * disconnects. Degrades to lenet_host_disconnect when nothing is pending. */
 void lenet_host_disconnect_later(lenet_host *host, uint16_t peer_id, uint32_t data);
 
+/** ENet's enet_peer_disconnect_now: ends the connection at once, without a
+ * DISCONNECT event. A connection still up sends one unacknowledged
+ * DISCONNECT on the next service or flush; the slot is free after it. */
+void lenet_peer_disconnect_now(lenet_host *host, uint16_t peer_id, uint32_t data);
+
+/** ENet's enet_peer_reset: frees the slot at once; nothing is sent and no
+ * event is reported. */
+void lenet_peer_reset(lenet_host *host, uint16_t peer_id);
+
+/** ENet's enet_peer_ping: queues a PING to a connected peer. */
+void lenet_peer_ping(lenet_host *host, uint16_t peer_id);
+
+/** ENet's enet_peer_ping_interval: how long a peer may be idle before the
+ * keepalive PING, in ms; 0 means the default (500). */
+void lenet_peer_ping_interval(lenet_host *host, uint16_t peer_id, uint32_t interval_ms);
+
+/** ENet's enet_host_bandwidth_limit: new bandwidths in bytes/second,
+ * 0 = unlimited; peers learn their new limits at the next throttle epoch. */
+void lenet_host_bandwidth_limit(lenet_host *host, uint32_t incoming_bw, uint32_t outgoing_bw);
+
+/** ENet's enet_host_channel_limit: the most channels an incoming
+ * connection gets; 0 means 255. */
+void lenet_host_channel_limit(lenet_host *host, size_t channel_limit);
+
+/** Fills *out with peer `peer_id`'s state, address, RTT and packet
+ * throttle. Returns 0, or -1 for an unknown peer ID. */
+int32_t lenet_peer_get_info(lenet_host *host, uint16_t peer_id, lenet_peer_info *out);
+
 /** ENet's enet_peer_throttle_configure: sets the local throttle parameters
  * and informs the remote peer. */
 void lenet_peer_throttle_configure(lenet_host *host, uint16_t peer_id,
@@ -150,6 +203,13 @@ void lenet_peer_set_timeout(lenet_host *host, uint16_t peer_id,
 int32_t lenet_host_handle_datagram(lenet_host *host, uint32_t now_ms,
                                    uint32_t ip, uint16_t port,
                                    const void *data, size_t len);
+
+/**
+ * ENet's enet_host_flush: packs everything queued into datagrams (poll
+ * them with lenet_host_poll_outgoing) without running the timers.
+ * Returns 0 on success, -1 on error.
+ */
+int32_t lenet_host_flush(lenet_host *host, uint32_t now_ms);
 
 /**
  * Runs the connection's timers: retransmissions, timeouts, keepalive

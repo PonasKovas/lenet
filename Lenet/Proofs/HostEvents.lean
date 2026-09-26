@@ -737,7 +737,10 @@ theorem connect_step {h h' : Host} {id} (hids : IdsOk h.peers) {addr n d}
 
 /-! ## Whole runs -/
 
-/-- Everything a driver can do to a host. -/
+/-- Everything a driver can do to a host, but `Host.disconnectNow` and
+`Host.resetPeer`: those end a connection without an event, as ENet's
+enet_peer_disconnect_now and enet_peer_reset do (the application asked for
+it), so a slot's events alone no longer tell its story. -/
 inductive Op
   | datagram (now : UInt32) (fromAddr : Address) (bytes : ByteArray)
   | service (now : UInt32)
@@ -748,6 +751,10 @@ inductive Op
   | disconnectLater (peerId : UInt16) (data : UInt32)
   | throttleConfigure (peerId : UInt16) (interval accel decel : UInt32)
   | setPeerTimeout (peerId : UInt16) (limit minimum maximum : UInt32)
+  | ping (peerId : UInt16)
+  | setPingInterval (peerId : UInt16) (interval : UInt32)
+  | bandwidthLimit (incoming outgoing : UInt32)
+  | setChannelLimit (limit : Nat)
 
 /-- One operation: the new host and the events it reports. -/
 def Op.apply (h : Host) : Op → Host × Array Event
@@ -762,6 +769,10 @@ def Op.apply (h : Host) : Op → Host × Array Event
   | .disconnectLater id d => (h.disconnectLater id d, #[])
   | .throttleConfigure id i a d => (h.throttleConfigure id i a d, #[])
   | .setPeerTimeout id l mn mx => (h.setPeerTimeout id l mn mx, #[])
+  | .ping id => (h.ping id, #[])
+  | .setPingInterval id i => (h.setPingInterval id i, #[])
+  | .bandwidthLimit i o => (h.bandwidthLimit i o, #[])
+  | .setChannelLimit l => (h.setChannelLimit l, #[])
 
 /-- A run of operations: the final host and every event, in order. -/
 def run (h : Host) : List Op → Host × Array Event
@@ -785,6 +796,14 @@ theorem Op.apply_step {h : Host} (hids : IdsOk h.peers) : ∀ op : Op, HostStep 
   | .disconnectLater .. => disconnectLater_step hids _ _
   | .throttleConfigure .. => (throttleConfigure_similar _ _ _ _ _).hostStep
   | .setPeerTimeout .. => (setPeerTimeout_similar _ _ _ _ _).hostStep
+  | .ping id => (Similar.modify h.peers id.toNat
+      (fun p => if p.state == .connected then p.queueControlCommand .ping else p)
+      fun _ => ite_peer ⟨rfl, rfl⟩).hostStep
+  | .setPingInterval id i => (Similar.modify h.peers id.toNat
+      (fun p => { p with pingInterval := if i == 0 then Constants.defaultPingInterval else i })
+      fun _ => ⟨rfl, rfl⟩).hostStep
+  | .bandwidthLimit .. => .rfl' _
+  | .setChannelLimit .. => .rfl' _
 
 theorem run_step : ∀ (ops : List Op) {h : Host}, IdsOk h.peers → HostStep h.peers (run h ops).1.peers (run h ops).2
   | [], _, _ => .rfl' _

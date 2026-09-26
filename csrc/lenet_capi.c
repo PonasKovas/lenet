@@ -39,6 +39,14 @@ extern lean_object *lenet_ffi_host_broadcast(lean_object *, uint8_t, uint32_t,
 extern lean_object *lenet_ffi_host_disconnect(lean_object *, uint16_t, uint32_t);
 extern lean_object *lenet_ffi_host_disconnect_later(lean_object *, uint16_t, uint32_t);
 extern lean_object *lenet_ffi_host_enable_checksum(lean_object *);
+extern lean_object *lenet_ffi_peer_disconnect_now(lean_object *, uint16_t, uint32_t);
+extern lean_object *lenet_ffi_peer_reset(lean_object *, uint16_t);
+extern lean_object *lenet_ffi_peer_ping(lean_object *, uint16_t);
+extern lean_object *lenet_ffi_peer_ping_interval(lean_object *, uint16_t, uint32_t);
+extern lean_object *lenet_ffi_host_bandwidth_limit(lean_object *, uint32_t, uint32_t);
+extern lean_object *lenet_ffi_host_channel_limit(lean_object *, size_t);
+extern lean_object *lenet_ffi_peer_info(lean_object *, uint16_t);
+extern lean_object *lenet_ffi_host_flush(lean_object *, uint32_t);
 extern lean_object *lenet_ffi_peer_throttle_configure(lean_object *, uint16_t,
                                                       uint32_t, uint32_t, uint32_t);
 extern lean_object *lenet_ffi_set_peer_timeout(lean_object *, uint16_t, uint32_t,
@@ -177,6 +185,73 @@ void lenet_host_disconnect_later(lenet_host *host, uint16_t peer_id, uint32_t da
     lean_dec(r);
 }
 
+void lenet_peer_disconnect_now(lenet_host *host, uint16_t peer_id, uint32_t data) {
+    if (host == NULL) return;
+    lean_inc((lean_object *)host);
+    lean_dec(lenet_ffi_peer_disconnect_now((lean_object *)host, peer_id, data));
+}
+
+void lenet_peer_reset(lenet_host *host, uint16_t peer_id) {
+    if (host == NULL) return;
+    lean_inc((lean_object *)host);
+    lean_dec(lenet_ffi_peer_reset((lean_object *)host, peer_id));
+}
+
+void lenet_peer_ping(lenet_host *host, uint16_t peer_id) {
+    if (host == NULL) return;
+    lean_inc((lean_object *)host);
+    lean_dec(lenet_ffi_peer_ping((lean_object *)host, peer_id));
+}
+
+void lenet_peer_ping_interval(lenet_host *host, uint16_t peer_id, uint32_t interval_ms) {
+    if (host == NULL) return;
+    lean_inc((lean_object *)host);
+    lean_dec(lenet_ffi_peer_ping_interval((lean_object *)host, peer_id, interval_ms));
+}
+
+void lenet_host_bandwidth_limit(lenet_host *host, uint32_t incoming_bw, uint32_t outgoing_bw) {
+    if (host == NULL) return;
+    lean_inc((lean_object *)host);
+    lean_dec(lenet_ffi_host_bandwidth_limit((lean_object *)host, incoming_bw, outgoing_bw));
+}
+
+void lenet_host_channel_limit(lenet_host *host, size_t channel_limit) {
+    if (host == NULL) return;
+    lean_inc((lean_object *)host);
+    lean_dec(lenet_ffi_host_channel_limit((lean_object *)host, channel_limit));
+}
+
+int32_t lenet_peer_get_info(lenet_host *host, uint16_t peer_id, lenet_peer_info *out) {
+    if (host == NULL || out == NULL) return -1;
+    lean_inc((lean_object *)host);
+    lean_object *r = lenet_ffi_peer_info((lean_object *)host, peer_id);
+    if (!lean_io_result_is_ok(r)) {
+        lean_dec(r);
+        return -1;
+    }
+    lean_object *opt = lean_ctor_get(r, 0); /* Option value */
+    lean_inc(opt);
+    lean_dec(r);
+    if (lean_obj_tag(opt) == 0) { /* none: no such peer */
+        lean_dec(opt);
+        return -1;
+    }
+    /* some (state, (ip, (port, (rtt, (variance, throttle))))) */
+    lean_object *p1 = lean_ctor_get(opt, 0);
+    lean_object *p2 = lean_ctor_get(p1, 1);
+    lean_object *p3 = lean_ctor_get(p2, 1);
+    lean_object *p4 = lean_ctor_get(p3, 1);
+    lean_object *p5 = lean_ctor_get(p4, 1);
+    out->state = (uint32_t)lean_unbox_uint32(lean_ctor_get(p1, 0));
+    out->ip = (uint32_t)lean_unbox_uint32(lean_ctor_get(p2, 0));
+    out->port = (uint16_t)lean_unbox(lean_ctor_get(p3, 0));
+    out->round_trip_time = (uint32_t)lean_unbox_uint32(lean_ctor_get(p4, 0));
+    out->round_trip_time_variance = (uint32_t)lean_unbox_uint32(lean_ctor_get(p5, 0));
+    out->packet_throttle = (uint32_t)lean_unbox_uint32(lean_ctor_get(p5, 1));
+    lean_dec(opt);
+    return 0;
+}
+
 void lenet_host_enable_checksum(lenet_host *host) {
     if (host == NULL) return;
     lean_inc((lean_object *)host);
@@ -213,6 +288,12 @@ int32_t lenet_host_handle_datagram(lenet_host *host, uint32_t now_ms,
     lean_inc((lean_object *)host);
     return ffi_status(lenet_ffi_host_handle_datagram((lean_object *)host, now_ms,
                                                      ip, port, arr));
+}
+
+int32_t lenet_host_flush(lenet_host *host, uint32_t now_ms) {
+    if (host == NULL) return -1;
+    lean_inc((lean_object *)host);
+    return ffi_status(lenet_ffi_host_flush((lean_object *)host, now_ms));
 }
 
 int32_t lenet_host_service(lenet_host *host, uint32_t now_ms) {
