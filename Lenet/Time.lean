@@ -46,4 +46,11 @@ def earliestSome (acc : Option UInt32) (t : UInt32) : Option UInt32 :=
     | some v => earliest v t
     | none => t)
 
+/-- The full timestamp behind a 16-bit wire timestamp `t` received at `now`
+(ENet handle_acknowledge): `t` completed with `now`'s high bits, one 16-bit
+cycle earlier when that would put it in the later half of the cycle. -/
+def fromWire (now : UInt32) (t : UInt16) : UInt32 :=
+  let full := (now &&& 0xFFFF0000) ||| t.toUInt32
+  if (full &&& 0x8000) > (now &&& 0x8000) then full - 0x10000 else full
+
 end Lenet.Time

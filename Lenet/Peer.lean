@@ -477,32 +477,36 @@ def handleCommand (p : Peer) (now : UInt32) (cmd : Protocol.Command) (sentTime :
   -- 2. Process command body:
   match cmd.body with
   | .acknowledge recvSeq recvTime =>
-    let sampleRtt := Time.difference now recvTime.toUInt32
-    let pRtt := pAck.updateRtt now sampleRtt
-    let (pRemoved, removedCmd?) := pRtt.removeSentReliableCommand cmd.channelId recvSeq
+    -- the echoed sent time is the low 16 bits of our clock
+    let sent := Time.fromWire now recvTime
+    if Time.less now sent then
+      (pAck, #[]) -- acknowledges a send from the future: ignored (ENet)
+    else
+      let pRtt := pAck.updateRtt now (Time.difference now sent)
+      let (pRemoved, removedCmd?) := pRtt.removeSentReliableCommand cmd.channelId recvSeq
 
-    match pRemoved.state, removedCmd? with
-    | .acknowledgingConnect, some removedCmd =>
-      if removedCmd.body.commandNumber == Constants.commandVerifyConnect then
-        ({ pRemoved with state := .connected }, #[Event.connect pRemoved.peerId pRemoved.eventData])
-      else
+      match pRemoved.state, removedCmd? with
+      | .acknowledgingConnect, some removedCmd =>
+        if removedCmd.body.commandNumber == Constants.commandVerifyConnect then
+          ({ pRemoved with state := .connected }, #[Event.connect pRemoved.peerId pRemoved.eventData])
+        else
+          (pRemoved, #[])
+      | .disconnecting, some removedCmd =>
+        if removedCmd.body.commandNumber == Constants.commandDisconnect then
+          -- ENet's notify_disconnect: event (data = 0) + enet_peer_reset, so
+          -- the slot is immediately reusable for a new connection.
+          (Peer.reset pRemoved, #[Event.disconnect pRemoved.peerId 0])
+        else
+          (pRemoved, #[])
+      | .disconnectLater, _ =>
+        -- ENet (handle_acknowledge): once the acks have drained, queue the
+        -- actual DISCONNECT (en_peer_disconnect) carrying the deferred data.
+        if pRemoved.outgoingCommands.isEmpty ∧ pRemoved.sentReliableCommands.isEmpty then
+          (pRemoved.queueDisconnect pRemoved.eventData, #[])
+        else
+          (pRemoved, #[])
+      | _, _ =>
         (pRemoved, #[])
-    | .disconnecting, some removedCmd =>
-      if removedCmd.body.commandNumber == Constants.commandDisconnect then
-        -- ENet's notify_disconnect: event (data = 0) + enet_peer_reset, so
-        -- the slot is immediately reusable for a new connection.
-        (Peer.reset pRemoved, #[Event.disconnect pRemoved.peerId 0])
-      else
-        (pRemoved, #[])
-    | .disconnectLater, _ =>
-      -- ENet (handle_acknowledge): once the acks have drained, queue the
-      -- actual DISCONNECT (en_peer_disconnect) carrying the deferred data.
-      if pRemoved.outgoingCommands.isEmpty ∧ pRemoved.sentReliableCommands.isEmpty then
-        (pRemoved.queueDisconnect pRemoved.eventData, #[])
-      else
-        (pRemoved, #[])
-    | _, _ =>
-      (pRemoved, #[])
 
   | .ping =>
     (pAck, #[])
