@@ -11,21 +11,6 @@ def overflow : UInt32 := 86400000
 def less (a b : UInt32) : Bool :=
   (a - b) >= overflow
 
-/-- Returns true if `a` is later in time than `b`, accounting for timer wrap-around. -/
-@[inline]
-def greater (a b : UInt32) : Bool :=
-  (b - a) >= overflow
-
-/-- Returns true if `a` is earlier than or equal to `b`. -/
-@[inline]
-def lessEqual (a b : UInt32) : Bool :=
-  !greater a b
-
-/-- Returns true if `a` is later than or equal to `b`. -/
-@[inline]
-def greaterEqual (a b : UInt32) : Bool :=
-  !less a b
-
 /-- Computes the elapsed millisecond difference between two timestamps `a` and `b`. -/
 @[inline]
 def difference (a b : UInt32) : UInt32 :=

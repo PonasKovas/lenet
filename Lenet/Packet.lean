@@ -69,11 +69,6 @@ def unsequenced (data : ByteArray) : Packet :=
 def unreliableFragment (data : ByteArray) : Packet :=
   { data, delivery := .unreliableFragment }
 
-/-- The size in bytes of the packet's payload. -/
-@[inline]
-def size (p : Packet) : Nat :=
-  p.data.size
-
 end Packet
 
 end Lenet

@@ -4,7 +4,7 @@ import Lenet.Time
 /-!
 # Wrap-aware time arithmetic proofs
 
-`Time.difference` / `less` / `greater` interpret 32-bit millisecond timestamps
+`Time.difference` / `less` interpret 32-bit millisecond timestamps
 with ENet's 24-hour disambiguation window. The non-obvious property:
 
 * Translation invariance: `difference (a + k) (b + k) = difference a b` - the

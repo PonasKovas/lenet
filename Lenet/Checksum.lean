@@ -52,10 +52,6 @@ def updateCrc (crc : UInt32) (bytes : ByteArray) : UInt32 :=
       rw [crcTable_size]
       exact UInt8.toNat_lt tableIdx)
 
-/-- Computes ENet CRC32 checksum over a single `ByteArray`. -/
-def crc32 (bytes : ByteArray) : UInt32 :=
-  ~~~(updateCrc 0xFFFFFFFF bytes)
-
 /-- Computes ENet CRC32 checksum across multiple `ByteArray` buffers. -/
 def crc32Buffers (buffers : Array ByteArray) : UInt32 :=
   let finalCrc := buffers.foldl (init := 0xFFFFFFFF) updateCrc
