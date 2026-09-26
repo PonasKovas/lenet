@@ -167,6 +167,13 @@ theorem assemblerArrayAfterDeliver_size (xs : Array FragmentAssembler)
       (p := fun a : FragmentAssembler =>
         a.startSequenceNumber ≠ params.startSequenceNumber)) (Nat.le_refl _)
 
+/-- Channel delivery leaves the assemblers alone. -/
+theorem receiveOnChannel_fragmentAssemblers (p : Peer) (channelId : UInt8)
+    (receive : Channel → Channel × Array Packet) :
+    (p.receiveOnChannel channelId receive).1.fragmentAssemblers = p.fragmentAssemblers := by
+  unfold receiveOnChannel
+  split <;> rfl
+
 /-- `handleFragment` never grows the assembler array beyond the cap: when the
 gate passes, both match arms set `fragmentAssemblers :=
 assemblerArrayAfterDeliver xs params result`, which never exceeds
@@ -189,9 +196,9 @@ theorem handleFragment_cap_preserved (p : Peer) (channelId : UInt8)
     have hxs := absorbFragment_cap_preserved p.fragmentAssemblers params hcap
     rw [hfst] at hxs
     -- every delivery arm keeps `fragmentAssemblers := assemblerArrayAfterDeliver …`
-    split <;> try split
-    all_goals
-      exact Nat.le_trans (assemblerArrayAfterDeliver_size _ _ _) hxs
+    split
+    all_goals (try rw [receiveOnChannel_fragmentAssemblers])
+    all_goals exact Nat.le_trans (assemblerArrayAfterDeliver_size _ _ _) hxs
   · rw [if_pos (by simp [hg] : ((!fragmentGateOk p channelId params unreliable) = true))]
     exact hcap
 end Lenet.Proofs

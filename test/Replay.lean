@@ -387,12 +387,7 @@ private def applyApi (st : ReplayState) (ms : UInt32) : ApiCall → ReplayState
       let cid? := st.recordedConnectIds.head?
       let st := { st with recordedConnectIds := st.recordedConnectIds.drop 1 }
       let h := match cid? with
-        | some cid =>
-          let idx := pid.toNat
-          if hIdx : idx < h.peers.size then
-            let p := h.peers[idx]'hIdx
-            { h with peers := h.peers.set idx { p with connectId := cid } hIdx }
-          else h
+        | some cid => h.modifyPeer pid ({ · with connectId := cid })
         | none => h
       service { st with host := h } ms
     | .error e => service { st with errors := st.errors.push s!"connect failed: {e}" } ms
@@ -408,13 +403,7 @@ private def applyApi (st : ReplayState) (ms : UInt32) : ApiCall → ReplayState
   | .throttleconf peer interval accel decel =>
     service { st with host := st.host.throttleConfigure peer interval accel decel } ms
   | .peertimeout limit mn mx =>
-    let st2 :=
-      if h : 0 < st.host.peers.size then
-        let peer := st.host.peers[0]
-        let peer' := { peer with timeoutLimit := limit, timeoutMinimum := mn, timeoutMaximum := mx }
-        { st with host := { st.host with peers := st.host.peers.set 0 peer' h } }
-      else st
-    service st2 ms
+    service { st with host := st.host.setPeerTimeout 0 limit mn mx } ms
   | .stop => { st with stoppedFlag := true }
 
 /-- The proxy address a datagram in `dir` travels through (the `from`

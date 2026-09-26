@@ -81,12 +81,7 @@ def ffi_peer_throttle_configure (ctxRef : IO.Ref HostContext) (peerId : UInt16) 
 
 @[export lenet_ffi_set_peer_timeout]
 def ffi_set_peer_timeout (ctxRef : IO.Ref HostContext) (peerId : UInt16) (limit mn mx : UInt32) : IO Unit := do
-  let ctx ← ctxRef.get
-  let idx := peerId.toNat
-  if h : idx < ctx.host.peers.size then
-    let p := ctx.host.peers[idx]
-    let p' := { p with timeoutLimit := limit, timeoutMinimum := mn, timeoutMaximum := mx }
-    ctxRef.set { ctx with host := { ctx.host with peers := ctx.host.peers.set idx p' h } }
+  ctxRef.modify fun ctx => { ctx with host := ctx.host.setPeerTimeout peerId limit mn mx }
 
 @[export lenet_ffi_host_handle_datagram]
 def ffi_host_handle_datagram (ctxRef : IO.Ref HostContext) (nowMs : UInt32) (srcIp : UInt32) (srcPort : UInt16) (data : ByteArray) : IO Int32 := do

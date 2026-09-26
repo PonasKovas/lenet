@@ -38,9 +38,6 @@ deriving BEq, Inhabited
 
 namespace Channel
 
-/-- Creates an initialized, reset channel. -/
-def init : Channel := {}
-
 /-- Any index reduced mod the window count is a valid window slot. -/
 theorem modWindowIndex_lt (i : Nat) :
     i % Constants.reliableWindows < Constants.reliableWindows :=

@@ -26,9 +26,6 @@ deriving BEq, Inhabited
 
 namespace UnsequencedWindow
 
-/-- Creates an initialized unsequenced window. -/
-def init : UnsequencedWindow := {}
-
 /-- Any index reduced mod the window size is a valid ring slot. -/
 theorem modSlot_lt (i : Nat) :
     i % Constants.unsequencedWindowSize < Constants.unsequencedWindowSize :=

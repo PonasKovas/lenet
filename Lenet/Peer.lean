@@ -11,15 +11,14 @@ import Lenet.Event
 
 namespace Lenet
 
-/--
-Lifecycle state machine of an ENet peer connection.
--/
+/-- Lifecycle of an ENet peer connection (ENet's `ENetPeerState`, minus the
+two states that only exist for ENet's deferred event dispatch). -/
 inductive PeerState where
   | disconnected
+  /-- Client: CONNECT sent, waiting for the VERIFY_CONNECT. -/
   | connecting
+  /-- Server: VERIFY_CONNECT sent, waiting for its ACK. -/
   | acknowledgingConnect
-  | connectionPending
-  | connectionSucceeded
   | connected
   | disconnectLater
   | disconnecting
@@ -27,10 +26,17 @@ inductive PeerState where
   | zombie
 deriving Repr, BEq, DecidableEq, Inhabited
 
-/--
-A peer endpoint representing a remote connected host.
-Manages channels, sequence numbers, congestion throttling, and RTT estimation.
--/
+/-- An acknowledgement owed to the remote peer: echoes the acknowledged
+command's channel and reliable sequence number, and the sent time from the
+datagram header it arrived in. -/
+structure Acknowledgement where
+  channelId              : UInt8
+  reliableSequenceNumber : UInt16
+  sentTime               : UInt16
+deriving BEq, Inhabited
+
+/-- One peer slot of a host: connection state, channels, RTT estimate,
+packet throttle and the command queues. -/
 structure Peer where
   peerId                         : UInt16 := 0
   outgoingPeerId                 : UInt16 := Constants.maximumPeerId
@@ -65,16 +71,16 @@ structure Peer where
   packetThrottleInterval         : UInt32 := Constants.defaultPacketThrottleInterval
   eventData                      : UInt32 := 0
   reliableDataInTransit          : Nat := 0
-  /-- Sequence counter for reliable control commands sent on channel 0xFF
-  (connect/verifyConnect/disconnect/ping). ENet uses `channels[0xFF]`, which is
-  out of bounds but in practice acts as a persistent counter starting at 0. -/
+  /-- Sequence counter of the reliable control commands on channel 0xFF
+  (connect, verify, disconnect, ping, bandwidth/throttle configuration);
+  ENet's `peer->outgoingReliableSequenceNumber`. -/
   outgoingControlSeq             : UInt16 := 0
   /-- Group number assigned to outgoing unsequenced packets (pre-incremented,
   so the first unsequenced packet is group 1, matching ENet). -/
   outgoingUnsequencedGroup       : UInt16 := 0
   outgoingCommands               : Array OutgoingCommand := #[]
   sentReliableCommands           : Array OutgoingCommand := #[]
-  acknowledgements               : Array (UInt8 × UInt16 × UInt16) := #[]
+  acknowledgements               : Array Acknowledgement := #[]
   fragmentAssemblers             : Array FragmentAssembler := #[]
 deriving BEq, Inhabited
 
@@ -88,288 +94,215 @@ def reset (p : Peer) : Peer :=
     incomingSessionId := p.incomingSessionId
     outgoingSessionId := p.outgoingSessionId }
 
+/-- ENet counts CONNECTED and DISCONNECT_LATER peers as connected: they share
+the host's bandwidth, and only they process data commands (protocol.c
+handle_incoming_commands). -/
+def isConnected (p : Peer) : Bool :=
+  p.state == .connected ∨ p.state == .disconnectLater
+
+/-! ## Outgoing commands -/
+
 /-- Queues an outgoing command for transmission. -/
 def queueOutgoingCommand (p : Peer) (cmd : OutgoingCommand) : Peer :=
   { p with outgoingCommands := p.outgoingCommands.push cmd }
 
-/-- Pre-increments and returns the control-command sequence number (channel 0xFF). -/
-def nextControlSeq (p : Peer) : Peer × UInt16 :=
-  let next := p.outgoingControlSeq + 1
-  ({ p with outgoingControlSeq := next }, next)
+/-- Queues a reliable control command on channel 0xFF, numbered by the
+peer-level control sequence (pre-incremented: the first one is 1). -/
+def queueControlCommand (p : Peer) (body : Protocol.CommandBody) : Peer :=
+  let seq := p.outgoingControlSeq + 1
+  { p with outgoingControlSeq := seq }.queueOutgoingCommand
+    { command := { channelId := 0xFF, reliableSequenceNumber := seq, acknowledge := true, body } }
 
-/-- Queues the graceful-disconnect DISCONNECT command (control channel 0xFF)
-and enters the `disconnecting` state (ENet's enet_peer_disconnect). -/
+/-- Queues the graceful-disconnect DISCONNECT command and enters the
+`disconnecting` state (ENet's enet_peer_disconnect). -/
 def queueDisconnect (p : Peer) (data : UInt32) : Peer :=
-  let (p, controlSeq) := p.nextControlSeq
-  let cmd : Protocol.Command := {
-    channelId              := 0xFF
-    reliableSequenceNumber := controlSeq
-    acknowledge            := true
-    unsequenced            := false
-    body                   := .disconnect data
-  }
-  { p with state := .disconnecting, eventData := data }
-    |>.queueOutgoingCommand { command := cmd }
+  { p with state := .disconnecting, eventData := data }.queueControlCommand (.disconnect data)
 
-/-- Queues an acknowledgment (channelId, reliableSequenceNumber, sentTime) to be sent to this peer. -/
-def queueAck (p : Peer) (channelId : UInt8) (seq : UInt16) (sentTime : UInt16) : Peer :=
-  { p with acknowledgements := p.acknowledgements.push (channelId, seq, sentTime) }
+/-- Queues an acknowledgement for the remote peer. -/
+def queueAck (p : Peer) (ack : Acknowledgement) : Peer :=
+  { p with acknowledgements := p.acknowledgements.push ack }
 
-/--
-Removes an in-flight reliable command upon receiving its acknowledgment.
-Releases the channel's sliding window slot and decrements `reliableDataInTransit`.
--/
+/-- Removes the in-flight reliable command `(channelId, seq)` once it is
+acknowledged: releases its channel window slot and its in-transit bytes.
+Returns the removed command, if there was one. -/
 def removeSentReliableCommand (p : Peer) (channelId : UInt8) (seq : UInt16) : Peer × Option Protocol.Command :=
   match p.sentReliableCommands.find? fun outCmd =>
       outCmd.command.channelId == channelId && outCmd.command.reliableSequenceNumber == seq with
-  | none =>
-    (p, none)
+  | none => (p, none)
   | some outCmd =>
-    -- Release window slot on the channel:
-    let newChannels :=
-      if h : channelId.toNat < p.channels.size then
-        let ch := p.channels[channelId.toNat]
-        p.channels.set channelId.toNat (ch.releaseReliableWindow seq) h
-      else
-        p.channels
-
-    let inTransit :=
-      if p.reliableDataInTransit ≥ outCmd.fragmentLength then
-        p.reliableDataInTransit - outCmd.fragmentLength
-      else
-        0
-
-    let updatedPeer := { p with
+    ({ p with
       sentReliableCommands  := p.sentReliableCommands.erase outCmd
-      channels              := newChannels
-      reliableDataInTransit := inTransit
-    }
-    (updatedPeer, some outCmd.command)
+      channels              := p.channels.modify channelId.toNat (·.releaseReliableWindow seq)
+      -- no underflow: these bytes were added when the command was sent
+      reliableDataInTransit := p.reliableDataInTransit - outCmd.fragmentLength
+    }, some outCmd.command)
 
-/--
-Queues a user packet to be sent on the specified channel of this peer.
-Automatically fragments packets exceeding the channel MTU into individual fragment commands.
--/
-def send (p : Peer) (channelId : UInt8) (packet : Packet) (hasChecksum : Bool := false) : Except LenetError Peer := do
+/-- Largest payload a single command may carry at this peer's MTU before
+the packet is fragmented (ENet enet_peer_send: MTU minus the protocol header,
+the SEND_FRAGMENT command and the checksum). The fallback only matters for an
+MTU below the protocol minimum, which negotiation never produces. -/
+def maxFragmentPayload (p : Peer) (hasChecksum : Bool) : Nat :=
+  let overhead := 4 + 24 + (if hasChecksum then 4 else 0)
+  if p.mtu.toNat > overhead then p.mtu.toNat - overhead else 500
+
+/-- The fragment commands of `packet` (`fragmentCount` pieces of
+`fragmentLength` bytes) and `channel` after numbering them. ENet numbers
+every fragment through setup_outgoing_command: reliable fragments take
+consecutive reliable sequence numbers starting at the set's start sequence
+number, unreliable fragments share one unreliable sequence number and carry
+the channel's current reliable sequence number. -/
+def fragmentCommands (channel : Channel) (channelId : UInt8) (packet : Packet)
+    (fragmentLength fragmentCount : Nat) : Channel × Array OutgoingCommand :=
+  let unreliable := packet.delivery == .unreliableFragment
+  let (next, startSeq) :=
+    if unreliable then channel.nextUnreliableSequenceNumber
+    else channel.nextReliableSequenceNumber
+  let next :=
+    if unreliable then next
+    else { next with outgoingReliableSequenceNumber := startSeq + (fragmentCount - 1).toUInt16 }
+  let commands := (Array.range fragmentCount).map fun i =>
+    let offset := i * fragmentLength
+    let chunk := packet.data.extract offset (offset + fragmentLength)
+    let params : Protocol.FragmentParams := {
+      startSequenceNumber := startSeq
+      fragmentCount       := fragmentCount.toUInt32
+      fragmentNumber      := i.toUInt32
+      totalLength         := packet.data.size.toUInt32
+      fragmentOffset      := offset.toUInt32
+      data                := chunk
+    }
+    { command := {
+        channelId
+        reliableSequenceNumber :=
+          if unreliable then channel.outgoingReliableSequenceNumber else startSeq + i.toUInt16
+        acknowledge := !unreliable
+        body := if unreliable then .sendUnreliableFragment params else .sendFragment params }
+      fragmentLength := chunk.size }
+  (next, commands)
+
+/-- The single command carrying an unfragmented `packet`, with the peer and
+`channel` after numbering it. -/
+def packetCommand (p : Peer) (channel : Channel) (channelId : UInt8) (packet : Packet) :
+    Peer × Channel × Protocol.Command :=
+  match packet.delivery with
+  | .reliable =>
+    let (channel, seq) := channel.nextReliableSequenceNumber
+    (p, channel, { channelId, reliableSequenceNumber := seq, acknowledge := true,
+                   body := .sendReliable packet.data })
+  | .unreliable | .unreliableFragment =>
+    let (channel, seq) := channel.nextUnreliableSequenceNumber
+    (p, channel, { channelId, reliableSequenceNumber := channel.outgoingReliableSequenceNumber,
+                   body := .sendUnreliable seq packet.data })
+  | .unsequenced =>
+    -- the unsequenced group is peer-level and pre-incremented (first = 1)
+    let group := p.outgoingUnsequencedGroup + 1
+    ({ p with outgoingUnsequencedGroup := group }, channel,
+      { channelId, reliableSequenceNumber := 0, unsequenced := true,
+        body := .sendUnsequenced group packet.data })
+
+/-- Queues `packet` on `channelId` (ENet enet_peer_send). Packets larger
+than `maxFragmentPayload` are split into fragments: reliable ones unless the
+packet explicitly allows unreliable fragmentation. -/
+def send (p : Peer) (channelId : UInt8) (packet : Packet) (hasChecksum : Bool := false) :
+    Except LenetError Peer := do
   if p.state ≠ .connected then
     throw (.peerNotConnected p.peerId)
-  if h : channelId.toNat < p.channels.size then
-    let channel := p.channels[channelId.toNat]
-    let headerOverhead : Nat := 4 + (if hasChecksum then 4 else 0)
-    -- ENet: mtu - sizeof(ENetProtocolHeader) - sizeof(ENetProtocolSendFragment)
-    -- (4-byte protocol header + 24-byte fragment command incl. its 4-byte header)
-    let fragmentOverhead : Nat := headerOverhead + 24
-    let maxPayload : Nat := if p.mtu.toNat > fragmentOverhead then p.mtu.toNat - fragmentOverhead else 500
-
-    if packet.data.size > maxPayload then
-      -- Fragmented packet send
-      let fragmentLength := maxPayload
-      let fragmentCount := (packet.data.size + fragmentLength - 1) / fragmentLength
-
-      if fragmentCount > Constants.maximumFragmentCount then
-        throw (.tooManyFragments packet.data.size)
-
-      let isUnreliableFrag := packet.delivery == .unreliableFragment
-      let (ch', startSeq) :=
-        if isUnreliableFrag then
-          channel.nextUnreliableSequenceNumber
-        else
-          channel.nextReliableSequenceNumber
-
-      -- ENet queues every fragment through setup_outgoing_command, which
-      -- increments the channel's reliable counter per fragment: fragment i
-      -- carries reliableSequenceNumber = startSeq + i (reliable fragments),
-      -- while unreliable fragments all share the channel's current reliable
-      -- sequence number.
-      let endChannel : Channel :=
-        if isUnreliableFrag then
-          ch' -- unreliable counter already advanced once
-        else
-          { ch' with
-            outgoingReliableSequenceNumber :=
-              startSeq + (fragmentCount - 1).toUInt16
-            outgoingUnreliableSequenceNumber := 0 }
-
-      let newChannels := p.channels.set channelId.toNat endChannel h
-
-      let fragments : List OutgoingCommand :=
-        (List.range fragmentCount).map fun i =>
-          let offset := i * fragmentLength
-          let len := Nat.min fragmentLength (packet.data.size - offset)
-          let chunk := packet.data.extract offset (offset + len)
-
-          let fragParams : Protocol.FragmentParams := {
-            startSequenceNumber := startSeq
-            fragmentCount       := fragmentCount.toUInt32
-            fragmentNumber      := i.toUInt32
-            totalLength         := packet.data.size.toUInt32
-            fragmentOffset      := offset.toUInt32
-            data                := chunk
-          }
-
-          let cmdBody : Protocol.CommandBody :=
-            if isUnreliableFrag then
-              .sendUnreliableFragment fragParams
-            else
-              .sendFragment fragParams
-
-          { command := {
-              channelId
-              reliableSequenceNumber :=
-                if isUnreliableFrag then channel.outgoingReliableSequenceNumber
-                else startSeq + i.toUInt16
-              acknowledge            := !isUnreliableFrag
-              unsequenced            := false
-              body                   := cmdBody
-            }
-            fragmentOffset := offset
-            fragmentLength := len }
-
-      let updatedPeer :=
-        fragments.foldl (init := { p with channels := newChannels })
-          fun peer outCmd => peer.queueOutgoingCommand outCmd
-      return updatedPeer
-    else
-      -- Unfragmented single command send
-      let (p2, ch', cmd) := match packet.delivery with
-        | .reliable =>
-          let (ch, seq) := channel.nextReliableSequenceNumber
-          (p, ch, ({
-            channelId
-            reliableSequenceNumber := seq
-            acknowledge            := true
-            unsequenced            := false
-            body                   := .sendReliable packet.data
-          } : Protocol.Command))
-        | .unreliable =>
-          let (ch, unseq) := channel.nextUnreliableSequenceNumber
-          (p, ch, ({
-            channelId
-            reliableSequenceNumber := ch.outgoingReliableSequenceNumber
-            acknowledge            := false
-            unsequenced            := false
-            body                   := .sendUnreliable unseq packet.data
-          } : Protocol.Command))
-        | .unsequenced =>
-          -- ENet pre-increments the peer-level unsequenced group (first = 1).
-          let group := p.outgoingUnsequencedGroup + 1
-          ({ p with outgoingUnsequencedGroup := group },
-            channel,
-            ({
-              channelId
-              reliableSequenceNumber := 0
-              acknowledge            := false
-              unsequenced            := true
-              body                   := .sendUnsequenced group packet.data
-            } : Protocol.Command))
-        | .unreliableFragment =>
-          let (ch, unseq) := channel.nextUnreliableSequenceNumber
-          (p, ch, ({
-            channelId
-            reliableSequenceNumber := ch.outgoingReliableSequenceNumber
-            acknowledge            := false
-            unsequenced            := false
-            body                   := .sendUnreliable unseq packet.data
-          } : Protocol.Command))
-
-      -- `ch'` is the channel's post-send state (unchanged for unsequenced).
-      let newChannels := p.channels.set channelId.toNat ch' h
-
-      let outCmd : OutgoingCommand := {
-        command        := cmd
-        fragmentOffset := 0
-        fragmentLength := packet.data.size
-      }
-      return ({ p2 with channels := newChannels }).queueOutgoingCommand outCmd
+  let some channel := p.channels[channelId.toNat]?
+    | throw (.invalidChannelId p.peerId channelId p.channels.size)
+  let fragmentLength := p.maxFragmentPayload hasChecksum
+  if packet.data.size > fragmentLength then
+    let fragmentCount := (packet.data.size + fragmentLength - 1) / fragmentLength
+    if fragmentCount > Constants.maximumFragmentCount then
+      throw (.tooManyFragments packet.data.size)
+    let (channel, fragments) := fragmentCommands channel channelId packet fragmentLength fragmentCount
+    return fragments.foldl queueOutgoingCommand
+      { p with channels := p.channels.setIfInBounds channelId.toNat channel }
   else
-    throw (.invalidChannelId p.peerId channelId p.channels.size)
+    let (p, channel, cmd) := p.packetCommand channel channelId packet
+    return { p with channels := p.channels.setIfInBounds channelId.toNat channel }
+      |>.queueOutgoingCommand { command := cmd, fragmentLength := packet.data.size }
 
-/--
-Dynamically updates the packet throttle based on current round trip time.
--/
+/-! ## Round-trip time and throttle -/
+
+/-- ENet enet_peer_throttle: adapts the packet throttle to an RTT sample. -/
 def throttle (p : Peer) (rtt : UInt32) : Peer :=
   if p.lastRoundTripTime ≤ p.lastRoundTripTimeVariance then
     { p with packetThrottle := p.packetThrottleLimit }
   else if rtt ≤ p.lastRoundTripTime then
-    let newThrottle := p.packetThrottle + p.packetThrottleAcceleration
-    let clamped := if newThrottle > p.packetThrottleLimit then p.packetThrottleLimit else newThrottle
-    { p with packetThrottle := clamped }
+    { p with packetThrottle := min (p.packetThrottle + p.packetThrottleAcceleration) p.packetThrottleLimit }
   else if rtt > p.lastRoundTripTime + 2 * p.lastRoundTripTimeVariance then
-    let clamped :=
-      if p.packetThrottle > p.packetThrottleDeceleration then
-        p.packetThrottle - p.packetThrottleDeceleration
-      else
-        0
-    { p with packetThrottle := clamped }
+    { p with packetThrottle :=
+        if p.packetThrottle > p.packetThrottleDeceleration then p.packetThrottle - p.packetThrottleDeceleration
+        else 0 }
   else
     p
 
-/--
-Updates smoothed round trip time and variance calculations upon receiving an acknowledgment.
--/
+/-- Folds an RTT sample into the smoothed RTT and variance, the per-epoch
+extremes and the throttle (ENet handle_acknowledge). -/
 def updateRtt (p : Peer) (now : UInt32) (rtt : UInt32) : Peer :=
-  let sampleRtt := if rtt == 0 then (1 : UInt32) else rtt
-  let pThrottled := if p.lastReceiveTime > 0 then p.throttle sampleRtt else p
-
-  let (newRtt, newVar) :=
+  let sample := max rtt 1
+  let (p, rtt, var) :=
     if p.lastReceiveTime > 0 then
-      let curVar := pThrottled.roundTripTimeVariance - (pThrottled.roundTripTimeVariance / 4)
-      if sampleRtt ≥ pThrottled.roundTripTime then
-        let diff := sampleRtt - pThrottled.roundTripTime
-        (pThrottled.roundTripTime + diff / 8, curVar + diff / 4)
+      let p := p.throttle sample
+      let var := p.roundTripTimeVariance - p.roundTripTimeVariance / 4
+      if sample ≥ p.roundTripTime then
+        let diff := sample - p.roundTripTime
+        (p, p.roundTripTime + diff / 8, var + diff / 4)
       else
-        let diff := pThrottled.roundTripTime - sampleRtt
-        (pThrottled.roundTripTime - diff / 8, curVar + diff / 4)
+        let diff := p.roundTripTime - sample
+        (p, p.roundTripTime - diff / 8, var + diff / 4)
     else
-      (sampleRtt, (sampleRtt + 1) / 2)
-
-  let lowestRtt := if newRtt < pThrottled.lowestRoundTripTime then newRtt else pThrottled.lowestRoundTripTime
-  let highestVar := if newVar > pThrottled.highestRoundTripTimeVariance then newVar else pThrottled.highestRoundTripTimeVariance
-
-  let pEpoch :=
-    if pThrottled.packetThrottleEpoch == 0 ∨ Time.difference now pThrottled.packetThrottleEpoch ≥ pThrottled.packetThrottleInterval then
-      { pThrottled with
-        lastRoundTripTime            := lowestRtt
-        lastRoundTripTimeVariance    := if highestVar == 0 then (1 : UInt32) else highestVar
-        lowestRoundTripTime          := newRtt
-        highestRoundTripTimeVariance := newVar
-        packetThrottleEpoch          := now
-      }
-    else
-      pThrottled
-
-  { pEpoch with
-    roundTripTime                := newRtt
-    roundTripTimeVariance        := newVar
-    lowestRoundTripTime          := lowestRtt
+      (p, sample, (sample + 1) / 2)
+  let lowest := min rtt p.lowestRoundTripTime
+  let highestVar := max var p.highestRoundTripTimeVariance
+  -- at each throttle epoch the epoch's extremes become the reference
+  -- values the throttle compares against
+  let p :=
+    if p.packetThrottleEpoch == 0 ∨
+        Time.difference now p.packetThrottleEpoch ≥ p.packetThrottleInterval then
+      { p with
+        lastRoundTripTime         := lowest
+        lastRoundTripTimeVariance := max highestVar 1
+        packetThrottleEpoch       := now }
+    else p
+  { p with
+    roundTripTime                := rtt
+    roundTripTimeVariance        := var
+    lowestRoundTripTime          := lowest
     highestRoundTripTimeVariance := highestVar
-    lastReceiveTime              := if now == 0 then (1 : UInt32) else now
-    earliestTimeout              := 0
-  }
+    lastReceiveTime              := max now 1
+    earliestTimeout              := 0 }
 
-/--
-Checks whether a peer has exceeded timeout limits on unacknowledged reliable commands.
-`earliestTimeout` is the *updated* earliest timeout (ENet updates
-`peer->earliestTimeout` within the same check_timeouts iteration and then
-evaluates the condition against the fresh value).
--/
+/-- Whether the peer has exceeded its timeout limits (ENet check_timeouts).
+`earliestTimeout` is the *updated* earliest timeout: ENet updates
+`peer->earliestTimeout` within the same iteration and evaluates the
+condition against the fresh value. -/
 def isTimedOut (p : Peer) (now : UInt32) (earliestTimeout : UInt32) (sendAttempts : Nat) : Bool :=
   if earliestTimeout == 0 then
     false
   else
     let elapsed := Time.difference now earliestTimeout
-    let attemptThreshold := (1 : UInt32) <<< (if sendAttempts == 0 then 0 else (sendAttempts - 1).toUInt32)
+    let attemptThreshold := (1 : UInt32) <<< (sendAttempts - 1).toUInt32
     elapsed ≥ p.timeoutMaximum ∨ (attemptThreshold ≥ p.timeoutLimit ∧ elapsed ≥ p.timeoutMinimum)
 
-/-- ENet processes incoming data commands only in these states
-(protocol.c `handle_command`: CONNECTED or DISCONNECT_LATER). -/
-def acceptsTraffic (p : Peer) : Bool :=
-  p.state == .connected ∨ p.state == .disconnectLater
+/-! ## Incoming commands -/
+
+/-- Runs a channel's receive step on channel `channelId` and turns what it
+delivers into receive events. Commands for a channel the peer does not have
+are dropped. -/
+def receiveOnChannel (p : Peer) (channelId : UInt8) (receive : Channel → Channel × Array Packet) :
+    Peer × Array Event :=
+  if h : channelId.toNat < p.channels.size then
+    let (ch, delivered) := receive p.channels[channelId.toNat]
+    ({ p with channels := p.channels.set channelId.toNat ch h },
+      delivered.map (Event.receive p.peerId channelId))
+  else
+    (p, #[])
 
 /-- Absorbs a fragment into the assembler array: finds the assembler for
 `params.startSequenceNumber` (creating one when below the concurrency cap
 `maximumFragmentAssemblers` and the fragment count is within
-`maximumReceivedFragmentCount` - robustness guards, DESIGN.md 1.5,
+`maximumReceivedFragmentCount` - robustness guards, DESIGN.md,
 deliberately stricter than ENet whose pending-assembler growth is bounded
 only by its window span). Returns the (possibly grown) array and the
 assembler to deliver to. -/
@@ -378,10 +311,10 @@ def absorbFragment (xs : Array FragmentAssembler) (params : Protocol.FragmentPar
   match xs.find? (fun a => a.startSequenceNumber == params.startSequenceNumber) with
   | some asm => (xs, some asm)
   | none =>
-      if xs.size ≥ Constants.maximumFragmentAssemblers ∨
-          params.fragmentCount.toNat = 0 ∨
-          params.fragmentCount.toNat > Constants.maximumReceivedFragmentCount then
-        (xs, none)
+    if xs.size ≥ Constants.maximumFragmentAssemblers ∨
+        params.fragmentCount.toNat = 0 ∨
+        params.fragmentCount.toNat > Constants.maximumReceivedFragmentCount then
+      (xs, none)
     else
       match FragmentAssembler.init params.startSequenceNumber params.totalLength.toNat
           params.fragmentCount.toNat with
@@ -408,8 +341,7 @@ def assemblerArrayAfterDeliver (xs : Array FragmentAssembler)
 reliable fragments must be inside the receive window and not duplicate the
 dispatch frontier (protocol.c handle_send_fragment's cyclic window check plus
 peer.c queue_incoming_command's duplicate check) - anything else is a stale or
-duplicate fragment set and is dropped. Unreliable fragments keep Lenet's
-existing dispatch model. -/
+duplicate fragment set and is dropped. -/
 def fragmentGateOk (p : Peer) (channelId : UInt8) (params : Protocol.FragmentParams)
     (unreliable : Bool) : Bool :=
   if unreliable then true
@@ -421,215 +353,152 @@ def fragmentGateOk (p : Peer) (channelId : UInt8) (params : Protocol.FragmentPar
         params.startSequenceNumber ≠ ch.incomingReliableSequenceNumber
 
 /-- Delivers a fragment to the (possibly newly created) assembler for
-`params.startSequenceNumber` and returns the updated peer with any receive
-event fired on assembly completion. Fragments with invalid parameters (which
-ENet validates identically on receipt) are dropped. -/
-  def handleFragment (p : Peer) (channelId : UInt8) (params : Protocol.FragmentParams)
-      (unreliable : Bool) : Peer × Array Event :=
-    if !fragmentGateOk p channelId params unreliable then
-      (p, #[])
-    else
-      let (xs, assembler?) := absorbFragment p.fragmentAssemblers params
-      let result : Option (Except CodecError (FragmentAssembler × Option ByteArray)) :=
-        assembler?.bind
-          (fun asm => asm.addFragment params.fragmentNumber.toNat params.fragmentOffset.toNat params.data)
-      let p' := { p with fragmentAssemblers := assemblerArrayAfterDeliver xs params result }
-      match result with
-      | some (.ok (_, some fullData)) =>
-        -- Assembly complete: the assembler is consumed and the reassembled
-        -- payload goes through the channel's reliable/unreliable receive path.
-        -- The reliable delivery spans `fragmentCount` sequence numbers (ENet
-        -- advances the dispatch frontier by the whole span at dispatch).
-        let chIdx := channelId.toNat
-        if h : chIdx < p'.channels.size then
-          let ch := p'.channels[chIdx]
-          let (ch', events) :=
-            if unreliable then
-              let (ch', deliveredOpt) := ch.receiveUnreliable params.startSequenceNumber (Packet.unreliableFragment fullData)
-              (ch', deliveredOpt.map (fun pkt => Event.receive p'.peerId channelId pkt) |>.toArray)
-            else
-              let (ch', delivered) :=
-                ch.receiveReliableSpan params.startSequenceNumber params.fragmentCount.toNat
-                  (Packet.reliable fullData)
-              (ch', delivered.map (fun (_, pkt) => Event.receive p'.peerId channelId pkt))
-          ({ p' with channels := p'.channels.set chIdx ch' h }, events)
+`params.startSequenceNumber`. When the fragment completes the packet, the
+assembler is consumed and the packet goes through the channel's receive
+path; a reliable set occupies `fragmentCount` sequence numbers (ENet
+advances the dispatch frontier by the whole span). Fragments with invalid
+parameters (which ENet validates identically) are dropped. -/
+def handleFragment (p : Peer) (channelId : UInt8) (params : Protocol.FragmentParams)
+    (unreliable : Bool) : Peer × Array Event :=
+  if !fragmentGateOk p channelId params unreliable then
+    (p, #[])
+  else
+    let (xs, assembler?) := absorbFragment p.fragmentAssemblers params
+    let result : Option (Except CodecError (FragmentAssembler × Option ByteArray)) :=
+      assembler?.bind fun asm =>
+        asm.addFragment params.fragmentNumber.toNat params.fragmentOffset.toNat params.data
+    let p := { p with fragmentAssemblers := assemblerArrayAfterDeliver xs params result }
+    match result with
+    | some (.ok (_, some data)) =>
+      p.receiveOnChannel channelId fun ch =>
+        if unreliable then
+          let (ch, delivered) := ch.receiveUnreliable params.startSequenceNumber (.unreliableFragment data)
+          (ch, delivered.toArray)
         else
-          (p', #[])
-      | _ => (p', #[])
+          let (ch, delivered) :=
+            ch.receiveReliableSpan params.startSequenceNumber params.fragmentCount.toNat (.reliable data)
+          (ch, delivered.map (·.2))
+    | _ => (p, #[])
 
-/--
-Processes a single incoming protocol command received from this peer.
-- Automatically queues an ACK if the command requested acknowledgment.
-- Updates RTT, sliding window state, and fragment assembly.
-- Returns the updated `Peer` and any high-level `Event`s produced.
--/
-def handleCommand (p : Peer) (now : UInt32) (cmd : Protocol.Command) (sentTime : Option UInt16) : Peer × Array Event :=
-  -- 1. Queue ACK if required:
-  let pAck :=
-    if cmd.acknowledge then
-      if let some st := sentTime then
-        p.queueAck cmd.channelId cmd.reliableSequenceNumber st
-      else
-        p
-    else
-      p
-
-  -- 2. Process command body:
+/-- Handles a data command (send reliable/unreliable/unsequenced/fragment);
+other commands are ignored. -/
+def handleData (p : Peer) (cmd : Protocol.Command) : Peer × Array Event :=
   match cmd.body with
-  | .acknowledge recvSeq recvTime =>
-    -- the echoed sent time is the low 16 bits of our clock
-    let sent := Time.fromWire now recvTime
-    if Time.less now sent then
-      (pAck, #[]) -- acknowledges a send from the future: ignored (ENet)
-    else
-      let pRtt := pAck.updateRtt now (Time.difference now sent)
-      let (pRemoved, removedCmd?) := pRtt.removeSentReliableCommand cmd.channelId recvSeq
-
-      match pRemoved.state, removedCmd? with
-      | .acknowledgingConnect, some removedCmd =>
-        if removedCmd.body.commandNumber == Constants.commandVerifyConnect then
-          ({ pRemoved with state := .connected }, #[Event.connect pRemoved.peerId pRemoved.eventData])
-        else
-          (pRemoved, #[])
-      | .disconnecting, some removedCmd =>
-        if removedCmd.body.commandNumber == Constants.commandDisconnect then
-          -- ENet's notify_disconnect: event (data = 0) + enet_peer_reset, so
-          -- the slot is immediately reusable for a new connection.
-          (Peer.reset pRemoved, #[Event.disconnect pRemoved.peerId 0])
-        else
-          (pRemoved, #[])
-      | .disconnectLater, _ =>
-        -- ENet (handle_acknowledge): once the acks have drained, queue the
-        -- actual DISCONNECT (en_peer_disconnect) carrying the deferred data.
-        if pRemoved.outgoingCommands.isEmpty ∧ pRemoved.sentReliableCommands.isEmpty then
-          (pRemoved.queueDisconnect pRemoved.eventData, #[])
-        else
-          (pRemoved, #[])
-      | _, _ =>
-        (pRemoved, #[])
-
-  | .ping =>
-    (pAck, #[])
-
   | .sendReliable data =>
-    if pAck.acceptsTraffic then
-      let chIdx := cmd.channelId.toNat
-      if h : chIdx < pAck.channels.size then
-        let ch := pAck.channels[chIdx]
-        let (ch', delivered) := ch.receiveReliable cmd.reliableSequenceNumber (Packet.reliable data)
-        let newChannels := pAck.channels.set chIdx ch' h
-          let events := delivered.map (fun (_, pkt) => Event.receive pAck.peerId cmd.channelId pkt)
-        ({ pAck with channels := newChannels }, events)
-      else
-        (pAck, #[])
-    else
-      (pAck, #[])
-
-  | .sendUnreliable unseq data =>
-    if pAck.acceptsTraffic then
-      let chIdx := cmd.channelId.toNat
-      if h : chIdx < pAck.channels.size then
-        let ch := pAck.channels[chIdx]
-        let (ch', deliveredOpt) := ch.receiveUnreliable unseq (Packet.unreliable data)
-        let newChannels := pAck.channels.set chIdx ch' h
-        let events := match deliveredOpt with
-          | some pkt => #[Event.receive pAck.peerId cmd.channelId pkt]
-          | none     => #[]
-        ({ pAck with channels := newChannels }, events)
-      else
-        (pAck, #[])
-    else
-      (pAck, #[])
-
+    p.receiveOnChannel cmd.channelId fun ch =>
+      let (ch, delivered) := ch.receiveReliable cmd.reliableSequenceNumber (.reliable data)
+      (ch, delivered.map (·.2))
+  | .sendUnreliable seq data =>
+    p.receiveOnChannel cmd.channelId fun ch =>
+      let (ch, delivered) := ch.receiveUnreliable seq (.unreliable data)
+      (ch, delivered.toArray)
   | .sendUnsequenced group data =>
-    if pAck.acceptsTraffic then
-      match pAck.unsequencedWindow.checkAndAdd group with
-      | some newWin =>
-        let updatedPeer := { pAck with unsequencedWindow := newWin }
-        (updatedPeer, #[Event.receive pAck.peerId cmd.channelId (Packet.unsequenced data)])
-      | none =>
-        (pAck, #[])
-    else
-      (pAck, #[])
+    match p.unsequencedWindow.checkAndAdd group with
+    | some window =>
+      ({ p with unsequencedWindow := window }, #[.receive p.peerId cmd.channelId (.unsequenced data)])
+    | none => (p, #[])
+  | .sendFragment params => p.handleFragment cmd.channelId params (unreliable := false)
+  | .sendUnreliableFragment params => p.handleFragment cmd.channelId params (unreliable := true)
+  | _ => (p, #[])
 
-  | .sendFragment params =>
-    if pAck.acceptsTraffic then
-      handleFragment pAck cmd.channelId params (unreliable := false)
-    else
-      (pAck, #[])
+/-- Handles an ACK (ENet handle_acknowledge): updates the RTT, retires the
+acknowledged command, and completes a pending handshake or disconnect. -/
+def handleAcknowledge (p : Peer) (now : UInt32) (channelId : UInt8) (seq sentTime : UInt16) :
+    Peer × Array Event :=
+  -- the echoed sent time is the low 16 bits of our clock
+  let sent := Time.fromWire now sentTime
+  if Time.less now sent then
+    (p, #[]) -- acknowledges a send from the future: ignored (ENet)
+  else
+    let (p, acked?) := (p.updateRtt now (Time.difference now sent)).removeSentReliableCommand channelId seq
+    let ackedNumber := acked?.map (·.body.commandNumber)
+    match p.state with
+    | .acknowledgingConnect =>
+      if ackedNumber == some Constants.commandVerifyConnect then
+        ({ p with state := .connected }, #[.connect p.peerId p.eventData])
+      else (p, #[])
+    | .disconnecting =>
+      if ackedNumber == some Constants.commandDisconnect then
+        -- ENet's notify_disconnect: event (data = 0) + reset, so the slot is
+        -- immediately reusable
+        (p.reset, #[.disconnect p.peerId 0])
+      else (p, #[])
+    | .disconnectLater =>
+      -- once everything is acknowledged, the deferred DISCONNECT goes out
+      if p.outgoingCommands.isEmpty ∧ p.sentReliableCommands.isEmpty then
+        (p.queueDisconnect p.eventData, #[])
+      else (p, #[])
+    | _ => (p, #[])
 
-  | .sendUnreliableFragment params =>
-    if pAck.acceptsTraffic then
-      handleFragment pAck cmd.channelId params (unreliable := true)
-    else
-      (pAck, #[])
+/-- Handles a DISCONNECT (ENet handle_disconnect). A connected peer
+acknowledges it and resets once that ACK is out (`Host.pollPeer`); a peer
+still handshaking resets immediately. -/
+def handleDisconnect (p : Peer) (data : UInt32) : Peer × Array Event :=
+  match p.state with
+  | .disconnected | .zombie | .acknowledgingDisconnect => (p, #[])
+  | .connected | .disconnectLater => ({ p with state := .acknowledgingDisconnect, eventData := data }, #[])
+  | _ => (p.reset, #[.disconnect p.peerId data])
 
-  | .disconnect data =>
-    -- ENet enet_protocol_handle_disconnect:
-    -- - already disconnecting/zombie/acknowledgingDisconnect: ignore
-    -- - connected/disconnectLater + ack-flagged: ACKNOWLEDGING_DISCONNECT;
-    --   the ACK goes out at the next pack and the peer resets once the acks
-    --   have drained (Host.pollPeer - ENet dispatches ZOMBIE in
-    --   send_acknowledgements and resets when the event is dispatched).
-    -- - other states: ZOMBIE-equivalent immediately (event + reset).
-    if pAck.state == .disconnected ∨ pAck.state == .zombie ∨ pAck.state == .acknowledgingDisconnect then
-      (pAck, #[])
-    else if pAck.state == .connected ∨ pAck.state == .disconnectLater then
-      ({ pAck with state := .acknowledgingDisconnect, eventData := data }, #[])
-    else
-      (Peer.reset { pAck with eventData := data }, #[Event.disconnect pAck.peerId data])
+/-- Handles the server's VERIFY_CONNECT, completing the client's handshake
+(ENet handle_verify_connect). -/
+def handleVerifyConnect (p : Peer) (params : Protocol.ConnectParams) : Peer × Array Event :=
+  if p.state != .connecting then
+    (p, #[])
+  else if params.channelCount.toNat < Constants.minimumChannelCount ∨
+      params.channelCount.toNat > Constants.maximumChannelCount ∨
+      params.packetThrottleInterval != p.packetThrottleInterval ∨
+      params.packetThrottleAcceleration != p.packetThrottleAcceleration ∨
+      params.packetThrottleDeceleration != p.packetThrottleDeceleration ∨
+      params.connectId != p.connectId then
+    -- not an answer to our CONNECT: ENet dispatches ZOMBIE (event + reset)
+    (p.reset, #[.disconnect p.peerId 0])
+  else
+    -- the VERIFY_CONNECT stands in for the ACK of our CONNECT
+    let (p, _) := p.removeSentReliableCommand 0xFF 1
+    -- the server's MTU and window are clamped to the protocol range and can
+    -- only shrink the client's own values
+    let clamp (lo hi : Nat) (v : UInt32) : Nat := Nat.min hi (Nat.max lo v.toNat)
+    let mtu := clamp Constants.minimumMtu Constants.maximumMtu params.mtu
+    let windowSize := clamp Constants.minimumWindowSize Constants.maximumWindowSize params.windowSize
+    let p := { p with
+      outgoingPeerId    := params.outgoingPeerId
+      incomingSessionId := params.incomingSessionId
+      outgoingSessionId := params.outgoingSessionId
+      channels          := p.channels.take params.channelCount.toNat
+      mtu               := Nat.min p.mtu.toNat mtu |>.toUInt32
+      windowSize        := Nat.min p.windowSize.toNat windowSize |>.toUInt32
+      incomingBandwidth := params.incomingBandwidth
+      outgoingBandwidth := params.outgoingBandwidth
+      state             := .connected }
+    (p, #[.connect p.peerId p.eventData])
 
+/-- Processes one incoming command from this peer: queues the ACK it asks
+for, then applies it. Returns the updated peer and the events produced. -/
+def handleCommand (p : Peer) (now : UInt32) (cmd : Protocol.Command) (sentTime : Option UInt16) :
+    Peer × Array Event :=
+  let p := match cmd.acknowledge, sentTime with
+    | true, some sentTime =>
+      p.queueAck { channelId := cmd.channelId, reliableSequenceNumber := cmd.reliableSequenceNumber, sentTime }
+    | _, _ => p
+  match cmd.body with
+  | .acknowledge seq sentTime => p.handleAcknowledge now cmd.channelId seq sentTime
+  | .disconnect data => p.handleDisconnect data
+  | .verifyConnect params => p.handleVerifyConnect params
   | .bandwidthLimit inBw outBw =>
-    -- ENet recomputes the peer's windowSize here too (handle_bandwidth_limit),
-    -- but that needs the *host's* outgoing bandwidth, so the recompute happens
-    -- at host level after the command fold (see Host.handleDatagram).
-    ({ pAck with incomingBandwidth := inBw, outgoingBandwidth := outBw }, #[])
-
+    -- ENet also recomputes the window size here, which needs the host's
+    -- outgoing bandwidth: `Host.handleDatagram` does that
+    ({ p with incomingBandwidth := inBw, outgoingBandwidth := outBw }, #[])
   | .throttleConfigure interval accel decel =>
-    ({ pAck with
-       packetThrottleInterval     := interval
-       packetThrottleAcceleration := accel
-       packetThrottleDeceleration := decel
-    }, #[])
-
-  | .verifyConnect params =>
-    -- Client side: the server's VERIFY_CONNECT completes the handshake
-    -- (ENet: enet_protocol_handle_verify_connect).
-    if pAck.state != .connecting then
-      (pAck, #[])
-    else if params.channelCount.toNat < Constants.minimumChannelCount ∨
-        params.channelCount.toNat > Constants.maximumChannelCount ∨
-        params.packetThrottleInterval != pAck.packetThrottleInterval ∨
-        params.packetThrottleAcceleration != pAck.packetThrottleAcceleration ∨
-        params.packetThrottleDeceleration != pAck.packetThrottleDeceleration ∨
-        params.connectId != pAck.connectId then
-      -- not an answer to our CONNECT: ENet dispatches ZOMBIE (event + reset)
-      (Peer.reset pAck, #[Event.disconnect pAck.peerId 0])
-    else
-      -- ENet removes the client's CONNECT from the sent-reliable list here
-      -- (nothing ever ACKs it - the VERIFY_CONNECT replaces it).
-      let (pRm, _) := pAck.removeSentReliableCommand 0xFF 1
-      -- The server's MTU and window are clamped to the protocol range and
-      -- can only shrink the client's own values.
-      let clamp (lo hi : Nat) (v : UInt32) : Nat := Nat.min hi (Nat.max lo v.toNat)
-      let mtu := clamp Constants.minimumMtu Constants.maximumMtu params.mtu
-      let ws := clamp Constants.minimumWindowSize Constants.maximumWindowSize params.windowSize
-      let p' := { pRm with
-        outgoingPeerId      := params.outgoingPeerId
-        incomingSessionId   := params.incomingSessionId
-        outgoingSessionId   := params.outgoingSessionId
-        channels            := pRm.channels.take params.channelCount.toNat
-        mtu                 := Nat.min pRm.mtu.toNat mtu |>.toUInt32
-        windowSize          := Nat.min pRm.windowSize.toNat ws |>.toUInt32
-        incomingBandwidth   := params.incomingBandwidth
-        outgoingBandwidth   := params.outgoingBandwidth
-        state               := .connected
-      }
-      (p', #[Event.connect p'.peerId p'.eventData])
-
-  | .connect .. =>
-    -- A CONNECT for an existing peer is invalid; ignore (ENet does the same).
-    (pAck, #[])
+    ({ p with
+      packetThrottleInterval     := interval
+      packetThrottleAcceleration := accel
+      packetThrottleDeceleration := decel }, #[])
+  | .ping => (p, #[])
+  -- a CONNECT for an existing peer is ignored (ENet same)
+  | .connect .. => (p, #[])
+  | .sendReliable .. | .sendUnreliable .. | .sendUnsequenced ..
+  | .sendFragment .. | .sendUnreliableFragment .. =>
+    if p.isConnected then p.handleData cmd else (p, #[])
 
 end Peer
 
