@@ -6,37 +6,32 @@ scenarios pass), unit tests, a lossy-link benchmark, the C distribution,
 and the proofs listed in [DESIGN.md](DESIGN.md#what-is-proven). What
 follows is what is left, roughly in priority order.
 
-## Next step (handoff, 2026-09-26)
+## Next step (handoff, 2026-09-26, second session)
 
-Last done: the lossy link in `bench/Bench.lean` (it found the fragment
-assembler bug fixed in `9881b31`, see test/README.md "Fragment assembler
-lifetime") and the unit tests in `test/Unit.lean`. The testing gaps are
-closed apart from the candidate list below.
+Done this session:
 
-Done since: step 1 of the window invariant. The staging bound did not
-follow from the receiver: a reliable set's span could jump the frontier
-over a staged plain packet and strand it (test/README.md "Reliable packets
-staged inside a span"). Fixed, and `Proofs.stagedReliableInv_size` now
-proves at most `(freeReliableWindows - 1) * reliableWindowSize` staged per
-channel from the receiver alone.
+- **Staging bound, proven.** It did not follow from the receiver: a
+  reliable set's span could jump the frontier over a staged plain packet
+  and strand it (test/README.md "Reliable packets staged inside a span").
+  Fixed; `Proofs.stagedReliableInv_size` bounds every channel at
+  `(freeReliableWindows - 1) * reliableWindowSize`, and `PeerStagedInv`
+  lifts it over every writer of `Peer.channels`.
+- **Array-level assembler invariant, proven** (`AssemblersOk`,
+  `handleFragment_assemblersOk`, `assemblerOk_footprint`).
+- **Sender-side window invariant: false as stated**, for ENet too.
+  `canSendReliable` at the start of window `w` only asks windows
+  `w .. w+9` to be empty, so in-flight commands may sit in `w-6 .. w-1`,
+  while the receiver admits its frontier's window and the next six.
+  Reachable: 1..4095 acked, 4096 lost, 4097..28671 in flight but for one
+  acked number in window 6; the sender may send 28672, the receiver
+  (frontier 4095) refuses it. It is not acked and is resent once 4096 gets
+  through, so nothing breaks and there is nothing to fix. What does hold is
+  the sender-only span item under Proofs.
+- **In-place updates** (Performance): 15-35% faster across the bench.
+  The C API's send no longer copies the host.
 
-Then step 2 turned out false as stated. "Everything the sender sends is
-in the receiver's window" does not hold, for ENet either. `canSendReliable`
-at the start of window `w` only asks windows `w .. w+9` to be empty, so
-in-flight commands may sit in the six windows `w-6 .. w-1`. The receiver
-admits its frontier's window and the next six. Reachable example: 1..4095
-acked, 4096 lost, 4097..28671 in flight but for one acked number in window
-6. The sender may send 28672 (`canSendReliable` is true), the receiver's
-frontier is 4095 and its gate refuses 28672. Nothing breaks: it is not
-acked and is resent once 4096 gets through. Lenet matches ENet here, so
-there is nothing to fix.
-
-What is true, sender side only: when a reliable command is first sent,
-every command still in flight on its channel is fewer than seven windows
-(28672 numbers) behind it. Proving that needs an invariant tying
-`Channel.reliableWindows` to `Peer.sentReliableCommands` through
-`packCommand`, `removeSentReliableCommand`, retransmission and reset.
-Undecided whether that is worth it; the other proof items may pay more.
+Suggested next: the unit-test candidates below (cheap, and past bugs hid
+exactly there), then the event-level properties.
 
 Checks before each commit: `lake build` (library and proofs, including the
 no-panic audit in `Proofs/Panic.lean`), `./.lake/build/bin/unit`,
