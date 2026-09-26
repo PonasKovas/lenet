@@ -638,11 +638,17 @@ def checkPeerTimeouts (p : Peer) (now : UInt32) : Peer × Option Event :=
       earliestTimeout       := scan.earliestTimeout
       reliableDataInTransit := p.reliableDataInTransit - retransmitted }, none)
 
-/-- Queues a keepalive PING when a connected peer has been idle (nothing
-queued or in flight, nothing received) for its ping interval. -/
+/-- Whether a connected peer may ping: nothing reliable queued or in flight
+(ENet send_outgoing_commands pings when a pass packed no reliable command
+and none is in flight; queued unreliable data does not stop it, and a
+queued reliable command always goes out when nothing is in flight). -/
+def pingEligible (p : Peer) : Bool :=
+  p.state == .connected && p.sentReliableCommands.isEmpty && p.outgoingCommands.all (!·.command.acknowledge)
+
+/-- Queues a keepalive PING when a peer that may ping (`pingEligible`) has
+received nothing for its ping interval. -/
 def checkPeerPing (p : Peer) (now : UInt32) : Peer :=
-  if p.state == .connected ∧ p.sentReliableCommands.isEmpty ∧ p.outgoingCommands.isEmpty ∧
-      Time.difference now p.lastReceiveTime ≥ p.pingInterval then
+  if pingEligible p ∧ Time.difference now p.lastReceiveTime ≥ p.pingInterval then
     p.queueControlCommand .ping
   else p
 
@@ -789,8 +795,8 @@ until then instead of busy-polling: between datagram arrivals, calling
 `service` at the returned deadline is sufficient. The candidates are
 - the retransmit/timeout boundary of every in-flight reliable command
   (`sentTime + roundTripTimeout`),
-- the keepalive boundary of every connected, fully drained peer
-  (`lastReceiveTime + pingInterval`),
+- the keepalive boundary of every peer that may ping (`pingEligible`,
+  `lastReceiveTime + pingInterval`),
 - the bandwidth-throttle epoch boundary (always scheduled, so the result is
   never `none` in practice).
 
@@ -804,7 +810,7 @@ def nextDeadline (h : Host) : Option UInt32 :=
     let inFlight := p.sentReliableCommands.foldl (init := acc) fun a outCmd =>
       Time.earliestSome a (outCmd.sentTime + outCmd.roundTripTimeout)
     -- keepalive boundary: only peers that could actually ping right now
-    if p.state == .connected ∧ p.outgoingCommands.isEmpty ∧ p.sentReliableCommands.isEmpty then
+    if pingEligible p then
       Time.earliestSome inFlight (p.lastReceiveTime + p.pingInterval)
     else
       inFlight

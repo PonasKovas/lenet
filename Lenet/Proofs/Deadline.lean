@@ -120,8 +120,7 @@ theorem fold_le {base : UInt32} : ∀ (l : List UInt32) (acc : Option UInt32) (v
 /-! ## `nextDeadline` as a flat fold -/
 
 /-- Keepalive eligibility, exactly as `nextDeadline` tests it. -/
-abbrev pingEligible (p : Peer) : Prop :=
-  p.state == .connected ∧ p.outgoingCommands.isEmpty ∧ p.sentReliableCommands.isEmpty
+abbrev pingEligible (p : Peer) : Prop := Host.pingEligible p = true
 
 /-- One peer's scheduled timers: retransmit boundaries of in-flight reliable
 commands, then the keepalive boundary if the peer could ping now. -/

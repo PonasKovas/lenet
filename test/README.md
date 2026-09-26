@@ -228,6 +228,14 @@ compatibility"). Open, undecided differences are listed in TODO.md.
   so a server application got disconnect events for connections it never
   heard of. `Host.checkPeerTimeouts` and `Peer.handleDisconnect` now reset
   such a peer without an event.
+- **No keepalive while unreliable data is queued (lenet bug - fixed).**
+  ENet's send_outgoing_commands adds a PING once a pass packed no reliable
+  command, nothing reliable is in flight and the peer has been idle for
+  its ping interval; queued unreliable data does not stop it. Lenet pinged
+  only with an empty queue, so a peer streaming unreliable data never
+  pinged: its RTT and throttle went stale, and a dead remote was never
+  timed out. `Host.pingEligible` now follows ENet (ENet also needs room
+  for the PING in the datagram; Lenet sends it in the next one).
 - **Unreliable sequence numbers used up (lenet bug - fixed).** Once a
   channel's unreliable sequence number reaches 0xFFFF, ENet's
   enet_peer_send sends the next unreliable packet reliably (and an

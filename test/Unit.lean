@@ -358,6 +358,19 @@ def hostTests : List Test := [
         { q with channels := q.channels.modify 0 used } }
       let p ← send p (pkt 3000 .unreliableFragment)
       expect (p.clientP.outgoingCommands.any (·.command.body matches .sendFragment ..)) "fragments not reliable" },
+  { name := "queued unreliable data does not stop the keepalive PING"
+    run := fun _ => do
+      let p ← connected
+      let p ← send p (pkt 10 .unreliable)
+      -- idle for longer than the ping interval (ENet pings once a pass packs
+      -- nothing reliable and nothing is in flight)
+      let now := p.now + Constants.defaultPingInterval + 10
+      let (_, outs, _) := p.client.service now
+      let cmds := outs.toList.flatMap fun (_, d) =>
+        match ReaderM.run Protocol.Datagram.decode d with | .ok d => d.commands.toList | .error _ => []
+      expect (cmds.any (·.body matches .sendUnreliable ..)) "unreliable packet not sent"
+      expect (cmds.any (·.body matches .ping)) "no PING"
+      expect (p.client.nextDeadline.any (Time.less · now)) "no keepalive deadline" },
   { name := "a peer that never answers times out between the minimum and maximum"
     run := fun _ => do
       let p ← send (← connected) (pkt 100)
