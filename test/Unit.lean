@@ -339,6 +339,25 @@ def hostTests : List Test := [
       let (q, _, reading) := peer.handleCommand 1001
         { channelId := 0xFF, reliableSequenceNumber := 2, acknowledge := true, body := .bandwidthLimit 1000 2000 } (some 0)
       expect (!reading && q.incomingBandwidth == peer.incomingBandwidth) "BANDWIDTH_LIMIT taken" },
+  { name := "an unreliable packet goes reliable once the unreliable numbers are used up"
+    run := fun _ => do
+      let p ← connected
+      let used := fun (c : Channel) => { c with outgoingUnreliableSequenceNumber := 0xFFFF }
+      let p := { p with client := p.client.modifyPeer p.clientPeer fun q =>
+        { q with channels := q.channels.modify 0 used } }
+      -- ENet enet_peer_send: at 0xFFFF the packet is sent reliably, which
+      -- restarts the unreliable numbering
+      let p ← send p (pkt 10 .unreliable)
+      let q := p.clientP
+      expect (q.outgoingCommands.any (·.command.body matches .sendReliable ..)) "not sent reliably"
+      expect (q.channels[0]!.outgoingUnreliableSequenceNumber == 0) "unreliable numbering not restarted"
+      let p ← send p (pkt 10 .unreliable)
+      expect (p.clientP.outgoingCommands.any (·.command.body matches .sendUnreliable 1 _)) "next one not unreliable 1"
+      -- a fragmented set too
+      let p := { p with client := p.client.modifyPeer p.clientPeer fun q =>
+        { q with channels := q.channels.modify 0 used } }
+      let p ← send p (pkt 3000 .unreliableFragment)
+      expect (p.clientP.outgoingCommands.any (·.command.body matches .sendFragment ..)) "fragments not reliable" },
   { name := "a peer that never answers times out between the minimum and maximum"
     run := fun _ => do
       let p ← send (← connected) (pkt 100)

@@ -228,6 +228,15 @@ compatibility"). Open, undecided differences are listed in TODO.md.
   so a server application got disconnect events for connections it never
   heard of. `Host.checkPeerTimeouts` and `Peer.handleDisconnect` now reset
   such a peer without an event.
+- **Unreliable sequence numbers used up (lenet bug - fixed).** Once a
+  channel's unreliable sequence number reaches 0xFFFF, ENet's
+  enet_peer_send sends the next unreliable packet reliably (and an
+  unreliable fragment set as reliable fragments), which starts the
+  unreliable numbering again. Lenet wrapped the number to 0, so the
+  receiver dropped that packet and every later one as older than the last
+  it delivered: a channel that only streams unreliable data went silent
+  after 65535 packets (18 minutes at 60 Hz). `Peer.packetCommand` and
+  `Peer.fragmentCommands` now fall back to reliable as ENet does.
 - **Refused commands (lenet bug - fixed).** ENet's handlers refuse some
   commands (they return -1, `goto commandError` in
   handle_incoming_commands): data, PING, BANDWIDTH_LIMIT and

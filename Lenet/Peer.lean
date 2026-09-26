@@ -188,10 +188,12 @@ def maxFragmentPayload (p : Peer) (hasChecksum : Bool) : Nat :=
 every fragment through setup_outgoing_command: reliable fragments take
 consecutive reliable sequence numbers starting at the set's start sequence
 number, unreliable fragments share one unreliable sequence number and carry
-the channel's current reliable sequence number. -/
+the channel's current reliable sequence number. Once the channel's
+unreliable sequence number is used up (0xFFFF), the set goes reliable, which
+starts the unreliable numbering again (ENet enet_peer_send). -/
 def fragmentCommands (channel : Channel) (channelId : UInt8) (packet : Packet)
     (fragmentLength fragmentCount : Nat) : Channel × Array OutgoingCommand :=
-  let unreliable := packet.delivery == .unreliableFragment
+  let unreliable := packet.delivery == .unreliableFragment && channel.outgoingUnreliableSequenceNumber < 0xFFFF
   let (next, startSeq) :=
     if unreliable then channel.nextUnreliableSequenceNumber
     else channel.nextReliableSequenceNumber
@@ -219,18 +221,24 @@ def fragmentCommands (channel : Channel) (channelId : UInt8) (packet : Packet)
   (next, commands)
 
 /-- The single command carrying an unfragmented `packet`, with the peer and
-`channel` after numbering it. -/
+`channel` after numbering it. An unreliable packet goes reliable once the
+channel's unreliable sequence number is used up (0xFFFF), which starts the
+unreliable numbering again: wrapping it to 0 would make the receiver drop
+every later unreliable packet as old (ENet enet_peer_send). -/
 def packetCommand (p : Peer) (channel : Channel) (channelId : UInt8) (packet : Packet) :
     Peer × Channel × Protocol.Command :=
-  match packet.delivery with
-  | .reliable =>
+  let reliable (channel : Channel) : Peer × Channel × Protocol.Command :=
     let (channel, seq) := channel.nextReliableSequenceNumber
     (p, channel, { channelId, reliableSequenceNumber := seq, acknowledge := true,
                    body := .sendReliable packet.data })
+  match packet.delivery with
+  | .reliable => reliable channel
   | .unreliable | .unreliableFragment =>
-    let (channel, seq) := channel.nextUnreliableSequenceNumber
-    (p, channel, { channelId, reliableSequenceNumber := channel.outgoingReliableSequenceNumber,
-                   body := .sendUnreliable seq packet.data })
+    if channel.outgoingUnreliableSequenceNumber ≥ 0xFFFF then reliable channel
+    else
+      let (channel, seq) := channel.nextUnreliableSequenceNumber
+      (p, channel, { channelId, reliableSequenceNumber := channel.outgoingReliableSequenceNumber,
+                     body := .sendUnreliable seq packet.data })
   | .unsequenced =>
     -- the unsequenced group is peer-level and pre-incremented (first = 1)
     let group := p.outgoingUnsequencedGroup + 1

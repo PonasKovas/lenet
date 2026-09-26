@@ -670,7 +670,7 @@ theorem enqueue_same (p : Peer) (c pk cs) :
   · dsimp only
     split
     · rw [← Array.foldl_toList]; exact fold _ _
-    · unfold packetCommand; split <;> exact ⟨rfl, rfl⟩
+    · unfold packetCommand; dsimp only; split <;> (try split) <;> exact ⟨rfl, rfl⟩
 
 theorem trySend_similar (h : Host) (id c pk) : Similar h.peers (h.trySend id c pk).1.peers := by
   unfold Host.trySend

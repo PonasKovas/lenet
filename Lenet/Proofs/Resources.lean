@@ -597,7 +597,8 @@ theorem packetCommand_stagedReliableInv (p : Peer) {c : Channel} (h : StagedReli
     (channelId : UInt8) (packet : Packet) :
     StagedReliableInv (p.packetCommand c channelId packet).2.1 := by
   unfold Peer.packetCommand
-  split <;> exact stagedReliableInv_of_same rfl rfl h
+  dsimp only
+  split <;> (try split) <;> exact stagedReliableInv_of_same rfl rfl h
 
 theorem foldl_queueOutgoingCommand_channels (q : Peer) (xs : Array OutgoingCommand) :
     (xs.foldl Peer.queueOutgoingCommand q).channels = q.channels :=
@@ -615,7 +616,8 @@ theorem setIfInBounds_stagedReliableInv {xs : Array Channel} (h : ∀ ch ∈ xs,
 theorem packetCommand_channels (p : Peer) (c : Channel) (channelId : UInt8) (packet : Packet) :
     (p.packetCommand c channelId packet).1.channels = p.channels := by
   unfold Peer.packetCommand
-  split <;> rfl
+  dsimp only
+  split <;> (try split) <;> rfl
 
 /-- Queuing a packet only renumbers the channel's outgoing side. -/
 theorem enqueue_peerStagedInv {p : Peer} (h : PeerStagedInv p) (channelId : UInt8)
