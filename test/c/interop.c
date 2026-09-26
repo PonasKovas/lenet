@@ -284,7 +284,9 @@ static int setup_server_connected2(uint32_t connect_data) {
 
 static int scen_connect(void) {
     CHECK(setup_client_connected(0x77) == 0, "setup failed");
-    CHECK(g_l_connect_data == 0x77, "lenet CONNECT data=%d, want 0x77", g_l_connect_data);
+    /* the server (ENet) sees the connect data; the client's own CONNECT
+     * event carries 0, in Lenet as in ENet (peer->eventData stays 0) */
+    CHECK(g_l_connect_data == 0, "lenet CONNECT data=%d, want 0", g_l_connect_data);
     CHECK(g_c_connect_data == 0x77, "enet CONNECT data=%d, want 0x77", g_c_connect_data);
 
     const char *to_c = "ping-from-lenet";

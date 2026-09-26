@@ -251,6 +251,11 @@ compatibility"). Open, undecided differences are listed in TODO.md.
   for events from a received datagram, missing timeouts and the remote
   DISCONNECT that completes once its ACK is out. `Host.service` now sets
   it too.
+- **Client's connect event data (lenet bug - fixed).** ENet's client
+  reports its connect event with data 0: enet_host_connect puts the data in
+  the CONNECT and leaves the peer's eventData at its reset value. Lenet
+  reported the client's own data. The live `connect` scenario pinned the
+  old value; it now expects 0, as from ENet.
 - **Channel count of a connect (lenet bug - fixed).** ENet's
   enet_host_connect clamps the channel count to [1, 255]; the host's
   channel limit only caps incoming CONNECTs. Lenet also capped its own

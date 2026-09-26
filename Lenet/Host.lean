@@ -165,7 +165,9 @@ def connect (h : Host) (remoteAddress : Address) (channelCount : Nat := 2) (data
     state     := .connecting
     connectId
     channels  := Array.replicate channels {}
-    eventData := data
+    -- the client's own connect event reports 0: ENet's enet_host_connect
+    -- leaves eventData at its reset value, the data goes in the CONNECT
+    eventData := 0
     mtu       := h.mtu
     windowSize
   }.queueControlCommand (.connect params data)

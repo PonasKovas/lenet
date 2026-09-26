@@ -4,7 +4,8 @@ namespace Lenet
 
 /-- Application events produced by `Host.handleDatagram` and `Host.service`. -/
 inductive Event where
-  /-- A connection completed; `data` is the connect data the client sent. -/
+  /-- A connection completed; `data` is the connect data the client sent, as
+  the server sees it (a client's own connect event carries 0, as in ENet). -/
   | connect (peerId : UInt16) (data : UInt32)
   /-- A connection ended: gracefully (with the remote's data) or by timeout
   (data 0). The peer slot is free again. -/
