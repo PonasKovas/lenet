@@ -287,6 +287,65 @@ def hostTests : List Test := [
       expect (received p.serverEvents == #[(0, bytes 100 3)]) "queued packet not delivered first"
       expect (p.serverEvents.back? == some (.disconnect p.serverPeer 7)) "server saw no disconnect"
       expect (p.clientEvents.any (· matches .disconnect ..)) "client saw no disconnect" },
+  { name := "a server peer whose handshake times out goes without an event"
+    run := fun _ => do
+      let .ok (client, _) := (Host.create clientAddr 1).connect serverAddr 2
+        | throw "connect failed"
+      -- the server gets the CONNECT; nothing it sends back arrives
+      let p := ({ client, server := Host.create serverAddr 1, now := 1000 } : Pair).round (fun c2s => !c2s)
+      expect (p.server.peers[0]!.state == .acknowledgingConnect) "server not handshaking"
+      let rec settle : Nat → Host → UInt32 → Array Event → Option (Array Event)
+        | 0, _, _, _ => none
+        | fuel + 1, h, now, evs =>
+          let (h, _, new) := h.service now
+          if h.peers[0]!.state == .disconnected then some (evs ++ new)
+          else
+            let next := h.nextDeadline.getD (now + 1)
+            settle fuel h (if Time.less now next then next else now + 1) (evs ++ new)
+      let some evs := settle 1000 p.server p.now #[] | throw "handshake never timed out"
+      expect evs.isEmpty s!"events for a peer never reported: {evs.size}" },
+  { name := "a DISCONNECT during the server's handshake resets without an event"
+    run := fun _ => do
+      let .ok (client, _) := (Host.create clientAddr 1).connect serverAddr 2
+        | throw "connect failed"
+      let p := ({ client, server := Host.create serverAddr 1, now := 1000 } : Pair).round (fun c2s => !c2s)
+      let peer := p.server.peers[0]!
+      let (peer, evs) := peer.handleCommand 1001
+        { channelId := 0xFF, reliableSequenceNumber := 2, acknowledge := true, body := .disconnect 5 } (some 0)
+      expect evs.isEmpty "reported a disconnect for a peer never reported connected"
+      expect (peer.state == .disconnected) "slot not freed" },
+  { name := "disconnect does nothing on a free slot or a second time"
+    run := fun _ => do
+      let p ← connected
+      let h := p.client.disconnect 3
+      expect (h.peers == p.client.peers) "a free slot was touched"
+      let h := (p.client.disconnect p.clientPeer 1).disconnect p.clientPeer 2
+      let queued := h.peers[p.clientPeer.toNat]!.outgoingCommands
+      expect (queued.size == 1 && queued.all (·.command.body matches .disconnect 1))
+        s!"queued {queued.size} commands" },
+  { name := "disconnect drops what is still queued, then both sides disconnect"
+    run := fun _ => do
+      let p ← connected
+      let p ← (List.range 3).foldlM (init := p) fun p _ => send p (pkt 100)
+      let p := { p with client := p.client.disconnect p.clientPeer 7 }
+      let p := p.rounds 20
+      expect (received p.serverEvents).isEmpty "a packet queued before the disconnect was sent"
+      expect (p.serverEvents == #[.disconnect p.serverPeer 7]) "server saw no disconnect"
+      expect (p.clientEvents == #[.disconnect p.clientPeer 0]) "client saw no disconnect" },
+  { name := "disconnecting a client still connecting sends one DISCONNECT and frees the slot silently"
+    run := fun _ => do
+      let .ok (client, id) := (Host.create clientAddr 1).connect serverAddr 2
+        | throw "connect failed"
+      let client := client.disconnect id
+      let (client, outs, evs) := client.service 1000
+      expect (outs.size == 1) s!"sent {outs.size} datagrams"
+      let cmds := match ReaderM.run Protocol.Datagram.decode outs[0]!.2 with
+        | .ok d => d.commands | .error _ => #[]
+      expect (cmds.size == 1 && cmds.all fun c =>
+          c.body matches .disconnect .. && c.unsequenced && !c.acknowledge)
+        "expected one unacknowledged, unsequenced DISCONNECT (and no CONNECT)"
+      expect evs.isEmpty "reported a disconnect for a connection never made"
+      expect (client.peers[id.toNat]!.state == .disconnected) "slot not freed" },
   { name := "the throttle falls on an RTT spike, climbs back, and stops at its limit"
     run := fun _ => do
       let p : Peer := { (← serverPeer) with

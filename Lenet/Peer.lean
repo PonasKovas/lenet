@@ -122,10 +122,30 @@ def queueControlCommand (p : Peer) (body : Protocol.CommandBody) : Peer :=
   { p with outgoingControlSeq := seq }.queueOutgoingCommand
     { command := { channelId := 0xFF, reliableSequenceNumber := seq, acknowledge := true, body } }
 
-/-- Queues the graceful-disconnect DISCONNECT command and enters the
-`disconnecting` state (ENet's enet_peer_disconnect). -/
+/-- Starts a disconnect (ENet enet_peer_disconnect). Nothing happens when
+one is already under way or the slot is free. Otherwise everything queued
+or in flight is dropped (ENet enet_peer_reset_queues) and DISCONNECT is
+queued: a connected peer sends it reliably and waits for its ACK in
+`disconnecting`; a peer still handshaking sends it once, unacknowledged,
+and is then reset without an event (ENet flushes and resets at once; here
+the peer waits as `zombie` until `Host.pollPeer` has sent it). -/
 def queueDisconnect (p : Peer) (data : UInt32) : Peer :=
-  { p with state := .disconnecting, eventData := data }.queueControlCommand (.disconnect data)
+  match p.state with
+  | .disconnecting | .disconnected | .acknowledgingDisconnect | .zombie => p
+  | state =>
+    let p : Peer := { p with
+      outgoingCommands      := #[]
+      sentReliableCommands  := #[]
+      acknowledgements      := #[]
+      reliableDataInTransit := 0 }
+    if state == .connected || state == .disconnectLater then
+      { p with state := .disconnecting }.queueControlCommand (.disconnect data)
+    else
+      -- numbered like every command on channel 0xFF (ENet setup_outgoing_command)
+      let seq : UInt16 := p.outgoingControlSeq + 1
+      { p with outgoingControlSeq := seq, state := .zombie }.queueOutgoingCommand
+        { command := { channelId := 0xFF, reliableSequenceNumber := seq, unsequenced := true
+                       body := .disconnect data } }
 
 /-- Queues an acknowledgement for the remote peer. -/
 def queueAck (p : Peer) (ack : Acknowledgement) : Peer :=
@@ -511,12 +531,15 @@ def handleAcknowledge (p : Peer) (now : UInt32) (channelId : UInt8) (seq sentTim
     | _ => (p, #[])
 
 /-- Handles a DISCONNECT (ENet handle_disconnect). A connected peer
-acknowledges it and resets once that ACK is out (`Host.pollPeer`); a peer
-still handshaking resets immediately. -/
+acknowledges it and resets once that ACK is out (`Host.pollPeer`). A server
+peer still handshaking resets without an event: the application never saw
+it connect. A client still connecting, or a peer disconnecting itself,
+resets and reports the disconnect. -/
 def handleDisconnect (p : Peer) (data : UInt32) : Peer × Array Event :=
   match p.state with
   | .disconnected | .zombie | .acknowledgingDisconnect => (p, #[])
   | .connected | .disconnectLater => ({ p with state := .acknowledgingDisconnect, eventData := data }, #[])
+  | .acknowledgingConnect => (p.reset, #[])
   | _ => (p.reset, #[.disconnect p.peerId data])
 
 /-- Handles the server's VERIFY_CONNECT, completing the client's handshake

@@ -519,13 +519,15 @@ def encodeDatagram (p : Peer) (now : UInt32) (checksumEnabled : Bool)
   datagram.encode (if p.outgoingPeerId < Constants.maximumPeerId then p.connectId else 0)
 
 /-- Everything peer `p` has to send, as MTU-bounded datagrams (ENet repeats
-check_outgoing_commands while CONTINUE_SENDING is set). Also completes two
+check_outgoing_commands while CONTINUE_SENDING is set). Also completes three
 deferred transitions:
 - a `disconnectLater` peer with nothing left queued or in flight sends its
   DISCONNECT;
 - an `acknowledgingDisconnect` peer whose ACKs are all out resets and reports
   the disconnect (ENet dispatches ZOMBIE once the ACK of the DISCONNECT is
-  sent). -/
+  sent);
+- a `zombie` peer, one that was disconnected while handshaking, resets
+  without an event once its DISCONNECT is out. -/
 def pollPeer (p : Peer) (now : UInt32) (checksumEnabled : Bool) :
     Peer × Array (Address × ByteArray) × Array Event :=
   if p.state == .disconnected then (p, #[], #[])
@@ -544,6 +546,9 @@ where
         go fuel p (datagrams.push (p.address, encodeDatagram p now checksumEnabled commands))
       else if p.state == .acknowledgingDisconnect ∧ p.acknowledgements.isEmpty then
         (p.reset, datagrams, #[.disconnect p.peerId p.eventData])
+      else if p.state == .zombie then
+        -- the DISCONNECT of a peer that never connected is out (`Peer.queueDisconnect`)
+        (p.reset, datagrams, #[])
       else
         (p, datagrams, #[])
 
@@ -587,7 +592,9 @@ def checkPeerTimeouts (p : Peer) (now : UInt32) : Peer × Option Event :=
             earliestTimeout := earliest
             retransmits := scan.retransmits.push { outCmd with roundTripTimeout := outCmd.roundTripTimeout * 2 } }
   if scan.timedOut then
-    (p.reset, some (.disconnect p.peerId 0))
+    -- a server peer still handshaking was never reported as connected, so
+    -- it goes without an event (ENet enet_protocol_notify_disconnect)
+    (p.reset, if p.state == .acknowledgingConnect then none else some (.disconnect p.peerId 0))
   else
     -- a command queued for retransmission is no longer in transit
     let retransmitted := scan.retransmits.foldl (init := 0) (· + ·.fragmentLength)

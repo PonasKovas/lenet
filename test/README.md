@@ -219,6 +219,27 @@ compatibility"). Open, undecided differences are listed in TODO.md.
   packets all carry (0, 0), so one dropped unsequenced packet takes every
   unsequenced packet queued right behind it along. Lenet drops only the
   packet the counter picked. Sender-side only, so invisible to interop.
+- **Disconnect events for peers never reported (lenet bug - fixed).** ENet
+  reports a disconnect only for a peer the application saw connect, or for
+  a client whose connection attempt failed. A server peer still in its
+  handshake (VERIFY_CONNECT sent, not yet acknowledged) that times out or
+  receives a DISCONNECT is reset silently (`protocol.c`
+  enet_protocol_notify_disconnect, handle_disconnect). Lenet reported both,
+  so a server application got disconnect events for connections it never
+  heard of. `Host.checkPeerTimeouts` and `Peer.handleDisconnect` now reset
+  such a peer without an event.
+- **Local disconnect (lenet bug - fixed).** ENet's enet_peer_disconnect
+  does nothing for a peer already disconnecting, disconnected or a zombie;
+  otherwise it drops everything queued or in flight (enet_peer_reset_queues)
+  before queuing the DISCONNECT, and a peer still handshaking gets one
+  unacknowledged DISCONNECT and is reset at once, without an event. Lenet
+  queued a DISCONNECT in every case: a second call sent a second one, a
+  call on a free slot sent one to an empty address, queued data still went
+  out ahead of it, and a handshaking peer waited for an ACK that never
+  comes, then reported a disconnect. `Peer.queueDisconnect` now follows
+  ENet; the handshaking peer waits as `zombie` until the next service sends
+  its DISCONNECT (there is no socket to flush to). The corpus only ever
+  disconnects connected peers with nothing queued.
 - **Unsequenced window (enet quirk - not copied).** ENet deduplicates
   unsequenced packets in aligned blocks of 1024 groups
   (`protocol.c` handle_send_unsequenced): a group in a newer block moves
