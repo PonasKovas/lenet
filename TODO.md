@@ -5,14 +5,6 @@ scenarios and 12 live interop scenarios pass), the C distribution, and the
 proofs listed in [DESIGN.md](DESIGN.md#what-is-proven). What follows is
 what is left, roughly in priority order.
 
-## Known differences from ENet
-
-Not yet triaged as bugs or accepted; each needs a decision per
-DESIGN.md's rules.
-
-- **Address check before negotiation.** ENet checks the sender address of
-  every datagram for a peer; Lenet only once the remote peer ID is known.
-
 ## Testing gaps
 
 Several bugs fixed recently were invisible to the corpus: RTT samples broke

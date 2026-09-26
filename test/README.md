@@ -226,6 +226,16 @@ compatibility"). Open, undecided differences are listed in TODO.md.
   after newer packets went out, and moves the channel's unreliable counter
   back; Lenet drops it.
 
+- **Address check before negotiation (lenet bug - fixed).** ENet drops a
+  datagram for a peer unless it comes from the peer's address (or the peer
+  was connected to the broadcast address), whether or not the remote peer ID
+  is known yet, and then records the sender as the peer's address
+  (`protocol.c` handle_incoming_commands). Lenet only checked the address
+  once the remote peer ID was known, so a connecting client took datagrams
+  from anyone, and a client connected to the broadcast address never learned
+  the server's real one. `Host.acceptsDatagram` and `handleDatagram` now
+  follow ENet.
+
 ## Live interop scenarios
 
 | name           | direction            | exercises                                            |

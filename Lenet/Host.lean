@@ -252,15 +252,15 @@ def handleIncomingConnect (h : Host) (fromAddr : Address) (params : Protocol.Con
 
 /-- ENet's peer lookup (protocol.c enet_protocol_handle_incoming_commands):
 whether peer `p` takes a datagram from `fromAddr` whose header carries
-`session`. Once the connection is negotiated (the remote peer ID is known),
-the datagram must come from the peer's address (unless that is the broadcast
-address) and carry the peer's session; disconnected and zombie peers take
-nothing. -/
+`session`. The datagram must come from the peer's address (unless that is
+the broadcast address), and once the connection is negotiated (the remote
+peer ID is known) carry the peer's session; disconnected and zombie peers
+take nothing. -/
 def acceptsDatagram (p : Peer) (fromAddr : Address) (session : UInt8) : Bool :=
   let negotiated := p.outgoingPeerId < Constants.maximumPeerId
-  let wrongAddress := p.address != {} && p.address.host != Address.broadcast && fromAddr != p.address
-  !(p.state == .disconnected || p.state == .zombie) &&
-    !(negotiated && (wrongAddress || session != p.incomingSessionId))
+  let wrongAddress := p.address.host != Address.broadcast && fromAddr != p.address
+  !(p.state == .disconnected || p.state == .zombie || wrongAddress ||
+    (negotiated && session != p.incomingSessionId))
 
 /-- Processes one received UDP datagram from `fromAddr`: CONNECTs to the
 broadcast peer ID open a connection, everything else goes to its peer.
@@ -288,6 +288,8 @@ def handleDatagram (h : Host) (now : UInt32) (fromAddr : Address) (bytes : ByteA
         if !acceptsDatagram p fromAddr datagram.header.session then
           (h, #[])
         else
+          -- a peer connected to the broadcast address learns the real one
+          let p := { p with address := fromAddr }
           let (p, events) := datagram.commands.foldl (init := (p, #[])) fun (p, events) cmd =>
             let (p, newEvents) := p.handleCommand now cmd datagram.header.sentTime
             (p, events ++ newEvents)
