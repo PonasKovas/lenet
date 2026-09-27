@@ -63,14 +63,18 @@ c/interop: c/interop.c $(ENET_LIB) ../csrc/build/liblenet.a
 ../csrc/build/liblenet.a: FORCE
 	$(MAKE) -C ../csrc
 
+# A failed recording stops the run: a stale or partial trace must not pass
+# for a fresh one.
 traces: $(HARNESS)
 	@mkdir -p traces
-	@for s in $(SCENARIOS); do ./$(HARNESS) record $$s; \
-	  for o in $(CLOCK_OFFSETS); do ./$(HARNESS) record $$s $$o; done; done
+	@for s in $(SCENARIOS); do ./$(HARNESS) record $$s || exit 1; \
+	  for o in $(CLOCK_OFFSETS); do ./$(HARNESS) record $$s $$o || exit 1; done; done
 
+# One scenario, at every clock start the replay reads.
 record: $(HARNESS)
 	@mkdir -p traces
 	./$(HARNESS) record $(SCENARIO)
+	@for o in $(CLOCK_OFFSETS); do ./$(HARNESS) record $(SCENARIO) $$o || exit 1; done
 
 interop: c/interop
 	@for s in $(INTEROP_SCENARIOS); do ./c/interop $$s || exit 1; done

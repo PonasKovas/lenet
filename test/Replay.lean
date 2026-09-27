@@ -671,6 +671,15 @@ def main (args : List String) : IO UInt32 := do
   let dir := args.head? |>.getD "traces"
   let wanted := if args.length > 1 then (args.drop 1).toArray else scenarioNames
   let mut allOk := true
+  -- every trace in the directory is one the replay reads: a scenario
+  -- recorded (test/Makefile SCENARIOS) but missing here would never run
+  if args.length ≤ 1 then
+    let known := scenarioNames.flatMap fun n =>
+      clockOffsets.map fun o => if o == 0 then s!"{n}.trace" else s!"{n}@{o}.trace"
+    for entry in ← System.FilePath.readDir dir do
+      if entry.fileName.endsWith ".trace" && !known.contains entry.fileName then
+        IO.println s!"FAIL: {entry.fileName} is not a scenario the replay reads (Replay.scenarioNames)"
+        allOk := false
   for name in wanted do
     for offset in clockOffsets do
       let path := if offset == 0 then s!"{dir}/{name}.trace" else s!"{dir}/{name}@{offset}.trace"

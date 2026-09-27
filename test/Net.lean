@@ -145,7 +145,9 @@ def pollingOnly : Check := do
     if ec.any isConnect then connected := true
     IO.sleep 1
   expect connected "polling with service 0 never connected"
-  expect (slowest < 50) s!"a service 0 took {slowest} ms"
+  -- a blocking service would sleep to the next timer (hundreds of ms); the
+  -- bound leaves room for a busy shared machine
+  expect (slowest < 250) s!"a service 0 took {slowest} ms"
   let _ := peer
 
 def wakesOnDatagram : Check := do
@@ -164,7 +166,9 @@ def wakesOnDatagram : Check := do
   let _ ← IO.wait sender
   expect (ev.any fun | .receive p ch pk => p == peer && ch.val == 0 && pk.data == bytes 10 1 | _ => false)
     "the sleeping client did not get the packet"
-  expect (dt < 150) s!"a packet sent at 50 ms woke the client at {dt} ms"
+  -- a service that slept its whole timeout would take 2000 ms; the bound
+  -- leaves room for a busy shared machine
+  expect (dt < 1000) s!"a packet sent at 50 ms woke the client at {dt} ms"
 
 def channelsAgreed : Check := do
   -- a server allowing 3 channels grants a client asking for 5 only 3, and

@@ -479,11 +479,17 @@ static int scen_multip(void) {
     const char *solo = "solo";
     CHECK(lenet_host_send(g_lenet, (uint16_t)g_lenet_peer2, 0,
                           LENET_RELIABLE, solo, 4) == 0, "unicast send");
-    WAIT(g_c_pkts >= 1 && g_c2_pkts >= 1, 2000,
+    WAIT(g_c_pkts >= 1 && g_c2_pkts >= 2, 2000,
          "broadcast incomplete (c=%d c2=%d)", g_c_pkts, g_c2_pkts);
-    /* C1 received only the broadcast (2 bytes); C2 received broadcast + solo */
-    CHECK(g_c_ch0len == 2 && memcmp(g_c_ch0, bc, 2) == 0, "broadcast bytes mismatch (C1)");
-    CHECK(g_c2_pkts >= 2, "client 2 missed broadcast or unicast");
+    /* give a stray unicast to C1 time to show up before judging */
+    uint32_t settle = now_ms();
+    while (now_ms() - settle < 200) { pump(); usleep(500); }
+    /* C1 received only the broadcast; C2 the broadcast then the unicast,
+     * in order on channel 0 */
+    CHECK(g_c_pkts == 1 && g_c_ch0len == 2 && memcmp(g_c_ch0, bc, 2) == 0,
+          "C1 got %d packets, %zu bytes: want only the broadcast", g_c_pkts, g_c_ch0len);
+    CHECK(g_c2_pkts == 2 && g_c2_ch0len == 6 && memcmp(g_c2_ch0, "BCsolo", 6) == 0,
+          "C2 got %d packets, %zu bytes: want the broadcast then the unicast", g_c2_pkts, g_c2_ch0len);
     return 0;
 }
 

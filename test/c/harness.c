@@ -562,6 +562,15 @@ static ENetHost *role_host(Role r, ENetHost *client, ENetHost *server, ENetHost 
     return NULL;
 }
 
+
+/* An action for a role whose peer is not connected yet: the recording
+ * would silently lack it, so the recording fails instead. */
+static void no_peer(int kind, Role r) {
+    fprintf(stderr, "harness: action %d for role %s before its peer connected; "
+            "the trace would lack it\n", kind, role_name(r));
+    exit(1);
+}
+
 static void perform_action(const Action *act, ENetHost *client, ENetHost *server, ENetHost *client2,
                            ENetPeer **client_peer, ENetPeer **server_peer, ENetPeer **client2_peer,
                            int *client_stopped, int *server_stopped) {
@@ -584,7 +593,7 @@ static void perform_action(const Action *act, ENetHost *client, ENetHost *server
     }
     case ACT_SEND: {
         peer = (r == ROLE_C) ? *client_peer : (r == ROLE_D) ? *client2_peer : *server_peer;
-        if (peer == NULL) return; /* not connected yet; skip silently */
+        if (peer == NULL) no_peer(act->kind, r); /* the recording would lack it */
         ENetPacket *pkt = enet_packet_create(act->data, act->data_len, act->flags);
         if (pkt == NULL) return;
         enet_peer_send(peer, (enet_uint8)act->ch, pkt);
@@ -607,7 +616,7 @@ static void perform_action(const Action *act, ENetHost *client, ENetHost *server
     }
     case ACT_DISCONNECT: {
         peer = (r == ROLE_C) ? *client_peer : (r == ROLE_D) ? *client2_peer : *server_peer;
-        if (peer == NULL) return;
+        if (peer == NULL) no_peer(act->kind, r);
         fprintf(trace_file, "A %llu %s DISCONNECT peer=%u data=%u\n",
                 (unsigned long long)now_ms(), role_name(r),
                 peer->incomingPeerID, act->a);
@@ -616,7 +625,7 @@ static void perform_action(const Action *act, ENetHost *client, ENetHost *server
     }
     case ACT_DISCONNECT_LATER: {
         peer = (r == ROLE_C) ? *client_peer : (r == ROLE_D) ? *client2_peer : *server_peer;
-        if (peer == NULL) return;
+        if (peer == NULL) no_peer(act->kind, r);
         fprintf(trace_file, "A %llu %s DISCLATER peer=%u data=%u\n",
                 (unsigned long long)now_ms(), role_name(r),
                 peer->incomingPeerID, act->a);
@@ -625,7 +634,7 @@ static void perform_action(const Action *act, ENetHost *client, ENetHost *server
     }
     case ACT_THROTTLECONF: {
         peer = (r == ROLE_C) ? *client_peer : (r == ROLE_D) ? *client2_peer : *server_peer;
-        if (peer == NULL) return;
+        if (peer == NULL) no_peer(act->kind, r);
         fprintf(trace_file, "A %llu %s THROTTLECONF peer=%u interval=%u accel=%u decel=%u\n",
                 (unsigned long long)now_ms(), role_name(r),
                 peer->incomingPeerID, act->a, act->b, act->c);
@@ -649,7 +658,7 @@ static void perform_action(const Action *act, ENetHost *client, ENetHost *server
     }
     case ACT_PEER_TIMEOUT: {
         peer = (r == ROLE_C) ? *client_peer : (r == ROLE_D) ? *client2_peer : *server_peer;
-        if (peer == NULL) return;
+        if (peer == NULL) no_peer(act->kind, r);
         enet_peer_timeout(peer, act->a, act->b, act->c);
         fprintf(trace_file, "A %llu %s PEERTIMEOUT limit=%u min=%u max=%u\n",
                 (unsigned long long)now_ms(), role_name(r), act->a, act->b, act->c);

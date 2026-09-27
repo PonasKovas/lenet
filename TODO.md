@@ -140,9 +140,19 @@ and docs. Worked through in order; each item says what was done.
     race in the test).
 18. `make -C test traces` ignores failed recordings; `record` re-records
     only clock offset 0.
+    **Done:** both stop at a failed recording and `record` covers every
+    clock start; the harness fails a recording whose action came before its
+    peer connected (it used to skip it silently); the replay fails on a
+    trace file it does not read. Checked by recording two scenarios into a
+    scratch directory and replaying them.
 19. `interop` `multip` never checks client 2's bytes.
+    **Done:** it waits for both packets at client 2, lets 200 ms pass, and
+    checks each client's exact bytes.
 20. `test/Net.lean` has tight wall-clock bounds; the workflow has no
     `timeout-minutes`.
+    **Done:** the two tight bounds are loosened to what still tells the bug
+    apart (a blocking `service 0`, a sleep through the whole timeout); every
+    CI job has a 60-minute limit.
 
 ### Proofs that claim more than they prove
 
