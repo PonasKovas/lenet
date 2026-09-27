@@ -52,7 +52,19 @@ Done this session:
   `test/Net.lean` checks a server's channel limit shows up on both sides'
   connections and that packets echo back on the channel they came in on.
 
-Suggested next: the receiver-side proof (see Proofs).
+- **Receiver-side delivery proof** (`Proofs/Delivery.lean`, later still).
+  An honest sender's reliable packets are a `Stream` (message `i` spans
+  `span i` sequence numbers, unwrapped). Fed any arrivals that each `Fits`
+  (no more than 9 windows behind the frontier, fewer than 16 ahead), a
+  channel hands out exactly messages 0, 1, 2, ... once each, in order
+  (`feed_spec`), and the next message's arrival always delivers it
+  (`step_next`). `receiveReliableAndRelease_spec` covers the peer's receive
+  path with unreliable packets mixed in. `admitted_iff` (the receive gate
+  unwrapped) and `drain_spec` are the reusable pieces. To see a proof
+  depends on code, break the code and stub any earlier proof that fails
+  first with `sorry`, or Lake never gets to the new one.
+
+Suggested next: tie `Delivery` to `Window` (see Proofs).
 
 Checks before each commit: `lake build` (library and proofs, including the
 no-panic audit in `Proofs/Panic.lean`), `./.lake/build/bin/unit`,
@@ -73,9 +85,13 @@ as bugs show where the corpus is blind.
 
 ## Proofs
 
-- Open: nothing queued. Candidates as they come up: the receiver side of a
-  whole connection (a reliable packet sent is delivered once, in order,
-  given the datagrams arrive) would tie `Window` and `Channel` together.
+- Open: the whole connection. `Delivery` assumes each arrival `Fits` the
+  receiver's frontier; the sender side (`Window`) bounds what is in flight
+  but not how far behind a delayed datagram can be. A connection-level
+  statement needs a network model with bounded delay (or the sender's
+  in-flight span plus "the receiver acked everything before the oldest
+  command in flight"), then `Fits` follows and so does in-order delivery
+  from `Host.create`.
 
 ## Performance
 
