@@ -121,6 +121,11 @@ and docs. Worked through in order; each item says what was done.
 15. The replay compares fragment payloads by length, other payloads by
     their first 64 bytes, never headers; test/README.md says only
     `connectID` is masked.
+    **Done:** payloads over 64 bytes are compared by size and CRC-32 of
+    all bytes, each command with its datagram's peer ID, session and
+    compressed flag, and every Lenet datagram must follow ENet's sent-time
+    rule. Corrupting one byte per fragment now fails 13 roles.
+    test/README.md "What is compared" says what is not compared and why.
 16. The lossy runs never require unreliable or unsequenced packets to
     arrive, and `NetStream` ignores `send` results.
 17. `net-interop` accepts a timeout as the far end's clean disconnect.

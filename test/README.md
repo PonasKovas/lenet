@@ -83,19 +83,29 @@ no real time.
 - **Events** (connect, receive, disconnect, with payload bytes) must match
   exactly, in order.
 - **Outgoing commands.** Lenet's datagrams are decoded and the resulting
-  command stream is compared with ENet's as a multiset. The order of
-  independent control commands within one millisecond depends on how the two
-  hosts' service calls interleave and is not compared; ordering that matters
-  is still checked through the events and the per-channel sequence numbers.
-  One field is masked: `connectID`, which ENet draws at random. The replay
-  instead pins each Lenet connection to the connectID the recorded client
-  used, since the other side echoes it and checksums with it.
+  command stream is compared with ENet's as a multiset. Each command is
+  compared whole: every field, payloads up to 64 bytes byte for byte and
+  larger ones (fragments) by size and a CRC-32 of all their bytes, and with
+  it its datagram's peer ID, session and compressed flag.
+- **What is not compared, and why.** Timing and grouping: when a
+  retransmit, ping or timeout fires, which commands share a datagram and
+  the order of independent control commands within one millisecond depend
+  on how the two hosts' service calls interleave, so the streams are
+  compared as multisets; ordering that matters is still checked through
+  the events and the per-channel sequence numbers. For the same reason a
+  datagram's sent time is not compared with ENet's; instead every datagram
+  Lenet sends must follow ENet's rule, a sent time exactly when a command
+  in it asks for an ACK. One field is masked: `connectID`, which ENet draws
+  at random. The replay instead pins each Lenet connection to the
+  connectID the recorded client used, since the other side echoes it and
+  checksums with it.
 - **Multi-peer scenarios.** The server's expected stream is the union of what
   it sent to both clients, and `SEND`/`DISCONNECT` lines name the peer they
   act on, so the replay targets the same peer.
 - **Checksums** (`checksum` scenario). Recorded datagrams are only accepted
-  if their CRC32 verifies, and Lenet's own must verify on the other side, so
-  a wrong CRC drops datagrams and fails the scenario. Quirk: `connectID` is
+  if their CRC32 verifies, so a Lenet that computes CRCs wrongly drops them
+  and fails the scenario; Lenet's own CRCs are checked by ENet in the live
+  `checksum` interop scenario. Quirk: `connectID` is
   the one field ENet passes through without byte-order conversion, which is
   why the checksum placeholder uses its big-endian form.
 - **Sanity.** Every datagram Lenet sends must decode with Lenet's decoder

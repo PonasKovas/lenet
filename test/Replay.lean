@@ -229,10 +229,10 @@ private def hexOf (b : ByteArray) : String :=
   b.foldl (init := "") fun acc x =>
     acc.push (nib (x.toNat >>> 4)) |>.push (nib x.toNat)
 
-/-- Render a byte array for comparison: full hex for small payloads, a
-bounded prefix for huge ones (fragment payloads). -/
+/-- Render a byte array for comparison: full hex for small payloads, the
+size and a CRC-32 of every byte for larger ones (fragment payloads). -/
 private def cmpBytes (b : ByteArray) : String :=
-  if b.size ≤ 64 then s!"{b.size}:{hexOf b}" else s!"{b.size}:{hexOf (b.extract 0 64)}…"
+  if b.size ≤ 64 then s!"{b.size}:{hexOf b}" else s!"{b.size}:crc{Checksum.crc32Buffers #[b]}"
 
 /-- Canonical, mask-aware representation of a protocol command.
 Masked fields (inherently non-deterministic, see test/README.md):
@@ -262,14 +262,24 @@ def maskCmd (c : Protocol.Command) : String :=
     | .sendUnreliable un d => s!"sendUnreliable(un={un},{cmpBytes d})"
     | .sendFragment fp =>
       s!"sendFragment(start={fp.startSequenceNumber},cnt={fp.fragmentCount},n={fp.fragmentNumber}," ++
-      s!"tot={fp.totalLength},off={fp.fragmentOffset},len={fp.data.size})"
+      s!"tot={fp.totalLength},off={fp.fragmentOffset},{cmpBytes fp.data})"
     | .sendUnsequenced g d => s!"sendUnsequenced(g={g},{cmpBytes d})"
     | .bandwidthLimit i o => s!"bandwidthLimit(in={i},out={o})"
     | .throttleConfigure i a d => s!"throttleConfigure(i={i},a={a},d={d})"
     | .sendUnreliableFragment fp =>
       s!"sendUnreliableFragment(start={fp.startSequenceNumber},cnt={fp.fragmentCount},n={fp.fragmentNumber}," ++
-      s!"tot={fp.totalLength},off={fp.fragmentOffset},len={fp.data.size})"
+      s!"tot={fp.totalLength},off={fp.fragmentOffset},{cmpBytes fp.data})"
   s!"[{fl} ch={c.channelId} seq={c.reliableSequenceNumber}] {body}"
+
+/-- The header fields that do not depend on how commands were grouped into
+datagrams: the peer ID, the session and the compressed flag. Whether a
+datagram carries a sent time depends on its other commands (ENet's rule: it
+does when one asks for an ACK), and grouping follows the two hosts' service
+timing, which the comparison leaves out; so the replay checks that rule on
+Lenet's own datagrams instead (`collectOutgoing`). The checksum field is
+checked by ENet in the live `checksum` scenario. -/
+def headerTag (h : Protocol.Header) : String :=
+  s!"<pid={h.peerId} ses={h.session} z={h.compressed}>"
 
 /-- Decode a datagram byte string into its command list. `hasChecksum`
 must match the recording host's checksum setting so the 4-byte checksum
@@ -277,6 +287,12 @@ field is skipped; the field is consumed without verification (verification
 happens inside `Host.handleDatagram` during the actual replay). -/
 def decodeDatagram (hasChecksum : Bool) (bytes : ByteArray) : Except CodecError (Array Protocol.Command) :=
   (ReaderM.run (Protocol.Datagram.decode hasChecksum none) bytes).map (·.commands)
+
+/-- A datagram's commands as compared: each masked (`maskCmd`) behind its
+datagram's `headerTag`. -/
+def decodeKeys (hasChecksum : Bool) (bytes : ByteArray) : Except CodecError (Array String) :=
+  (ReaderM.run (Protocol.Datagram.decode hasChecksum none) bytes).map fun d =>
+    d.commands.map fun c => headerTag d.header ++ " " ++ maskCmd c
 
 /-- Scenarios whose recording hosts had checksums enabled (`host->checksum =
 enet_crc32` on both sides). -/
@@ -304,7 +320,7 @@ def scenarioHostConfig (scenario : String) : UInt32 × UInt32 × Nat × UInt32 :
 structure ReplayState where
   host : Host
   events : Array Event := #[]
-  outCmds : Array Protocol.Command := #[]
+  outCmds : Array String := #[]
   emitted : Array ByteArray := #[]
   errors : Array String := #[]
   stoppedFlag : Bool := false
@@ -327,11 +343,11 @@ structure ReplayState where
 structure ReplayResult where
   role : Role
   events : Array Event
-  outCmds : Array Protocol.Command
+  outCmds : Array String
   emitted : Array ByteArray
   errors : Array String
   expEvents : Array ExpEvent
-  expCmds : Array Protocol.Command
+  expCmds : Array String
   expDecodeErrors : Array CodecError
 
 /-- Per-role connect target and local address (mirrors the harness). -/
@@ -342,9 +358,15 @@ def roleAddrs : Role → Address × Address
 
 private def collectOutgoing (st : ReplayState) (outs : Array (Address × ByteArray)) : ReplayState :=
   outs.foldl (init := st) fun s (_, bytes) =>
-    match decodeDatagram s.decodeChecksummed bytes with
-    | .ok cmds => { s with outCmds := s.outCmds ++ cmds, emitted := s.emitted.push bytes }
-    | .error e => { s with errors := s.errors.push s!"emitted datagram failed to decode: {e}" }
+    match decodeKeys s.decodeChecksummed bytes,
+        ReaderM.run (Protocol.Datagram.decode s.decodeChecksummed none) bytes with
+    | .ok cmds, .ok d =>
+      let s := { s with outCmds := s.outCmds ++ cmds, emitted := s.emitted.push bytes }
+      -- ENet's header rule: a sent time exactly when a command asks for an ACK
+      if d.header.sentTime.isSome != d.commands.any (·.acknowledge) then
+        { s with errors := s.errors.push s!"datagram with sent time {d.header.sentTime.isSome} but ACK requests {d.commands.any (·.acknowledge)}" }
+      else s
+    | .error e, _ | _, .error e => { s with errors := s.errors.push s!"emitted datagram failed to decode: {e}" }
 
 /-- Resource-safety tripwire (see Lenet/Proofs/Resources.lean): the corpus
 runs against these hard bounds after every service step. The assembler cap
@@ -521,7 +543,7 @@ def replayRole (scenario : String) (role : Role) (lines : Array Line) : ReplayRe
     | .dat _ d bytes => if role.emits d then some bytes else none
     | _ => none
   let (expCmds, expDecodeErrors) := expDatagrams.foldl (init := (#[], #[])) fun (cs, es) b =>
-    match decodeDatagram hasChecksum b with
+    match decodeKeys hasChecksum b with
     | .ok cmds => (cs ++ cmds, es)
     | .error e => (cs, es.push e)
   { role
@@ -571,15 +593,15 @@ private def eventDiffOf (exp : Array ExpEvent) (act : Array Event) : Option (Nat
       else some s!"expected {eventLabel (expToEvent e)}  but got {eventLabel a}"
     | none, none => none
 
-private def cmdDiffOf (exp act : Array Protocol.Command) : Option (Nat × String) :=
+private def cmdDiffOf (exp act : Array String) : Option (Nat × String) :=
   -- The merged command streams are compared as multisets (sorted by the
   -- masked form). The relative order of independent control commands
   -- (ping/bandwidthLimit/acks) within the same millisecond depends on the
   -- two hosts' service-call interleaving and is not protocol-visible;
   -- ordering-sensitive behavior is still verified via the event stream and
   -- per-channel sequence numbers.
-  let exp' := (exp.map maskCmd |>.qsort (· < ·))
-  let act' := (act.map maskCmd |>.qsort (· < ·))
+  let exp' := exp.qsort (· < ·)
+  let act' := act.qsort (· < ·)
   let n := max exp'.size act'.size
   firstDiff n fun i =>
     match exp'[i]?, act'[i]? with
@@ -623,8 +645,8 @@ private def replayAndReport (scenario : String) (lines : Array Line) (offset : U
       IO.println s!"    (ENet commands={res.expCmds.size}, lenet commands={res.outCmds.size}; ENet events={res.expEvents.size}, lenet events={res.events.size})"
       if (← IO.getEnv "LENET_DEBUG").isSome then
         for i in [0:max res.expCmds.size res.outCmds.size] do
-          let e := res.expCmds[i]?.map maskCmd |>.getD "—"
-          let a := res.outCmds[i]?.map maskCmd |>.getD "—"
+          let e := res.expCmds[i]?.getD "—"
+          let a := res.outCmds[i]?.getD "—"
           IO.println s!"    [{i}] ENet:  {e}"
           IO.println s!"        lenet: {a}"
   if allOk && offset != 0 then IO.println s!"  PASS {scenario}{shifted} (all roles)"
