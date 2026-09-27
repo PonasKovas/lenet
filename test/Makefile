@@ -11,7 +11,8 @@
 #   make lossy-enet    -> ENet against ENet through the same proxy: when a
 #                         lossy-interop run fails, does ENet fail alone too?
 #   make lossy-wrap    -> 94500 packets of each kind per channel, so every
-#                         16-bit counter wraps (about 2 min a run, local)
+#                         16-bit counter wraps (about 50 s a run, each
+#                         profile, seed and way round; local)
 #   make lossy-clock   -> both clocks start 10 s before the 32-bit wrap and
 #                         run 30 s past it, with bandwidth limits (local)
 #   make traces        -> records all scenario traces into traces/, once

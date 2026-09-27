@@ -177,8 +177,8 @@ their results the same way):
   numbers of channels 0 and 1, channel 2's unreliable one (channel 1's
   starts over at every reliable packet) and the unsequenced group. Channel
   0's packet sizes are picked so that two fragment sets straddle the
-  reliable wraps (packets 47131 and 94261). Light and burst loss, about a
-  minute each way.
+  reliable wraps (packets 47131 and 94261). Light and burst loss, about
+  50 s a run, each profile, seed and way round.
 - `make -C test lossy-clock`: both ends' millisecond clocks start 10 s
   before 2^32 (`clock`: enet_time_set for ENet, `Config.clock` for
   Lenet.Net) and run 30 s past it under light and burst loss, with 1 MB/s

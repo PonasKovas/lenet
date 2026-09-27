@@ -191,8 +191,8 @@ and docs. Worked through in order; each item says what was done.
     "one fragmented", a list of undecided divergences that does not exist,
     TODO's "What is left" and "big gap left", three different lossy-wrap
     run times, "What is compared" in test/README.md.
-    **Partly done:** all but the run times and "What is compared" (with
-    item 15).
+    **Done:** the run times now say about 50 s a run (measured
+    2026-09-27); "What is compared" went with item 15.
 
 Done: full ENet 1.3.x interop except compression (21 golden-trace
 scenarios, each recorded at three clock starts, and 12 live interop
@@ -246,7 +246,7 @@ Done: `make -C test lossy-wrap` (94500 packets of each kind per channel,
 two fragment sets straddling the reliable wraps) and `make -C test
 lossy-clock` (both clocks start 10 s before 2^32, bandwidth limits on),
 light and burst loss, both ways round, two seeds each; see test/README.md.
-Both are local only (a minute or more each way); CI runs a short clock
+Both are local only (about 50 s a run, each profile, seed and way round); CI runs a short clock
 wrap. `Lenet.Net.Config.clock` sets an endpoint's clock. No divergence
 found. The plan as it was:
 
