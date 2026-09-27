@@ -2,9 +2,78 @@
  * Lean involvement: it includes only lenet.h and links only -llenet. */
 #include <lenet.h>
 #include <stdio.h>
+#include <string.h>
 
 #define CHECK(cond, msg) \
     do { if (!(cond)) { fprintf(stderr, "check failed: %s\n", msg); return 1; } } while (0)
+
+#define LOCALHOST 0x0100007F /* 127.0.0.1 in network byte order */
+
+/* Services `from` at `now` and hands every datagram it produces to `to`,
+ * as if sent from port `from_port`. */
+static void route(lenet_host *from, uint16_t from_port, lenet_host *to, uint32_t now) {
+    lenet_datagram dg;
+    lenet_host_service(from, now);
+    while (lenet_host_poll_outgoing(from, &dg) == 1)
+        lenet_host_handle_datagram(to, now, LOCALHOST, from_port, dg.data, dg.len);
+}
+
+/* Two hosts in one process: each one's outgoing bytes are its own, and an
+ * event whose payload does not fit the buffer is kept, not lost. */
+static int check_pair(void) {
+    lenet_host *a = lenet_host_create(0, 0, 4, 2, 0, 0, 0);
+    lenet_host *b = lenet_host_create(0, 0, 4, 2, 0, 0, 0);
+    CHECK(a != NULL && b != NULL, "create two hosts");
+
+    /* both connect: polling b must not touch what a's datagram points to */
+    CHECK(lenet_host_connect(a, LOCALHOST, 2, 2, 0) >= 0, "connect a");
+    CHECK(lenet_host_connect(b, LOCALHOST, 1, 2, 0) >= 0, "connect b");
+    lenet_datagram da, db;
+    uint8_t copy[4096];
+    CHECK(lenet_host_service(a, 0) == 0 && lenet_host_poll_outgoing(a, &da) == 1, "a's CONNECT");
+    memcpy(copy, da.data, da.len);
+    CHECK(lenet_host_service(b, 0) == 0 && lenet_host_poll_outgoing(b, &db) == 1, "b's CONNECT");
+    CHECK(da.data != db.data, "two hosts share an outgoing buffer");
+    CHECK(memcmp(copy, da.data, da.len) == 0, "polling b changed a's datagram");
+    lenet_host_destroy(b);
+
+    /* a connects to a fresh b, then sends it 100 bytes */
+    b = lenet_host_create(0, 0, 4, 2, 0, 0, 0);
+    CHECK(b != NULL, "create b again");
+    lenet_peer_reset(a, 0);
+    int32_t peer = lenet_host_connect(a, LOCALHOST, 2, 2, 0);
+    CHECK(peer >= 0, "connect a to b");
+    for (uint32_t t = 0; t < 20; t++) {
+        route(a, 1, b, t);
+        route(b, 2, a, t);
+    }
+    lenet_event ev;
+    uint8_t payload[200];
+    size_t plen = 0;
+    CHECK(lenet_host_poll_event(a, &ev, payload, sizeof payload, &plen) == 1 &&
+          ev.type == LENET_EVENT_CONNECT, "a connected");
+    CHECK(lenet_host_poll_event(b, &ev, payload, sizeof payload, &plen) == 1 &&
+          ev.type == LENET_EVENT_CONNECT, "b connected");
+    uint8_t msg[100];
+    for (int i = 0; i < 100; i++) msg[i] = (uint8_t)(i * 7);
+    CHECK(lenet_host_send(a, (uint16_t)peer, 0, LENET_RELIABLE, msg, sizeof msg) == 0, "send");
+    for (uint32_t t = 20; t < 25; t++) {
+        route(a, 1, b, t);
+        route(b, 2, a, t);
+    }
+    plen = 0;
+    CHECK(lenet_host_poll_event(b, &ev, NULL, 0, &plen) == -2 && plen == 100,
+          "NULL buffer: the size, and the event kept");
+    CHECK(lenet_host_poll_event(b, &ev, payload, 10, &plen) == -2 && plen == 100,
+          "small buffer: the event kept");
+    CHECK(lenet_host_poll_event(b, &ev, payload, sizeof payload, &plen) == 1 &&
+          ev.type == LENET_EVENT_RECEIVE && plen == 100 && memcmp(payload, msg, 100) == 0,
+          "the kept event, whole");
+    CHECK(lenet_host_poll_event(b, &ev, payload, sizeof payload, &plen) == 0, "then nothing");
+    lenet_host_destroy(a);
+    lenet_host_destroy(b);
+    return 0;
+}
 
 int main(void) {
     lenet_initialize();
@@ -60,6 +129,7 @@ int main(void) {
           info.state == LENET_PEER_STATE_DISCONNECTED, "reset frees the slot");
 
     lenet_host_destroy(h);
+    if (check_pair() != 0) return 1;
     printf("lenet C API OK\n");
     return 0;
 }

@@ -29,6 +29,9 @@ and docs. Worked through in order; each item says what was done.
    (`lenet_capi.c` `g_out_buf`). lenet-rs promises per host and its `Host`
    is `Send`, so two hosts on a thread, or a task moved between threads,
    read the wrong or freed bytes.
+   **Done:** `lenet_host` is now a C struct holding the Lean host and the
+   last polled datagram, so `data` points into that host's own bytes (no
+   copy either); `check.c` polls two hosts and checks each keeps its own.
 3. **`Lenet.Net.transmit` rethrows the first send error.** State is
    already advanced, so the rest of the batch is lost, and a CONNECT
    spoofed from port 0 makes every `service` throw until that peer times
@@ -43,6 +46,9 @@ and docs. Worked through in order; each item says what was done.
    sends ahead of CONNECT / VERIFY_CONNECT, and the handshake fails.
 6. **`lenet_host_poll_event` with a NULL buffer loses the packet.** The
    header says NULL learns the size, but the event is popped.
+   **Done:** a receive event whose payload does not fit is kept and the
+   call returns -2 with the size needed; the next call returns it again.
+   Pinned in `check.c`. lenet-rs must handle -2 (see "API and bindings").
 7. **Datagram parsing copies the rest of the buffer after every command**
    (O(n²) in the datagram, before any peer or session check).
 8. **With checksums on, datagrams can be MTU + 4** (the checksum field is
@@ -405,4 +411,10 @@ found). Known costs left:
   getter now exist in Lean (`Host.*`) and C (`lenet.h`).
 - **lenet-rs** (async Rust bindings over the C API) lives in its own
   repository. Anything it needs from the C API gets added here first.
+  Found in the audit, to fix there: its receive buffer is 4 MB
+  (`MAX_RECV_PAYLOAD`, on the stale belief that the engine caps packets at
+  `maximumMtu * 1024`), but packets go up to 32 MB. It used to truncate
+  them silently; since the C API change it gets -2 from
+  `lenet_host_poll_event` and must grow its buffer to `*payload_len` and
+  call again. Its per-host `poll_outgoing` promise now holds.
 - **Shared library** once Lean ships a `-fPIC` runtime.

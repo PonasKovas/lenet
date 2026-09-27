@@ -15,8 +15,9 @@
  * always supplied by the caller.
  *
  * Driver rules:
- *   - Datagrams (ACKs included) are only produced by lenet_host_service:
- *     call it after feeding datagrams, then drain lenet_host_poll_outgoing.
+ *   - Datagrams (ACKs included) are only produced by lenet_host_service
+ *     and lenet_host_flush: call one after feeding datagrams, then drain
+ *     lenet_host_poll_outgoing.
  *   - Between datagrams, servicing at lenet_host_next_deadline is enough;
  *     there is no need to busy-poll.
  *   - Times are milliseconds on any monotonic clock, truncated to 32 bits.
@@ -24,8 +25,15 @@
  *   - On the server side the CONNECT event fires when the client
  *     acknowledges the handshake, not when its CONNECT arrives.
  *
- * Threading: a lenet_host is NOT thread-safe. Drive each host from a
- * single thread (or serialize access with your own lock).
+ * Threading: a lenet_host is NOT thread-safe. Use each host from one
+ * thread at a time (or serialize access with your own lock); it may move
+ * between threads. Different hosts may be used on different threads at
+ * once.
+ *
+ * Process-wide effects: the first lenet_host_create starts the Lean
+ * runtime, which sets SIGPIPE to be ignored for the whole process (writes
+ * to a closed pipe then fail with EPIPE instead of killing it) and starts
+ * two background threads. Neither is undone.
  */
 #ifndef LENET_H
 #define LENET_H
@@ -92,8 +100,9 @@ typedef struct {
 
 /** Outgoing datagram to transmit over the driver's UDP socket.
  * `ip` is in network byte order, `port` in host byte order.
- * `data` points to an internal buffer that is valid until the next
- * lenet_host_poll_outgoing call. */
+ * `data` points into the host that produced it and stays valid until the
+ * next lenet_host_poll_outgoing call on that host, or its destroy; other
+ * hosts, and other threads, do not touch it. */
 typedef struct {
     uint32_t    ip;
     uint16_t    port;
@@ -229,11 +238,13 @@ int32_t lenet_host_next_deadline(lenet_host *host, uint32_t *deadline);
 
 /**
  * Pops one application event into *out.
- * For LENET_EVENT_RECEIVE, up to payload_cap bytes of the packet payload
- * are copied into payload_buf (may be NULL to learn the size only) and
- * *payload_len is set to the full payload length; if *payload_len exceeds
- * the number of bytes copied the payload was truncated.
- * Returns 1 if an event was returned, 0 if none is pending, -1 on error.
+ * For LENET_EVENT_RECEIVE the payload is copied into payload_buf and
+ * *payload_len is set to its length. If it does not fit (payload_cap too
+ * small, or payload_buf NULL), nothing is popped: *payload_len is set to
+ * the length needed and -2 is returned, and the next call returns the same
+ * event. A payload can be up to 32 MB (ENet's maximum packet size).
+ * Returns 1 if an event was returned, 0 if none is pending, -2 as above,
+ * -1 on error.
  */
 int32_t lenet_host_poll_event(lenet_host *host, lenet_event *out,
                               void *payload_buf, size_t payload_cap,
@@ -241,8 +252,9 @@ int32_t lenet_host_poll_event(lenet_host *host, lenet_event *out,
 
 /**
  * Pops one outgoing datagram into *out. Returns 1 if there is one,
- * 0 if none is pending, -1 on error. out->data points to an internal
- * buffer valid until the next lenet_host_poll_outgoing call.
+ * 0 if none is pending, -1 on error. out->data points into the host and
+ * stays valid until the next lenet_host_poll_outgoing call on this host,
+ * or lenet_host_destroy.
  */
 int32_t lenet_host_poll_outgoing(lenet_host *host, lenet_datagram *out);
 

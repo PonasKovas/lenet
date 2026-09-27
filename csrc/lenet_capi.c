@@ -7,8 +7,9 @@
  *
  *   - lazy, idempotent Lean runtime bootstrap (pthread_once),
  *   - Lean reference-counting discipline (exported Lean functions take
- *     owned references; the host handle is incremented around every call
- *     and consumed by lenet_host_destroy),
+ *     owned references; the host reference is incremented around every
+ *     call (href) and consumed by lenet_host_destroy),
+ *   - what each host keeps on the C side (struct lenet_host),
  *   - IO result (EStateM) unwrapping,
  *   - ByteArray <-> (ptr, len) marshalling.
  *
@@ -24,6 +25,23 @@
 #include <lean/lean.h>
 
 #include "include/lenet.h"
+
+/* ---- the handle ---- */
+
+/* A host: the Lean host plus what the C side keeps for it. Pointers handed
+ * out by lenet_host_poll_outgoing point into `out`, so they belong to this
+ * host alone and stay valid until its next poll_outgoing or destroy. */
+struct lenet_host {
+    lean_object *ref;     /* IO.Ref HostContext, owned */
+    lean_object *out;     /* ByteArray of the last polled datagram, or NULL */
+    lean_object *pending; /* an event poll_event could not hand out whole, or NULL */
+};
+
+/* The Lean host with one more reference: the exports consume one. */
+static lean_object *href(lenet_host *h) {
+    lean_inc(h->ref);
+    return h->ref;
+}
 
 /* ---- raw Lean FFI exports (implemented in Lenet/FFI.lean) ---- */
 
@@ -119,17 +137,27 @@ lenet_host *lenet_host_create(uint32_t bind_ip, uint16_t bind_port,
         lean_dec(r);
         return NULL;
     }
-    lean_object *ref = lean_ctor_get(r, 0); /* IO.Ref HostContext */
-    lean_inc(ref);
+    lenet_host *h = malloc(sizeof *h);
+    if (h == NULL) {
+        lean_dec(r);
+        return NULL;
+    }
+    h->ref = lean_ctor_get(r, 0); /* IO.Ref HostContext */
+    lean_inc(h->ref);
     lean_dec(r);
-    return (lenet_host *)ref; /* we hold the only reference */
+    h->out = NULL;
+    h->pending = NULL;
+    return h;
 }
 
 void lenet_host_destroy(lenet_host *host) {
     if (host == NULL) return;
-    /* the export consumes the handle's reference itself */
-    lean_object *r = lenet_ffi_host_destroy((lean_object *)host);
+    if (host->out != NULL) lean_dec(host->out);
+    if (host->pending != NULL) lean_dec(host->pending);
+    /* the export consumes the host's reference itself */
+    lean_object *r = lenet_ffi_host_destroy(host->ref);
     lean_dec(r);
+    free(host);
 }
 
 /* ---- connection management ---- */
@@ -137,8 +165,7 @@ void lenet_host_destroy(lenet_host *host) {
 int32_t lenet_host_connect(lenet_host *host, uint32_t ip, uint16_t port,
                            size_t channel_count, uint32_t user_data) {
     if (host == NULL) return -1;
-    lean_inc((lean_object *)host);
-    lean_object *r = lenet_ffi_host_connect((lean_object *)host, ip, port,
+    lean_object *r = lenet_ffi_host_connect(href(host), ip, port,
                                             channel_count, user_data);
     int32_t v = -1;
     if (lean_io_result_is_ok(r))
@@ -151,8 +178,7 @@ int32_t lenet_host_send(lenet_host *host, uint16_t peer_id, uint8_t channel,
                         uint32_t flags, const void *data, size_t len) {
     if (host == NULL) return -1;
     lean_object *arr = mk_byte_array(data, len);
-    lean_inc((lean_object *)host);
-    lean_object *r = lenet_ffi_host_send((lean_object *)host, peer_id, channel,
+    lean_object *r = lenet_ffi_host_send(href(host), peer_id, channel,
                                          flags, arr);
     /* the export reports a rejected send as -1 inside a successful IO */
     int32_t v = lean_io_result_is_ok(r)
@@ -165,66 +191,56 @@ void lenet_host_broadcast(lenet_host *host, uint8_t channel, uint32_t flags,
                           const void *data, size_t len) {
     if (host == NULL) return;
     lean_object *arr = mk_byte_array(data, len);
-    lean_inc((lean_object *)host);
-    lean_object *r = lenet_ffi_host_broadcast((lean_object *)host, channel,
+    lean_object *r = lenet_ffi_host_broadcast(href(host), channel,
                                               flags, arr);
     lean_dec(r);
 }
 
 void lenet_host_disconnect(lenet_host *host, uint16_t peer_id, uint32_t data) {
     if (host == NULL) return;
-    lean_inc((lean_object *)host);
-    lean_object *r = lenet_ffi_host_disconnect((lean_object *)host, peer_id, data);
+    lean_object *r = lenet_ffi_host_disconnect(href(host), peer_id, data);
     lean_dec(r);
 }
 
 void lenet_host_disconnect_later(lenet_host *host, uint16_t peer_id, uint32_t data) {
     if (host == NULL) return;
-    lean_inc((lean_object *)host);
-    lean_object *r = lenet_ffi_host_disconnect_later((lean_object *)host, peer_id, data);
+    lean_object *r = lenet_ffi_host_disconnect_later(href(host), peer_id, data);
     lean_dec(r);
 }
 
 void lenet_peer_disconnect_now(lenet_host *host, uint16_t peer_id, uint32_t data) {
     if (host == NULL) return;
-    lean_inc((lean_object *)host);
-    lean_dec(lenet_ffi_peer_disconnect_now((lean_object *)host, peer_id, data));
+    lean_dec(lenet_ffi_peer_disconnect_now(href(host), peer_id, data));
 }
 
 void lenet_peer_reset(lenet_host *host, uint16_t peer_id) {
     if (host == NULL) return;
-    lean_inc((lean_object *)host);
-    lean_dec(lenet_ffi_peer_reset((lean_object *)host, peer_id));
+    lean_dec(lenet_ffi_peer_reset(href(host), peer_id));
 }
 
 void lenet_peer_ping(lenet_host *host, uint16_t peer_id) {
     if (host == NULL) return;
-    lean_inc((lean_object *)host);
-    lean_dec(lenet_ffi_peer_ping((lean_object *)host, peer_id));
+    lean_dec(lenet_ffi_peer_ping(href(host), peer_id));
 }
 
 void lenet_peer_ping_interval(lenet_host *host, uint16_t peer_id, uint32_t interval_ms) {
     if (host == NULL) return;
-    lean_inc((lean_object *)host);
-    lean_dec(lenet_ffi_peer_ping_interval((lean_object *)host, peer_id, interval_ms));
+    lean_dec(lenet_ffi_peer_ping_interval(href(host), peer_id, interval_ms));
 }
 
 void lenet_host_bandwidth_limit(lenet_host *host, uint32_t incoming_bw, uint32_t outgoing_bw) {
     if (host == NULL) return;
-    lean_inc((lean_object *)host);
-    lean_dec(lenet_ffi_host_bandwidth_limit((lean_object *)host, incoming_bw, outgoing_bw));
+    lean_dec(lenet_ffi_host_bandwidth_limit(href(host), incoming_bw, outgoing_bw));
 }
 
 void lenet_host_channel_limit(lenet_host *host, size_t channel_limit) {
     if (host == NULL) return;
-    lean_inc((lean_object *)host);
-    lean_dec(lenet_ffi_host_channel_limit((lean_object *)host, channel_limit));
+    lean_dec(lenet_ffi_host_channel_limit(href(host), channel_limit));
 }
 
 int32_t lenet_peer_get_info(lenet_host *host, uint16_t peer_id, lenet_peer_info *out) {
     if (host == NULL || out == NULL) return -1;
-    lean_inc((lean_object *)host);
-    lean_object *r = lenet_ffi_peer_info((lean_object *)host, peer_id);
+    lean_object *r = lenet_ffi_peer_info(href(host), peer_id);
     if (!lean_io_result_is_ok(r)) {
         lean_dec(r);
         return -1;
@@ -254,8 +270,7 @@ int32_t lenet_peer_get_info(lenet_host *host, uint16_t peer_id, lenet_peer_info 
 
 void lenet_host_enable_checksum(lenet_host *host) {
     if (host == NULL) return;
-    lean_inc((lean_object *)host);
-    lean_object *r = lenet_ffi_host_enable_checksum((lean_object *)host);
+    lean_object *r = lenet_ffi_host_enable_checksum(href(host));
     lean_dec(r);
 }
 
@@ -263,8 +278,7 @@ void lenet_peer_throttle_configure(lenet_host *host, uint16_t peer_id,
                                    uint32_t interval, uint32_t acceleration,
                                    uint32_t deceleration) {
     if (host == NULL) return;
-    lean_inc((lean_object *)host);
-    lean_object *r = lenet_ffi_peer_throttle_configure((lean_object *)host, peer_id,
+    lean_object *r = lenet_ffi_peer_throttle_configure(href(host), peer_id,
                                                        interval, acceleration, deceleration);
     lean_dec(r);
 }
@@ -272,8 +286,7 @@ void lenet_peer_throttle_configure(lenet_host *host, uint16_t peer_id,
 void lenet_peer_set_timeout(lenet_host *host, uint16_t peer_id,
                             uint32_t limit, uint32_t minimum, uint32_t maximum) {
     if (host == NULL) return;
-    lean_inc((lean_object *)host);
-    lean_object *r = lenet_ffi_set_peer_timeout((lean_object *)host, peer_id,
+    lean_object *r = lenet_ffi_set_peer_timeout(href(host), peer_id,
                                                 limit, minimum, maximum);
     lean_dec(r);
 }
@@ -285,29 +298,25 @@ int32_t lenet_host_handle_datagram(lenet_host *host, uint32_t now_ms,
                                    const void *data, size_t len) {
     if (host == NULL) return -1;
     lean_object *arr = mk_byte_array(data, len);
-    lean_inc((lean_object *)host);
-    return ffi_status(lenet_ffi_host_handle_datagram((lean_object *)host, now_ms,
+    return ffi_status(lenet_ffi_host_handle_datagram(href(host), now_ms,
                                                      ip, port, arr));
 }
 
 int32_t lenet_host_flush(lenet_host *host, uint32_t now_ms) {
     if (host == NULL) return -1;
-    lean_inc((lean_object *)host);
-    return ffi_status(lenet_ffi_host_flush((lean_object *)host, now_ms));
+    return ffi_status(lenet_ffi_host_flush(href(host), now_ms));
 }
 
 int32_t lenet_host_service(lenet_host *host, uint32_t now_ms) {
     if (host == NULL) return -1;
-    lean_inc((lean_object *)host);
-    return ffi_status(lenet_ffi_host_service((lean_object *)host, now_ms));
+    return ffi_status(lenet_ffi_host_service(href(host), now_ms));
 }
 
 /* ---- output polling ---- */
 
 int32_t lenet_host_next_deadline(lenet_host *host, uint32_t *deadline) {
     if (host == NULL || deadline == NULL) return -1;
-    lean_inc((lean_object *)host);
-    lean_object *r = lenet_ffi_host_next_deadline((lean_object *)host);
+    lean_object *r = lenet_ffi_host_next_deadline(href(host));
     if (!lean_io_result_is_ok(r)) {
         lean_dec(r);
         return -1;
@@ -324,14 +333,9 @@ int32_t lenet_host_next_deadline(lenet_host *host, uint32_t *deadline) {
     return 1;
 }
 
-/* The outgoing datagram is copied into a thread-local buffer so that
- * hosts on different threads never share it. */
-static _Thread_local uint8_t g_out_buf[64 * 1024];
-
 int32_t lenet_host_poll_outgoing(lenet_host *host, lenet_datagram *out) {
     if (host == NULL || out == NULL) return -1;
-    lean_inc((lean_object *)host);
-    lean_object *r = lenet_ffi_host_poll_outgoing((lean_object *)host);
+    lean_object *r = lenet_ffi_host_poll_outgoing(href(host));
 
     int32_t ret;
     if (!lean_io_result_is_ok(r)) {
@@ -352,14 +356,15 @@ int32_t lenet_host_poll_outgoing(lenet_host *host, lenet_datagram *out) {
             uint32_t ip = (uint32_t)lean_unbox_uint32(lean_ctor_get(p1, 0));
             uint32_t port = (uint32_t)lean_unbox(lean_ctor_get(p2, 0));
             lean_object *arr = lean_ctor_get(p2, 1);
-            size_t len = lean_sarray_size(arr);
-            if (len > sizeof g_out_buf) len = sizeof g_out_buf;
-            memcpy(g_out_buf, lean_sarray_cptr(arr), len);
-            lean_dec(opt); /* frees the pair tree + array */
+            /* the host keeps the bytes until its next poll: no copy */
+            lean_inc(arr);
+            lean_dec(opt); /* frees the pair tree */
+            if (host->out != NULL) lean_dec(host->out);
+            host->out = arr;
             out->ip = ip;
             out->port = (uint16_t)port;
-            out->data = g_out_buf;
-            out->len = len;
+            out->data = lean_sarray_cptr(arr);
+            out->len = lean_sarray_size(arr);
             ret = 1;
         }
     }
@@ -370,42 +375,45 @@ int32_t lenet_host_poll_event(lenet_host *host, lenet_event *out,
                               void *payload_buf, size_t payload_cap,
                               size_t *payload_len) {
     if (host == NULL || out == NULL) return -1;
-    lean_inc((lean_object *)host);
-    lean_object *r = lenet_ffi_host_poll_event((lean_object *)host);
-
-    int32_t ret;
-    if (!lean_io_result_is_ok(r)) {
-        ret = -1;
-        lean_dec(r);
+    lean_object *opt; /* some event */
+    if (host->pending != NULL) {
+        opt = host->pending;
+        host->pending = NULL;
     } else {
-        lean_object *opt = lean_ctor_get(r, 0); /* Option value */
+        lean_object *r = lenet_ffi_host_poll_event(href(host));
+        if (!lean_io_result_is_ok(r)) {
+            lean_dec(r);
+            return -1;
+        }
+        opt = lean_ctor_get(r, 0); /* Option value */
         lean_inc(opt);
         lean_dec(r);
         if (lean_obj_tag(opt) == 0) { /* none */
             lean_dec(opt);
-            ret = 0;
-        } else {
-            /* some (type, (peer, (channel, (data, payload)))):
-             * right-nested product, 64-bit scalars unboxed from the
-             * pointer bits */
-            lean_object *p1 = lean_ctor_get(opt, 0);
-            lean_object *p2 = lean_ctor_get(p1, 1);
-            lean_object *p3 = lean_ctor_get(p2, 1);
-            lean_object *p4 = lean_ctor_get(p3, 1);
-            out->type = (uint32_t)lean_unbox_uint32(lean_ctor_get(p1, 0));
-            out->peer_id = (uint16_t)lean_unbox(lean_ctor_get(p2, 0));
-            out->channel_id = (uint8_t)lean_unbox(lean_ctor_get(p3, 0));
-            out->data = (uint32_t)lean_unbox_uint32(lean_ctor_get(p4, 0));
-            lean_object *arr = lean_ctor_get(p4, 1);
-            size_t len = lean_sarray_size(arr);
-            size_t copy = len < payload_cap ? len : payload_cap;
-            if (payload_buf != NULL && copy > 0)
-                memcpy(payload_buf, lean_sarray_cptr(arr), copy);
-            if (payload_len != NULL)
-                *payload_len = len;
-            lean_dec(opt); /* frees the pair tree + array */
-            ret = 1;
+            return 0;
         }
     }
-    return ret;
+    /* some (type, (peer, (channel, (data, payload)))): right-nested
+     * product, 64-bit scalars unboxed from the pointer bits */
+    lean_object *p1 = lean_ctor_get(opt, 0);
+    lean_object *p2 = lean_ctor_get(p1, 1);
+    lean_object *p3 = lean_ctor_get(p2, 1);
+    lean_object *p4 = lean_ctor_get(p3, 1);
+    lean_object *arr = lean_ctor_get(p4, 1);
+    size_t len = lean_sarray_size(arr);
+    if (payload_len != NULL)
+        *payload_len = len;
+    if (len > 0 && (payload_buf == NULL || payload_cap < len)) {
+        /* does not fit: keep the event for the next call */
+        host->pending = opt;
+        return -2;
+    }
+    out->type = (uint32_t)lean_unbox_uint32(lean_ctor_get(p1, 0));
+    out->peer_id = (uint16_t)lean_unbox(lean_ctor_get(p2, 0));
+    out->channel_id = (uint8_t)lean_unbox(lean_ctor_get(p3, 0));
+    out->data = (uint32_t)lean_unbox_uint32(lean_ctor_get(p4, 0));
+    if (len > 0)
+        memcpy(payload_buf, lean_sarray_cptr(arr), len);
+    lean_dec(opt); /* frees the pair tree + array */
+    return 1;
 }
