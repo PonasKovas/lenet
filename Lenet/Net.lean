@@ -161,6 +161,15 @@ structure State where
   generation : Nat := 0
   pending    : Std.Queue Event := .empty
 
+/-- What went wrong on the socket. A send or receive that fails loses one
+datagram, which UDP may do anyway, so `service` goes on; these say it
+happened. -/
+structure SocketErrors where
+  sendFailures    : Nat := 0
+  receiveFailures : Nat := 0
+  /-- The most recent failure. -/
+  last            : Option IO.Error := none
+
 /-- A receive on the socket, resolved once a datagram is in. -/
 abbrev Inbox := IO.Promise (Except IO.Error (ByteArray × Option SocketAddress))
 
@@ -177,6 +186,7 @@ structure Endpoint where
   waiter : IO.Ref (Option (Std.Async.Waiter Unit))
   /-- The host's clock minus the monotonic clock (`Config.clock`). -/
   clockOffset : UInt32
+  errors : IO.Ref SocketErrors
 
 namespace State
 
@@ -266,14 +276,21 @@ def bind (address : SocketAddress) (config : Config := {}) : IO Endpoint := do
   let waiter ← IO.mkRef none
   let inbox ← IO.mkRef (← arm socket waiter)
   let mono := (← IO.monoMsNow).toUInt32
-  return ⟨socket, state, inbox, waiter, config.clock.getD mono - mono⟩
+  return ⟨socket, state, inbox, waiter, config.clock.getD mono - mono, ← IO.mkRef {}⟩
 
 /-- The address the socket is bound to. -/
 def localAddress (e : Endpoint) : IO SocketAddress := e.socket.getSockName
 
+/-- The socket's failures so far. -/
+def socketErrors (e : Endpoint) : IO SocketErrors := e.errors.get
+
+/-- Sends each datagram. One that fails (a destination the network refuses,
+such as port 0) is counted and lost, and the rest still go: the host has
+already moved on, as if it was sent. -/
 def transmit (e : Endpoint) (datagrams : Array (Address × ByteArray)) : IO Unit :=
   for (to, bytes) in datagrams do
-    (e.socket.send bytes (some (ofAddress to))).block
+    try (e.socket.send bytes (some (ofAddress to))).block
+    catch err => e.errors.modify fun s => { s with sendFailures := s.sendFailures + 1, last := some err }
 
 /-- Starts connecting to `address` with `channelCount` channels, sending
 `data` with the CONNECT. The connection is up once `service` reports
@@ -385,9 +402,11 @@ def popEvent (e : Endpoint) : IO (Option Event) :=
     | some (ev, rest) => (some ev, { s with pending := rest })
     | none => (none, s)
 
-/-- Feeds one received datagram to the host. -/
+/-- Feeds one received datagram to the host. One from port 0 is dropped:
+no answer could reach it. -/
 def deliver (e : Endpoint) (bytes : ByteArray) (from? : Option SocketAddress) : IO Unit := do
   let some from_ := from? >>= toAddress | return
+  if from_.port == 0 then return
   let now ← e.now
   e.state.modify fun s =>
     let (host, events) := s.host.handleDatagram now from_ bytes
@@ -401,15 +420,19 @@ def serviceHost (e : Endpoint) : IO Unit := do
     (datagrams, { s with host }.push events)
   e.transmit datagrams
 
-/-- The datagram that came in, if one did, without waiting. -/
-def poll (e : Endpoint) : IO (Option (ByteArray × Option SocketAddress)) := do
+/-- The receive that completed, if one did, without waiting: a datagram, or
+the error it failed with. -/
+def poll (e : Endpoint) : IO (Option (Except IO.Error (ByteArray × Option SocketAddress))) := do
   let p ← e.inbox.get
   if !(← p.isResolved) then return none
   e.inbox.set (← arm e.socket e.waiter)
   match ← IO.wait p.result? with
-  | some (.ok d) => return some d
-  -- a failed receive (the network said no) loses nothing: go on
-  | _ => return none
+  | some r => return some r
+  | none => return some (.error (.userError "Lenet: the receive was dropped"))
+
+/-- Counts a failed receive. -/
+def receiveFailed (e : Endpoint) (err : IO.Error) : IO Unit :=
+  e.errors.modify fun s => { s with receiveFailures := s.receiveFailures + 1, last := some err }
 
 /-- Ready once a datagram is in; takes nothing, so losing the race loses
 no datagram. -/
@@ -421,21 +444,30 @@ def ready (e : Endpoint) : Std.Async.Selector Unit where
     if ← (← e.inbox.get).isResolved then wake e.waiter
   unregisterFn := e.waiter.set none
 
-/-- Waits up to `ms` milliseconds for a datagram. -/
+/-- Waits up to `ms` milliseconds for a datagram. A failed receive is
+counted and the wait sleeps out its time, so a socket that keeps failing
+costs a sleep per round, not a busy loop. -/
 def receive (e : Endpoint) (ms : UInt32) : IO (Option (ByteArray × Option SocketAddress)) := do
-  if let some d ← e.poll then return some d
+  match ← e.poll with
+  | some (.ok d) => return some d
+  | some (.error err) => e.receiveFailed err; IO.sleep ms; return none
+  | none =>
   (do
     let sleep ← Std.Async.Sleep.mk (Std.Time.Millisecond.Offset.ofNat ms.toNat)
     Std.Async.Selectable.one #[.case e.ready pure, .case sleep.selector pure]
     sleep.stop : Std.Async.Async Unit).block
-  e.poll
+  match ← e.poll with
+  | some (.ok d) => return some d
+  | some (.error err) => e.receiveFailed err; IO.sleep ms; return none
+  | none => return none
 
 /-- Takes up to `budget` datagrams that have arrived, without waiting. -/
 def drain (e : Endpoint) : (budget : Nat) → IO Unit
   | 0 => pure ()
   | budget + 1 => do
     match ← e.poll with
-    | some (bytes, from?) => e.deliver bytes from?; e.drain budget
+    | some (.ok (bytes, from?)) => e.deliver bytes from?; e.drain budget
+    | some (.error err) => e.receiveFailed err
     | none => pure ()
 
 /-- Rounds `service` may take past one per millisecond of its timeout: a

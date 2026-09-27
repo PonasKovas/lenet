@@ -186,6 +186,21 @@ def channelsAgreed : Check := do
   expect ((ec.filterMap fun | .receive _ ch _ => some ch.val | _ => none).qsort (· < ·) == #[0, 1, 2])
     "the echoes came back on channels 0, 1 and 2"
 
+/-- A datagram the network refuses (to port 0) is counted and lost; the
+endpoint keeps working, and the rest of the batch still goes. -/
+def sendFailureSurvives : Check := do
+  let (client, server, peer, _) ← connected
+  let bad : SocketAddress := .v4 { addr := IPv4Addr.ofParts 127 0 0 1, port := 0 }
+  let _ ← client.connect bad 2 0
+  -- the CONNECT to port 0 and the packet for the server go out together
+  match ← client.send peer peer.first (.reliable (bytes 20 1)) with
+  | .ok () => pure ()
+  | .error e => throw s!"send: {e}"
+  let (_, es) ← pump client server 2000 fun _ es => !(received es).isEmpty
+  let errs ← client.socketErrors
+  expect (errs.sendFailures ≥ 1) "the send to port 0 did not fail"
+  expect (received es == #[bytes 20 1]) "the packet sent alongside was lost"
+
 def tests : List (String × Check) := [
   ("connect, then reliable packets both ways arrive once and in order", connectAndExchange),
   ("a disconnect kills the handles, and reused slots get new ones", disconnectKillsHandles),
@@ -193,7 +208,8 @@ def tests : List (String × Check) := [
   ("an idle service returns once its timeout is up, not before", serviceWaits),
   ("service 0 alone moves datagrams, without blocking", pollingOnly),
   ("a sleeping service wakes as soon as a datagram lands", wakesOnDatagram),
-  ("both sides' connections carry the channel count the server granted", channelsAgreed)
+  ("both sides' connections carry the channel count the server granted", channelsAgreed),
+  ("a send the network refuses is counted, and the endpoint goes on", sendFailureSurvives)
 ]
 
 end NetTest

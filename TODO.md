@@ -36,6 +36,9 @@ and docs. Worked through in order; each item says what was done.
    already advanced, so the rest of the batch is lost, and a CONNECT
    spoofed from port 0 makes every `service` throw until that peer times
    out.
+   **Done:** a failed send is counted (`Endpoint.socketErrors`) and lost,
+   and the rest of the batch goes; datagrams from port 0 are dropped.
+   `test/Net.lean` sends to port 0 alongside a real packet.
 4. **Receive cost grows with what is staged.** `drainContiguousLoop` is
    O(n²) (`findIdx?` + `eraseIdx` per packet); each push onto a stage
    copies the array while the peer's channel array still shares it;
@@ -65,6 +68,8 @@ and docs. Worked through in order; each item says what was done.
     huge length aborts on out-of-memory instead of returning -1.
 13. **`Lenet.Net` swallows receive errors** and can spin at full CPU on a
     dead socket.
+    **Done** with 3: a failed receive is counted and its round sleeps out
+    its wait. (No test: a receive error is hard to provoke on loopback.)
 14. **Smaller hot-path costs:** the unsequenced window is copied on every
     accepted packet (shared with the peer); each ACK erases from the
     in-flight array; `packOutgoingCommands` rebuilds the whole queue every
