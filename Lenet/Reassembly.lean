@@ -107,13 +107,17 @@ its lost ACK is sent again) or its bytes fit what is missing. -/
 def takes (a : FragmentAssembler) (fragmentNumber : Nat) (offset : Nat) (data : ByteArray) : Bool :=
   a.fits fragmentNumber offset data && (a.hasFragment fragmentNumber || a.bytesFit data.size)
 
+/-- One fragment of `appendInOrder`: appended if it starts where the bytes
+so far end. -/
+def appendStep (acc : Option ByteArray) (fragment : Nat × ByteArray) : Option ByteArray :=
+  match acc with
+  | some buf => if fragment.1 == buf.size then some (buf ++ fragment.2) else none
+  | none => none
+
 /-- The fragments appended in arrival order, when each starts where the
 ones before it ended (they arrived in order, as they usually do). -/
 def appendInOrder (fragments : Array (Nat × ByteArray)) (capacity : Nat) : Option ByteArray :=
-  fragments.foldl (init := some (ByteArray.emptyWithCapacity capacity)) fun acc (offset, data) =>
-    match acc with
-    | some buf => if offset == buf.size then some (buf ++ data) else none
-    | none => none
+  fragments.foldl appendStep (some (ByteArray.emptyWithCapacity capacity))
 
 /-- The packet: every fragment copied to its offset. A packet built from
 fragments that tile it holds exactly their bytes. Fragments that arrived in

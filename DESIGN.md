@@ -90,7 +90,7 @@ default build and CI compile. The C library never includes them.
 |-----------------|--------|
 | `Codec`         | every reader primitive either advances past a bounds-checked region or fails in place; field-level write/read inverses; the command parser's fuel is always enough (`parseCommands_fuel_adequate`) |
 | `Roundtrip`     | every command kind roundtrips (`rt_command`), canonical headers roundtrip (`rt_header`), the command list is recovered exactly (`parseCommands_cmdsBytes`), and the full wire datagram roundtrips through the host's real encode/decode pair, checksum verification included (`wire_roundtrip`) |
-| `Reassembly`    | the assembler's bitmap and counter stay in step, writes stay in bounds, and a packet is only released when every fragment arrived and they carried exactly its length, and it is those fragments copied to their offsets (`addFragment_completion_sound`) |
+| `Reassembly`    | the assembler's bitmap and counter stay in step, writes stay in bounds, and a packet is only released when every fragment arrived and they carried exactly its length, and it is those fragments copied to their offsets (`addFragment_completion_sound`); when they arrived in order, tiling it, it is exactly their bytes back to back (`addFragment_completion_tiles`) |
 | `Channel`       | the staged-delivery drain has enough fuel and advances the frontier by exactly the delivered span; what the frontier jumps over is erased exactly (`eraseAfter_get`); delivery works across the 16-bit wrap (`wrap_delivery`) |
 | `Unsequenced`   | a group just accepted is rejected if it comes again next (`checkAndAdd_idempotent`); that it stays rejected while the window slides is not proven |
 | `Time`          | time differences don't depend on when the clock started; 16-bit wire timestamps are recovered exactly (`fromWire_recovers`) |
@@ -112,10 +112,10 @@ build-time audit rather than a theorem.
 **What the proofs trust.** Most results rest on Lean's kernel and its
 three standard axioms (`propext`, `Classical.choice`, `Quot.sound`). The
 bit-level lemmas proved with `bv_decide` (in `Codec`, `Roundtrip`, `Time`,
-`Deadline`, `Unsequenced`) add an axiom each (`…._native.bv_decide.ax_…`):
+`Deadline`, `Idle`, `Unsequenced`) add an axiom each (`…._native.bv_decide.ax_…`):
 the SAT solver's certificate is checked by Lean's compiled LRAT checker, not
-by the kernel. `wire_roundtrip` and `nextDeadline_earliest` depend on some
-of them; `#print axioms` lists which.
+by the kernel. `wire_roundtrip`, `nextDeadline_earliest` and `service_before_deadline`
+depend on some of them; `#print axioms` lists which.
 
 ## Scope decisions
 

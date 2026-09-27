@@ -180,6 +180,10 @@ and docs. Worked through in order; each item says what was done.
     rejected while the window slides is not proven.
 25. `addFragment_completion_sound` does not tie the released data to the
     fragments written.
+    **Done:** it now says the packet is `assemble` of the stored fragments
+    (each copied to its offset), and `addFragment_completion_tiles` that
+    fragments arriving in order, tiling the packet, give exactly their
+    bytes back to back.
 26. `Panic.lean`'s division list is stale; its claim that library code
     panics only through a `…!` name is false (`Array.get!Internal`).
     **Done:** the audit now follows the library code Lenet uses,

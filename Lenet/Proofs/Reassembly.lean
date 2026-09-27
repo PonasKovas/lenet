@@ -260,4 +260,75 @@ theorem addFragment_completion_sound {a a' : FragmentAssembler} {n off : Nat}
     simp only [bne_iff_ne, ne_eq] at hmem
     exact hmem
 
+/-! ## What the packet holds -/
+
+/-- The fragments' data back to back, in arrival order. -/
+def concatData (l : List (Nat × ByteArray)) : ByteArray := l.foldl (fun b x => b ++ x.2) ByteArray.empty
+
+/-- Fragments that tile from `pos` in arrival order: each starts where the
+ones before it end. -/
+def Tiles : List (Nat × ByteArray) → Nat → Prop
+  | [], _ => True
+  | (off, d) :: rest, pos => off = pos ∧ Tiles rest (pos + d.size)
+
+theorem foldl_append_data (l : List (Nat × ByteArray)) (b : ByteArray) :
+    l.foldl (fun b x => b ++ x.2) b = b ++ concatData l := by
+  induction l generalizing b with
+  | nil => simp [concatData]
+  | cons x l ih =>
+    simp only [List.foldl_cons, concatData]
+    rw [ih, ih (ByteArray.empty ++ x.2), ByteArray.empty_append, ByteArray.append_assoc]
+
+theorem appendInOrder_step (l : List (Nat × ByteArray)) : ∀ (buf : ByteArray), Tiles l buf.size →
+    l.foldl appendStep (some buf) = some (buf ++ concatData l) := by
+  induction l with
+  | nil => intro buf _; simp [concatData]
+  | cons x l ih =>
+    intro buf ht
+    obtain ⟨off, d⟩ := x
+    obtain ⟨hoff, hrest⟩ := ht
+    simp only [List.foldl_cons, appendStep, hoff, beq_self_eq_true, if_true]
+    rw [ih (buf ++ d) (by simpa [ByteArray.size_append] using hrest)]
+    simp only [concatData, List.foldl_cons, ByteArray.empty_append]
+    rw [foldl_append_data, foldl_append_data, ByteArray.append_assoc, ByteArray.empty_append]
+
+theorem appendInOrder_tiles (fragments : Array (Nat × ByteArray)) (cap : Nat) (h : Tiles fragments.toList 0) :
+    appendInOrder fragments cap = some (concatData fragments.toList) := by
+  unfold appendInOrder
+  rw [← Array.foldl_toList]
+  have hz : ByteArray.emptyWithCapacity cap = ByteArray.empty := by
+    simp [ByteArray.emptyWithCapacity, ByteArray.empty]
+  rw [hz, appendInOrder_step fragments.toList ByteArray.empty (by exact h), ByteArray.empty_append]
+
+theorem concatData_size (l : List (Nat × ByteArray)) : (concatData l).size = (l.map (·.2.size)).sum := by
+  induction l with
+  | nil => rfl
+  | cons x l ih =>
+    have : concatData (x :: l) = x.2 ++ concatData l := by
+      simp only [concatData, List.foldl_cons, ByteArray.empty_append]
+      exact foldl_append_data l x.2
+    rw [this, ByteArray.size_append, ih]
+    simp
+
+/-- Fragments that tile the packet in arrival order, carrying its total
+length, assemble to exactly their bytes back to back. -/
+theorem assemble_tiles (a : FragmentAssembler) (ht : Tiles a.fragments.toList 0)
+    (hs : (a.fragments.toList.map (·.2.size)).sum = a.totalLength) :
+    a.assemble = concatData a.fragments.toList := by
+  unfold FragmentAssembler.assemble
+  rw [appendInOrder_tiles _ _ ht]
+  dsimp only
+  rw [if_pos (by rw [concatData_size, hs]; simp)]
+
+/-- **The packet is the fragments**: when `addFragment` completes a set
+whose fragments arrived in order, each starting where the one before it
+ended (as an honest sender's do), the packet it hands out is exactly their
+bytes back to back. -/
+theorem addFragment_completion_tiles {a a' : FragmentAssembler} {n off : Nat}
+    {d data : ByteArray} (hinv : Inv a)
+    (h : a.addFragment n off d = .ok (a', some data)) (ht : Tiles a'.fragments.toList 0) :
+    data = concatData a'.fragments.toList := by
+  obtain ⟨hdata, -, hsum, -⟩ := addFragment_completion_sound hinv h
+  rw [hdata, assemble_tiles a' ht hsum]
+
 end Lenet.Proofs
