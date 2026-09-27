@@ -4,6 +4,7 @@
 #   make               -> builds c/harness (the trace recorder)
 #   make c/interop     -> builds the live interop runner
 #   make interop       -> runs every interop scenario
+#   make net-interop   -> Lenet.Net (Lean, own process) against ENet, both ways
 #   make traces        -> records all scenario traces into traces/, once
 #                         with ENet's clock at 0 and once per CLOCK_OFFSETS
 #   make record SCENARIO=connect
@@ -29,7 +30,7 @@ SCENARIOS := connect send_c2s send_s2c frag fragthen disc_client disc_server idl
 CLOCK_OFFSETS := 65203 4294966963
 INTEROP_SCENARIOS := connect connect_r send frag disconnect disconnect_r timeout checksum bandwidth disclater multip unfrag
 
-.PHONY: all traces record interop clean FORCE
+.PHONY: all traces record interop net-interop clean FORCE
 
 all: $(HARNESS)
 
@@ -65,5 +66,24 @@ record: $(HARNESS)
 interop: c/interop
 	@for s in $(INTEROP_SCENARIOS); do ./c/interop $$s || exit 1; done
 
+c/echo: c/echo.c $(ENET_LIB)
+	$(CC) $(CFLAGS) c/echo.c $(ENET_LIB) -o $@ -lm
+
+NETINTEROP := ../.lake/build/bin/netinterop
+
+# Two processes each way: the ENet echo peer and the Lean program. The
+# server starts first; a CONNECT sent before it binds is retransmitted.
+net-interop: c/echo FORCE
+	cd .. && lake build netinterop
+	@echo "net-interop: lenet client, enet server"
+	@./c/echo server 40020 & s=$$!; sleep 0.2; \
+	  $(NETINTEROP) client 40020; c=$$?; wait $$s; e=$$?; \
+	  test $$c -eq 0 -a $$e -eq 0 || { echo "FAIL net-interop (lenet client)"; exit 1; }
+	@echo "net-interop: enet client, lenet server"
+	@$(NETINTEROP) server 40021 & s=$$!; sleep 0.2; \
+	  ./c/echo client 40021; c=$$?; wait $$s; e=$$?; \
+	  test $$c -eq 0 -a $$e -eq 0 || { echo "FAIL net-interop (lenet server)"; exit 1; }
+	@echo "PASS net-interop"
+
 clean:
-	rm -rf $(BUILD) $(HARNESS) c/interop
+	rm -rf $(BUILD) $(HARNESS) c/interop c/echo

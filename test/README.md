@@ -29,6 +29,12 @@ C library, not against a spec. There are three parts:
    decoder is the strictest check of Lenet's encoder, and the other way
    round.
 
+4. **`Lenet.Net` against ENet** (`c/echo.c`, `NetInterop.lean`). The Lean
+   socket driver in one process and a real ENet host in another, each way
+   round: one side sends 31 reliable packets (one fragmented) and a few
+   unsequenced ones, the other echoes them, and the sender checks every
+   reliable one comes back once, in order and intact.
+
 ENet is built out of tree from a checkout at `../enet` (next to this
 repository); the checkout is never modified. CI clones it at the pinned
 revision the traces were recorded with (`5a9c537`, v1.3.18-17).
@@ -46,6 +52,7 @@ LENET_DEBUG=1 ./.lake/build/bin/replay test/traces frag
 # live interop
 make -C test interop           # builds everything, runs all scenarios
 ./test/c/interop connect       # one scenario
+make -C test net-interop       # Lenet.Net against ENet, two processes
 
 # re-record the traces (only when scenarios change; not byte-reproducible,
 # since recording uses the real clock and ENet's randomness)

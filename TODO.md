@@ -45,8 +45,10 @@ Done this session:
   checks whether it resolved; a sleep registers one waiter, woken by that
   receive's single continuation.
 
-Suggested next: a live interop scenario for `Lenet.Net` against ENet (the
-C harness in `test/c` has the ENet side), or channel handles.
+- `make -C test net-interop` (in CI): `Lenet.Net` in one process against
+  an ENet echo peer (`test/c/echo.c`) in another, both ways round.
+
+Suggested next: channel handles, or the receiver-side proof (see Proofs).
 
 Checks before each commit: `lake build` (library and proofs, including the
 no-panic audit in `Proofs/Panic.lean`), `./.lake/build/bin/unit`,

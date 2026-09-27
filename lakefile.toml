@@ -35,6 +35,12 @@ name = "net"
 root = "Net"
 srcDir = "test"
 
+# The Lean side of the Lenet.Net-against-ENet test (make -C test net-interop).
+[[lean_exe]]
+name = "netinterop"
+root = "NetInterop"
+srcDir = "test"
+
 # Benchmark: built in CI, run locally (baseline numbers in TODO.md).
 [[lean_exe]]
 name = "bench"

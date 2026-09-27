@@ -113,6 +113,7 @@ lake build unit && ./.lake/build/bin/unit                   # unit tests
 lake build net && ./.lake/build/bin/net                     # Lenet.Net over UDP on 127.0.0.1
 make -C csrc check                                          # C API smoke test
 make -C test interop                                        # live interop (needs ENet in ../enet)
+make -C test net-interop                                    # Lenet.Net against ENet, two processes
 lake build bench && ./.lake/build/bin/bench                 # benchmark
 ```
 
