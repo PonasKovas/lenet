@@ -35,7 +35,18 @@ Done this session:
   picks the outermost `if`, so an `if` inside another's condition needs
   `by_cases` or a lemma over the general shape (`scanStep`, `ite_map_inv`).
 
-Suggested next: the typed Lean API.
+- **Typed Lean API** (`Lenet/Net.lean`, library `LenetNet`): an
+  `Endpoint` runs a host over a `Std.Async.UDP` socket with ENet's calls
+  (`connect`, `send`, `service timeout`, ...). Connections are
+  `PeerHandle`s (slot plus a generation), dead once their connection ends.
+  `test/Net.lean` (exe `net`, in CI) runs two endpoints on 127.0.0.1.
+  Found on the way: `Selectable.tryOne` on `recvSelector` never finds a
+  datagram, so `Endpoint` keeps one low-level receive outstanding and
+  checks whether it resolved; a sleep registers one waiter, woken by that
+  receive's single continuation.
+
+Suggested next: a live interop scenario for `Lenet.Net` against ENet (the
+C harness in `test/c` has the ENet side), or channel handles.
 
 Checks before each commit: `lake build` (library and proofs, including the
 no-panic audit in `Proofs/Panic.lean`), `./.lake/build/bin/unit`,
@@ -101,9 +112,9 @@ found). Known costs left:
 
 ## API and bindings
 
-- **Typed Lean API.** The Lean surface is the raw `Host` functions. A thin
-  typed layer (peer and channel handles instead of `UInt16`/`UInt8`,
-  events as a stream) would make Lenet pleasant to use from Lean itself.
+- **Typed Lean API**: done (`Lenet.Net`). Channels are still plain
+  `UInt8`s; a per-connection channel type (`Fin channelCount`) would catch
+  a bad channel at compile time, at the cost of carrying the count around.
 - **ENet API parity** (2026-09-26): disconnect_now, peer reset, ping,
   ping interval, bandwidth limit, channel limit, flush and a peer-info
   getter now exist in Lean (`Host.*`) and C (`lenet.h`).

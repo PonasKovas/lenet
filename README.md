@@ -66,11 +66,51 @@ The full API, with the rules a driver has to follow, is documented in
 [csrc/include/lenet.h](csrc/include/lenet.h). Async Rust bindings live in a
 separate repository (`lenet-rs`).
 
+## Using it from Lean
+
+`Lenet.Net` (library `LenetNet`) runs a host over a UDP socket, the way
+ENet's own API does. Connections are `PeerHandle`s, which stop working
+when their connection ends, so a reused peer slot is never mistaken for the
+old connection.
+
+```lean
+import Lenet.Net
+open Lenet.Net Std.Net
+
+/-- An echo server on port 7777. -/
+def serve : IO Unit := do
+  let host ← Endpoint.bind (.v4 ⟨.ofParts 0 0 0 0, 7777⟩)
+  repeat
+    match ← host.service 1000 with
+    | some (.connect peer data) => IO.println s!"{peer} connected, data {data}"
+    | some (.receive peer channel packet) => discard <| host.send peer channel packet
+    | some (.disconnect peer _) => IO.println s!"{peer} left"
+    | none => pure ()
+
+/-- Sends one packet and waits for the echo. -/
+def ask (text : String) : IO Unit := do
+  let host ← Endpoint.bind (.v4 ⟨.ofParts 0 0 0 0, 0⟩)
+  let .ok server ← host.connect (.v4 ⟨.ofParts 127 0 0 1, 7777⟩) | throw (.userError "no free slot")
+  repeat
+    match ← host.service 1000 with
+    | some (.connect _ _) => discard <| host.send server 0 (.reliable text.toUTF8)
+    | some (.receive _ _ packet) =>
+      IO.println (String.fromUTF8! packet.data)
+      host.disconnect server
+    | some (.disconnect _ _) => return
+    | none => pure ()
+```
+
+`service timeout` returns the next event, waiting up to `timeout`
+milliseconds; `service 0` only checks, for a program with its own loop.
+The pure engine (`Lenet.Host`) is there too, for a driver of your own.
+
 ## Testing
 
 ```sh
 lake build replay && ./.lake/build/bin/replay test/traces   # golden-trace replay
 lake build unit && ./.lake/build/bin/unit                   # unit tests
+lake build net && ./.lake/build/bin/net                     # Lenet.Net over UDP on 127.0.0.1
 make -C csrc check                                          # C API smoke test
 make -C test interop                                        # live interop (needs ENet in ../enet)
 lake build bench && ./.lake/build/bin/bench                 # benchmark
@@ -87,6 +127,7 @@ comparison works is explained in [test/README.md](test/README.md).
 | `Lenet/Protocol/`     | the wire format: header, commands, datagrams             |
 | `Lenet/Proofs/`       | the proofs (library `LenetProofs`, never linked into C)  |
 | `Lenet/FFI.lean`      | the exports the C shim wraps                             |
+| `Lenet/Net.lean`      | the engine over a UDP socket, for Lean programs (library `LenetNet`) |
 | `csrc/`               | the C distribution: `include/lenet.h`, the shim, the build |
 | `test/`               | ENet comparison: trace recorder, replayer, live interop  |
 | `bench/`              | throughput and service-cost benchmark                    |

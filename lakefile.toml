@@ -1,6 +1,6 @@
 name = "lenet"
 version = "0.1.0"
-defaultTargets = ["Lenet", "LenetProofs"]
+defaultTargets = ["Lenet", "LenetProofs", "LenetNet"]
 
 [[lean_lib]]
 name = "Lenet"
@@ -12,6 +12,12 @@ name = "Lenet"
 [[lean_lib]]
 name = "LenetProofs"
 
+# Lenet over a UDP socket (`Lenet.Net`), for Lean programs. Its own
+# library so the engine and the C distribution never depend on Std.Async.
+[[lean_lib]]
+name = "LenetNet"
+roots = ["Lenet.Net"]
+
 [[lean_exe]]
 name = "replay"
 root = "Replay"
@@ -21,6 +27,12 @@ srcDir = "test"
 [[lean_exe]]
 name = "unit"
 root = "Unit"
+srcDir = "test"
+
+# Lenet.Net over real UDP sockets on 127.0.0.1.
+[[lean_exe]]
+name = "net"
+root = "Net"
 srcDir = "test"
 
 # Benchmark: built in CI, run locally (baseline numbers in TODO.md).

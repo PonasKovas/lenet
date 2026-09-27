@@ -1,0 +1,190 @@
+/-
+Tests of `Lenet.Net`: two endpoints over real UDP sockets on 127.0.0.1,
+driven the way an application would (connect, send, `service` in a loop).
+The protocol itself is covered by the traces and unit tests; these check
+the driver: datagrams move both ways, timers run, and handles die with
+their connection.
+
+Exit code 0 iff every test passes.
+
+Run: lake build net && ./.lake/build/bin/net
+-/
+import Lenet.Net
+
+open Lenet.Net Std.Net
+
+namespace NetTest
+
+abbrev Check := ExceptT String IO Unit
+
+def expect (ok : Bool) (msg : String) : Check :=
+  if ok then pure () else throw msg
+
+def loopback : SocketAddress := .v4 { addr := IPv4Addr.ofParts 127 0 0 1, port := 0 }
+
+/-- Services both endpoints, a few milliseconds each, until `done` holds
+for the events so far or `ms` milliseconds pass. Returns each side's
+events. -/
+partial def pump (a b : Endpoint) (ms : Nat) (done : Array Event → Array Event → Bool) :
+    IO (Array Event × Array Event) := do
+  let deadline := (← IO.monoMsNow) + ms
+  let rec loop (ea eb : Array Event) : IO (Array Event × Array Event) := do
+    if done ea eb then return (ea, eb)
+    if (← IO.monoMsNow) ≥ deadline then return (ea, eb)
+    let ea := match ← a.service 2 with | some ev => ea.push ev | none => ea
+    let eb := match ← b.service 2 with | some ev => eb.push ev | none => eb
+    loop ea eb
+  loop #[] #[]
+
+def isConnect : Event → Bool | .connect .. => true | _ => false
+def isDisconnect : Event → Bool | .disconnect .. => true | _ => false
+def received (es : Array Event) : Array ByteArray :=
+  es.filterMap fun | .receive _ _ p => some p.data | _ => none
+
+/-- A connected pair: client, server, and each side's handle. -/
+def connected : ExceptT String IO (Endpoint × Endpoint × PeerHandle × PeerHandle) := do
+  let server ← Endpoint.bind loopback
+  let client ← Endpoint.bind loopback
+  let peer ← match ← client.connect (← server.localAddress) 2 42 with
+    | .ok p => pure p
+    | .error e => throw s!"connect: {e}"
+  let (ec, es) ← pump client server 2000 fun ec es => ec.any isConnect && es.any isConnect
+  let some (.connect cp cdata) := ec.find? isConnect | throw "the client never connected"
+  let some (.connect sp sdata) := es.find? isConnect | throw "the server never saw the connect"
+  expect (cp == peer) "the client's connect event names the handle connect returned"
+  expect (cdata == 0 && sdata == 42) s!"connect data: client {cdata}, server {sdata} (want 0, 42)"
+  return (client, server, peer, sp)
+
+def bytes (n : Nat) (seed : Nat) : ByteArray :=
+  ⟨(Array.range n).map fun i => ((i * 31 + seed) % 251).toUInt8⟩
+
+def connectAndExchange : Check := do
+  let (client, server, peer, sp) ← connected
+  -- reliable packets arrive once and in order, a fragmented one whole
+  let payloads := (List.range 50).map (bytes 100 ·) ++ [bytes 100000 7]
+  for d in payloads do
+    match ← client.send peer 0 (.reliable d) with
+    | .ok () => pure ()
+    | .error e => throw s!"send: {e}"
+  let (_, es) ← pump client server 3000 fun _ es => (received es).size ≥ payloads.length
+  let got := received es
+  expect (got.size == payloads.length) s!"{got.size} of {payloads.length} packets arrived"
+  expect (got.toList == payloads) "the packets arrived out of order or changed"
+  -- and back the other way, on channel 1
+  match ← server.send sp 1 (.reliable (bytes 10 3)) with
+  | .ok () => pure ()
+  | .error e => throw s!"server send: {e}"
+  let (ec, _) ← pump client server 2000 fun ec _ => !(received ec).isEmpty
+  expect (ec.any fun | .receive p 1 pk => p == peer && pk.data == bytes 10 3 | _ => false)
+    "the client got the server's packet on channel 1"
+  -- the RTT estimate came from real ACKs
+  let some info ← client.info peer | throw "no info for a live handle"
+  expect (info.state == .connected) "the peer is connected"
+
+def disconnectKillsHandles : Check := do
+  let (client, server, peer, sp) ← connected
+  client.disconnect peer 7
+  let (ec, es) ← pump client server 2000 fun ec es => ec.any isDisconnect && es.any isDisconnect
+  expect (ec.any fun | .disconnect p _ => p == peer | _ => false) "the client reported its disconnect"
+  expect (es.any fun | .disconnect p 7 => p == sp | _ => false) "the server got the disconnect with data 7"
+  -- the old handles are dead, even once the slots hold new connections
+  match ← client.send peer 0 (.reliable (bytes 1 0)) with
+  | .error (.peerNotConnected _) => pure ()
+  | _ => throw "a send on a dead handle did not fail with peerNotConnected"
+  let peer2 ← match ← client.connect (← server.localAddress) with
+    | .ok p => pure p
+    | .error e => throw s!"reconnect: {e}"
+  let (_, es) ← pump client server 2000 fun ec es => ec.any isConnect && es.any isConnect
+  let some (.connect sp2 _) := es.find? isConnect | throw "the reconnect never arrived"
+  expect (peer2.slot == peer.slot && peer2 != peer) "a reused slot gets a new handle"
+  expect (sp2 != sp) "the server's reused slot gets a new handle"
+  expect ((← client.info peer).isNone) "a dead handle has no info"
+  match ← server.send sp 0 (.reliable (bytes 1 0)) with
+  | .error (.peerNotConnected _) => pure ()
+  | _ => throw "a dead server handle reached the new connection"
+
+def connectTimesOut : Check := do
+  -- nothing listens there: the attempt ends with a disconnect event
+  let silent ← Endpoint.bind loopback
+  let client ← Endpoint.bind loopback
+  let peer ← match ← client.connect (← silent.localAddress) with
+    | .ok p => pure p
+    | .error e => throw s!"connect: {e}"
+  client.setTimeout peer 1 100 300
+  let events ← client.serviceFor 2000
+  expect (events.any fun | .disconnect p 0 => p == peer | _ => false)
+    s!"the unanswered connect ended with a disconnect ({events.size} events)"
+
+def serviceWaits : Check := do
+  -- an idle endpoint's service returns once the timeout is up, not before
+  let e ← Endpoint.bind loopback
+  let t0 ← IO.monoMsNow
+  let ev ← e.service 100
+  let dt := (← IO.monoMsNow) - t0
+  expect ev.isNone "an idle endpoint reported an event"
+  expect (dt ≥ 90 && dt < 1000) s!"service 100 took {dt} ms"
+
+def pollingOnly : Check := do
+  -- a game loop calls service 0 once a frame: it must never block, and
+  -- datagrams must still move
+  let server ← Endpoint.bind loopback
+  let client ← Endpoint.bind loopback
+  let peer ← match ← client.connect (← server.localAddress) with
+    | .ok p => pure p
+    | .error e => throw s!"connect: {e}"
+  let deadline := (← IO.monoMsNow) + 2000
+  let mut connected := false
+  let mut slowest := 0
+  while !connected && (← IO.monoMsNow) < deadline do
+    let t0 ← IO.monoMsNow
+    let ec ← client.service 0
+    let _ ← server.service 0
+    slowest := max slowest ((← IO.monoMsNow) - t0)
+    if ec.any isConnect then connected := true
+    IO.sleep 1
+  expect connected "polling with service 0 never connected"
+  expect (slowest < 50) s!"a service 0 took {slowest} ms"
+  let _ := peer
+
+def wakesOnDatagram : Check := do
+  -- a service sleeping on a long timeout returns as soon as a packet lands
+  let (client, server, peer, sp) ← connected
+  -- let the handshake's ACKs settle, so the next event is the packet
+  let _ ← pump client server 200 fun _ _ => false
+  match ← server.send sp 0 (.reliable (bytes 10 1)) with
+  | .ok () => pure ()
+  | .error e => throw s!"send: {e}"
+  -- sent 50 ms into the client's sleep, from another thread
+  let t0 ← IO.monoMsNow
+  let sender ← IO.asTask (do IO.sleep 50; server.flush)
+  let ev ← client.service 2000
+  let dt := (← IO.monoMsNow) - t0
+  let _ ← IO.wait sender
+  expect (ev.any fun | .receive p 0 pk => p == peer && pk.data == bytes 10 1 | _ => false)
+    "the sleeping client did not get the packet"
+  expect (dt < 150) s!"a packet sent at 50 ms woke the client at {dt} ms"
+
+def tests : List (String × Check) := [
+  ("connect, then reliable packets both ways arrive once and in order", connectAndExchange),
+  ("a disconnect kills the handles, and reused slots get new ones", disconnectKillsHandles),
+  ("an unanswered connect times out with a disconnect event", connectTimesOut),
+  ("an idle service returns once its timeout is up, not before", serviceWaits),
+  ("service 0 alone moves datagrams, without blocking", pollingOnly),
+  ("a sleeping service wakes as soon as a datagram lands", wakesOnDatagram)
+]
+
+end NetTest
+
+def main : IO UInt32 := do
+  let mut failed := 0
+  for (name, t) in NetTest.tests do
+    match ← t.run with
+    | .ok () => IO.println s!"  PASS {name}"
+    | .error msg =>
+      IO.println s!"  FAIL {name}: {msg}"
+      failed := failed + 1
+  if failed == 0 then
+    IO.println "ALL PASS"
+    return 0
+  IO.println s!"{failed} of {NetTest.tests.length} FAILED"
+  return 1

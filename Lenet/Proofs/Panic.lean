@@ -1,5 +1,6 @@
 import Lean
 import Lenet
+import Lenet.Net
 
 /-!
 # Panic-site audit
@@ -9,7 +10,7 @@ Two layers:
 * **Build-time panic audit** (`run_meta` below, the no-panics composition
   over `Host.handleDatagram` / `Host.service` and every other entry point):
   every definition under `Lenet.*` (1250+, all of the core, the C-facing FFI
-  glue included) is scanned, and the build fails if any of them references a
+  glue and the socket driver `Lenet.Net` included) is scanned, and the build fails if any of them references a
   panicking primitive (`panic*`, `sorryAx`, `outOfBounds`, or any `…!`
   accessor such as `getElem!` / `Option.get!`) or is `unsafe`, `partial`
   (compiled to `opaque`) or `implemented_by`-swapped. Scanning *every*
@@ -71,7 +72,8 @@ run_meta do
         if isPanicking c then bad := bad.push m!"{n}: references {c}"
   -- guard against a vacuous scan (renamed namespace, dropped import)
   for entry in [``Host.handleDatagram, ``Host.service, ``Host.nextDeadline, ``Host.connect,
-      ``Host.send, ``Peer.send, ``Protocol.Datagram.decode, ``Protocol.Datagram.encode] do
+      ``Host.send, ``Peer.send, ``Protocol.Datagram.decode, ``Protocol.Datagram.encode,
+      ``Net.Endpoint.service] do
     unless scanned.contains entry do throwError m!"panic audit: entry point {entry} not scanned"
   unless bad.isEmpty do
     throwError m!"panic audit failed:{indentD (MessageData.joinSep bad.toList Format.line)}"

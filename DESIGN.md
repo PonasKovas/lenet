@@ -42,7 +42,11 @@ driver ◀──when─────  Host.nextDeadline
 | `Channel`                  | per-channel sequence numbers, reliable windows, staging of out-of-order reliable deliveries |
 | `Reassembly`, `Unsequenced`| fragment reassembly; duplicate filter for unsequenced packets |
 | `Protocol.*`, `Codec`, `Checksum` | the wire format and ENet's CRC32 |
-| `FFI`                      | `IO` wrappers exported to the C shim (`csrc/lenet_capi.c`); the only place with `IO` |
+| `FFI`                      | `IO` wrappers exported to the C shim (`csrc/lenet_capi.c`) |
+| `Net`                      | the engine over a `Std.Async.UDP` socket for Lean programs (library `LenetNet`, never linked into C) |
+
+`FFI` and `Net` are the only places with `IO`; the engine below them is
+pure.
 
 Every function in the core follows ENet's structure closely and names the
 ENet function it mirrors (`protocol.c handle_acknowledge`, ...), so the two

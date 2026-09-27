@@ -41,6 +41,15 @@ jobs:
       - run: lake build unit
       - run: ./.lake/build/bin/unit
 
+  # Lenet.Net: two endpoints over real UDP sockets on 127.0.0.1.
+  net:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: leanprover/lean-action@v1
+      - run: lake build net
+      - run: ./.lake/build/bin/net
+
   # The C distribution builds and works from a C program that sees only
   # include/lenet.h.
   c-api:
