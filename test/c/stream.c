@@ -87,7 +87,10 @@ static uint8_t buf[16384], want[16384];
 
 static void send_one(ENetPeer *peer, int kind, int ch, uint32_t i, enet_uint32 flags) {
     fill(buf, kind, ch, i);
-    enet_peer_send(peer, (enet_uint8)ch, enet_packet_create(buf, size(kind, ch, i), flags));
+    if (enet_peer_send(peer, (enet_uint8)ch, enet_packet_create(buf, size(kind, ch, i), flags)) < 0) {
+        fprintf(stderr, "FAIL: enet_peer_send refused a packet (kind %d, channel %d, #%u)\n", kind, ch, i);
+        exit(1);
+    }
 }
 
 typedef struct {
@@ -276,6 +279,14 @@ static int run(int isServer, uint16_t port, uint32_t rounds, uint32_t per, Optio
                 if (isServer ? !(doneSent && ev.data == 9) : !disconnecting) {
                     fprintf(stderr, "FAIL: %s: DISCONNECT (data %u) before the end: %u+%u of %u reliable, done %d\n",
                             me, ev.data, r.reliable[0], r.reliable[1], r.total, r.done);
+                    return 1;
+                }
+                /* unreliable packets may be lost or throttled, but not all
+                 * of them: some of each kind must get through */
+                if (r.total > 0 && (r.unreliableSeen[1] == 0 || r.unreliableSeen[2] == 0 || r.unsequencedSeen == 0)) {
+                    fprintf(stderr, "FAIL: %s: no %s arrived\n", me,
+                            r.unreliableSeen[1] == 0 ? "unreliable packet on channel 1" :
+                            r.unreliableSeen[2] == 0 ? "unreliable fragment on channel 2" : "unsequenced packet");
                     return 1;
                 }
                 printf("  %s: %u reliable per channel in order; unreliable %u+%u, unsequenced %u of %u; clean end, %.1f s",

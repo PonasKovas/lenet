@@ -68,6 +68,11 @@ static int run_server(uint16_t port) {
                 break;
             }
             case ENET_EVENT_TYPE_DISCONNECT:
+                /* the client's DISCONNECT carries 9; a timeout reports 0 */
+                if (ev.data != 9) {
+                    fprintf(stderr, "FAIL: DISCONNECT data=%u, not the client's 9 (a timeout?)\n", ev.data);
+                    return 1;
+                }
                 printf("  enet: DISCONNECT data=%u after %d echoes\n", ev.data, echoed);
                 enet_host_destroy(host);
                 return 0;
@@ -89,8 +94,17 @@ static int run_client(uint16_t port) {
     if (!peer) { fprintf(stderr, "FATAL: enet_host_connect\n"); return 2; }
     static uint8_t buf[20000];
     uint32_t start = now_ms();
-    int connected = 0, back = 0, disconnecting = 0;
+    int connected = 0, back = 0, disconnecting = 0, unseq = 0;
+    uint32_t disconnect_at = 0, done_at = 0;
     while (now_ms() - start < GIVE_UP_MS) {
+        /* every reliable echo is back: disconnect once the unsequenced ones
+         * are too, or half a second later (a peer disconnecting takes no
+         * more data) */
+        if (back == RELIABLE && !disconnecting && (unseq >= 5 || now_ms() - done_at >= 500)) {
+            enet_peer_disconnect(peer, 9);
+            disconnecting = 1;
+            disconnect_at = now_ms();
+        }
         ENetEvent ev;
         while (enet_host_service(host, &ev, 5) > 0) {
             switch (ev.type) {
@@ -120,10 +134,19 @@ static int run_client(uint16_t port) {
                         return 1;
                     }
                     back++;
-                    if (back == RELIABLE && !disconnecting) {
-                        enet_peer_disconnect(peer, 9);
-                        disconnecting = 1;
+                    if (back == RELIABLE) done_at = now_ms();
+                } else {
+                    /* an unsequenced echo: one of the five, intact */
+                    int ok = 0;
+                    for (int i = 0; i < 5 && !ok; i++) {
+                        fill(buf, i);
+                        ok = ev.packet->dataLength == 64 && memcmp(ev.packet->data, buf, 64) == 0;
                     }
+                    if (!ok) {
+                        fprintf(stderr, "FAIL: an unsequenced echo is none of the packets sent\n");
+                        return 1;
+                    }
+                    unseq++;
                 }
                 enet_packet_destroy(ev.packet);
                 break;
@@ -132,7 +155,16 @@ static int run_client(uint16_t port) {
                     fprintf(stderr, "FAIL: disconnected after %d of %d echoes\n", back, RELIABLE);
                     return 1;
                 }
-                printf("  enet: all %d reliable echoes back in order; DISCONNECT\n", back);
+                /* acknowledged, not timed out: ENet's shortest timeout is 5 s */
+                if (now_ms() - disconnect_at >= 2000) {
+                    fprintf(stderr, "FAIL: the disconnect took %u ms: a timeout\n", now_ms() - disconnect_at);
+                    return 1;
+                }
+                if (unseq == 0) {
+                    fprintf(stderr, "FAIL: no unsequenced echo arrived\n");
+                    return 1;
+                }
+                printf("  enet: all %d reliable echoes back in order, %d unsequenced; DISCONNECT\n", back, unseq);
                 enet_host_destroy(host);
                 return 0;
             default:

@@ -34,37 +34,55 @@ partial def client (port : UInt16) : IO UInt32 := do
     | .ok p => pure p
     | .error e => IO.eprintln s!"FAIL: connect: {e}"; return 1
   let deadline := (← IO.monoMsNow) + giveUpMs
-  let rec loop (back : Nat) (disconnecting : Bool) : IO UInt32 := do
+  -- a DISCONNECT that completes, not a timeout: ENet's shortest timeout is 5 s
+  let disconnectLimitMs := 2000
+  let rec loop (back : Nat) (disconnecting : Bool) (unseq : Nat := 0) (disconnectAt : Nat := 0)
+      (doneAt : Nat := 0) : IO UInt32 := do
     if (← IO.monoMsNow) ≥ deadline then
       IO.eprintln s!"FAIL: lenet client gave up ({back} of {reliableCount} echoes)"
       return 1
+    -- every reliable echo is back: disconnect once the unsequenced ones are
+    -- too, or half a second later (they may be lost; a peer disconnecting
+    -- takes no more data)
+    if back == reliableCount && !disconnecting && (unseq ≥ 5 || (← IO.monoMsNow) ≥ doneAt + 500) then
+      host.disconnect server 9
+      return ← loop back true unseq (← IO.monoMsNow) doneAt
     match ← host.service 5 with
     | some (.connect conn _) =>
       IO.println "  lenet: CONNECT"
       let some ch1 := conn.channel? 1
         | IO.eprintln s!"FAIL: the connection has {conn.channelCount} channels"; return 1
       for i in [0:reliableCount] do
-        let _ ← host.send conn conn.first (.reliable (packet i))
+        let .ok () ← host.send conn conn.first (.reliable (packet i))
+          | IO.eprintln s!"FAIL: send of packet {i} refused"; return 1
       for i in [0:5] do
-        let _ ← host.send conn ch1 (.unsequenced (packet i 64))
-      loop back disconnecting
+        let .ok () ← host.send conn ch1 (.unsequenced (packet i 64))
+          | IO.eprintln s!"FAIL: send of unsequenced packet {i} refused"; return 1
+      loop back disconnecting unseq disconnectAt doneAt
     | some (.receive _ ⟨0, _⟩ pk) =>
       if back ≥ reliableCount then
         IO.eprintln "FAIL: more echoes than packets sent"; return 1
       if pk.data != packet back then
         IO.eprintln s!"FAIL: echo {back} is not packet {back} ({pk.data.size} bytes)"; return 1
       let back := back + 1
-      if back == reliableCount && !disconnecting then
-        host.disconnect server 9
-        loop back true
-      else loop back disconnecting
-    | some (.receive ..) => loop back disconnecting
+      let now ← IO.monoMsNow
+      loop back disconnecting unseq disconnectAt (if back == reliableCount then now else doneAt)
+    | some (.receive _ _ pk) =>
+      -- an unsequenced echo: one of the five, intact
+      if !(List.range 5).any (packet · 64 == pk.data) then
+        IO.eprintln s!"FAIL: an unsequenced echo is none of the packets sent ({pk.data.size} bytes)"; return 1
+      loop back disconnecting (unseq + 1) disconnectAt doneAt
     | some (.disconnect _ _) =>
       if !disconnecting then
         IO.eprintln s!"FAIL: disconnected after {back} of {reliableCount} echoes"; return 1
-      IO.println s!"  lenet: all {back} reliable echoes back in order; DISCONNECT"
+      let took := (← IO.monoMsNow) - disconnectAt
+      if took ≥ disconnectLimitMs then
+        IO.eprintln s!"FAIL: the disconnect took {took} ms: a timeout, not an acknowledged DISCONNECT"; return 1
+      if unseq == 0 then
+        IO.eprintln "FAIL: no unsequenced echo arrived"; return 1
+      IO.println s!"  lenet: all {back} reliable echoes back in order, {unseq} unsequenced; DISCONNECT after {took} ms"
       return 0
-    | none => loop back disconnecting
+    | none => loop back disconnecting unseq disconnectAt doneAt
   loop 0 false
 
 partial def server (port : UInt16) : IO UInt32 := do
@@ -79,6 +97,9 @@ partial def server (port : UInt16) : IO UInt32 := do
       let _ ← host.send peer ch pk
       loop (echoed + 1)
     | some (.disconnect _ data) =>
+      -- the client's DISCONNECT carries 9; a timeout reports 0
+      if data != 9 then
+        IO.eprintln s!"FAIL: DISCONNECT data={data}, not the client's 9 (a timeout?)"; return 1
       IO.println s!"  lenet: DISCONNECT data={data} after {echoed} echoes"
       -- let the ACK of the DISCONNECT go out
       let _ ← host.serviceFor 100

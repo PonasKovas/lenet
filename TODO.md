@@ -128,7 +128,16 @@ and docs. Worked through in order; each item says what was done.
     test/README.md "What is compared" says what is not compared and why.
 16. The lossy runs never require unreliable or unsequenced packets to
     arrive, and `NetStream` ignores `send` results.
+    **Done:** both stream programs fail unless some of each unreliable
+    kind and some unsequenced packets arrived (the throttle may drop many,
+    never all), and a refused send fails the run.
 17. `net-interop` accepts a timeout as the far end's clean disconnect.
+    **Done:** the servers require the client's DISCONNECT data (9), the
+    clients require the disconnect to complete within 2 s (ENet's shortest
+    timeout is 5 s) and at least one intact unsequenced echo; they wait for
+    the unsequenced echoes before disconnecting, since a disconnecting
+    peer takes no more data (the first version of the check caught that
+    race in the test).
 18. `make -C test traces` ignores failed recordings; `record` re-records
     only clock offset 0.
 19. `interop` `multip` never checks client 2's bytes.

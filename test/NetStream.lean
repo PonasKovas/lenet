@@ -112,18 +112,24 @@ structure Run where
   disconnectedAt : Nat := 0
   received      : Received
 
+/-- Queues a packet; a refused one fails the run. -/
+def sendOrFail (e : Endpoint) (conn : Connection) (ch : conn.Channel) (p : Lenet.Packet) : IO Unit := do
+  match ← e.send conn ch p with
+  | .ok () => pure ()
+  | .error err => throw (IO.userError s!"FAIL: send refused a packet: {err}")
+
 def sendRound (e : Endpoint) (conn : Connection) (per k : Nat) : IO Unit := do
-  let some ch1 := conn.channel? 1 | return
-  let some ch2 := conn.channel? 2 | return
+  let some ch1 := conn.channel? 1 | throw (IO.userError "FAIL: no channel 1")
+  let some ch2 := conn.channel? 2 | throw (IO.userError "FAIL: no channel 2")
   for i in [k * per:(k + 1) * per] do
-    let _ ← e.send conn conn.first (.reliable (packet Kind.reliable 0 i))
+    sendOrFail e conn conn.first (.reliable (packet Kind.reliable 0 i))
   for i in [k * per:(k + 1) * per] do
-    let _ ← e.send conn ch1 (.reliable (packet Kind.reliable 1 i))
-  let _ ← e.send conn ch1 (.unreliable (packet Kind.unreliable 1 k))
+    sendOrFail e conn ch1 (.reliable (packet Kind.reliable 1 i))
+  sendOrFail e conn ch1 (.unreliable (packet Kind.unreliable 1 k))
   for i in [k * per:(k + 1) * per] do
-    let _ ← e.send conn ch2 (.unreliableFragment (packet Kind.unreliable 2 i))
+    sendOrFail e conn ch2 (.unreliableFragment (packet Kind.unreliable 2 i))
   for i in [k * per:(k + 1) * per] do
-    let _ ← e.send conn ch2 (.unsequenced (packet Kind.unsequenced 2 i))
+    sendOrFail e conn ch2 (.unsequenced (packet Kind.unsequenced 2 i))
 
 /-- What the host holds for the connection: printed when nothing has come in
 for a while, to see where a stuck link is stuck. -/
@@ -185,6 +191,11 @@ partial def loop (e : Endpoint) (st : Run) : IO UInt32 := do
     let r := st.received
     if (if st.isServer then !(st.doneSent && data == 9) else !st.disconnecting) then
       IO.eprintln s!"FAIL: {st.me}: DISCONNECT (data {data}) before the end: {r.reliable[0]!}+{r.reliable[1]!} of {r.total} reliable, done {r.done}"
+      return 1
+    -- unreliable packets may be lost or throttled, but not all of them:
+    -- some of each kind must get through
+    if r.total > 0 && (r.unreliableSeen[1]! == 0 || r.unreliableSeen[2]! == 0 || r.unsequencedSeen == 0) then
+      IO.eprintln s!"FAIL: {st.me}: unreliable {r.unreliableSeen[1]!}+{r.unreliableSeen[2]!}, unsequenced {r.unsequencedSeen}: a kind never arrived"
       return 1
     let secs := (← IO.monoMsNow) - st.start
     let hostNow ← e.now
