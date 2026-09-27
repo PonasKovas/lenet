@@ -982,11 +982,11 @@ theorem foldl_packAck_same (mtu : UInt32) :
   | a :: acks, st => (packAck_same mtu st a).trans (foldl_packAck_same mtu acks _)
 
 /-- **A packing pass keeps the invariant.** -/
-theorem packOutgoingCommands_spanInv {p : Peer} (h : SpanInv p) (now : UInt32) :
-    SpanInv (Host.packOutgoingCommands p now).1 := by
+theorem packOutgoingCommands_spanInv {p : Peer} (h : SpanInv p) (now : UInt32) (hc : Bool) :
+    SpanInv (Host.packOutgoingCommands p now hc).1 := by
   unfold Host.packOutgoingCommands
   dsimp only
-  have h0 : PackInv p.state ({ packetSize := Host.PackState.headerSize, sentReliables := p.sentReliableCommands, channels := p.channels, throttleCounter := p.packetThrottleCounter } : Host.PackState) p.outgoingCommands.toList :=
+  have h0 : PackInv p.state ({ packetSize := Host.PackState.headerSize hc, emptySize := Host.PackState.headerSize hc, sentReliables := p.sentReliableCommands, channels := p.channels, throttleCounter := p.packetThrottleCounter } : Host.PackState) p.outgoingCommands.toList :=
     ⟨by simp only [List.nil_append]; exact h, fun o ho => by simp at ho, fun hw => by cases hw⟩
   have h1 := h0.same (foldl_packAck_same p.mtu p.acknowledgements.toList _)
   rw [Array.foldl_toList] at h1
@@ -1010,8 +1010,8 @@ theorem pollPeer_go_spanInv (now : UInt32) (cs : Bool) :
       · exact h
     generalize (if p.state == .disconnectLater ∧ p.outgoingCommands.isEmpty ∧ p.sentReliableCommands.isEmpty
         then p.queueDisconnect p.eventData else p) = q at h1 ⊢
-    have h2 := packOutgoingCommands_spanInv h1 now
-    generalize Host.packOutgoingCommands q now = r at h2 ⊢
+    have h2 := packOutgoingCommands_spanInv h1 now cs
+    generalize Host.packOutgoingCommands q now cs = r at h2 ⊢
     obtain ⟨q', cmds⟩ := r
     dsimp only at h2 ⊢
     split
@@ -1166,19 +1166,17 @@ def SendKept (c c' : Channel) : Prop :=
 theorem receiveReliableSpan_kept (c : Channel) (seq span packet) : SendKept c (c.receiveReliableSpan seq span packet).1 := by
   unfold Channel.receiveReliableSpan
   dsimp only
-  split
-  · exact ⟨rfl, rfl⟩
-  split
-  · exact ⟨rfl, rfl⟩
-  split
-  · exact ⟨rfl, rfl⟩
-  · exact ⟨rfl, rfl⟩
+  (repeat' split) <;> exact ⟨rfl, rfl⟩
 
-theorem releaseStagedUnreliable_kept (c : Channel) : SendKept c c.releaseStagedUnreliable.1 := by
+theorem releaseStagedUnreliable_kept (c : Channel) (old : UInt16) (advance : Nat) :
+    SendKept c (c.releaseStagedUnreliable old advance).1 := by
   unfold Channel.releaseStagedUnreliable
   split
   · exact ⟨rfl, rfl⟩
-  · simp only []
+  · dsimp only
+    generalize Channel.eraseAfter _ _ _ _ = er
+    obtain ⟨_, _, _⟩ := er
+    dsimp only
     refine Array.foldl_induction (motive := fun _ (r : Channel × Array Packet) => SendKept c r.1) ⟨rfl, rfl⟩ ?_
     intro i r hr
     obtain ⟨ch, rel⟩ := r
@@ -1191,12 +1189,13 @@ theorem receiveReliableAndRelease_kept (c : Channel) (seq span packet) :
     SendKept c (c.receiveReliableAndRelease seq span packet).1 := by
   unfold Channel.receiveReliableAndRelease
   have h1 := receiveReliableSpan_kept c seq span packet
+  dsimp only
   generalize c.receiveReliableSpan seq span packet = r at h1 ⊢
   obtain ⟨c', d⟩ := r
   dsimp only at h1 ⊢
   split
   · exact h1
-  · have h2 := releaseStagedUnreliable_kept c'
+  · have h2 := releaseStagedUnreliable_kept c' c.incomingReliableSequenceNumber (d.foldl (fun n d => n + d.1) 0)
     exact ⟨h2.1.trans h1.1, h2.2.trans h1.2⟩
 
 theorem receiveUnreliable_kept (c : Channel) (rs seq packet) : SendKept c (c.receiveUnreliable rs seq packet).1 := by
@@ -1215,9 +1214,8 @@ theorem pruneAssemblers_spanInv {p : Peer} (h : SpanInv p) (c : UInt8) : SpanInv
 theorem receiveOnChannel_spanInv {p : Peer} (h : SpanInv p) (channelId : UInt8)
     (receive : Channel → Channel × Array Packet) (hr : ∀ c, SendKept c (receive c).1) :
     SpanInv (p.receiveOnChannel channelId receive).1 := by
-  unfold receiveOnChannel
-  split
-  · next hlt =>
+  by_cases hlt : channelId.toNat < p.channels.size
+  · rw [receiveOnChannel_eq _ _ _ hlt]
     dsimp only
     refine pruneAssemblers_spanInv ?_ _
     refine QueueOk.sameSend h ⟨by simp, fun c ha hb => ?_⟩
@@ -1225,7 +1223,7 @@ theorem receiveOnChannel_spanInv {p : Peer} (h : SpanInv p) (channelId : UInt8)
     split
     · next he => subst he; exact hr _
     · exact ⟨rfl, rfl⟩
-  · exact h
+  · rw [receiveOnChannel_out _ _ _ hlt]; exact h
 
 /-- A peer step that leaves the four fields `SpanInv` reads alone. -/
 def Kept (p q : Peer) : Prop :=
@@ -1664,8 +1662,10 @@ theorem Op.apply_inv {h : Host} (hi : HostInv h) : ∀ op : Op, HostInv (op.appl
     split
     · exact hp.of (by simp) rfl rfl rfl
     · exact queueDisconnect_spanInv hp _
-  | .throttleConfigure .. => modify_inv hi _ _ fun p hp =>
-    queueControlCommand_spanInv (hp.kept ⟨rfl, rfl, rfl, rfl⟩) _
+  | .throttleConfigure .. => modify_inv hi _ _ fun p hp => by
+    split
+    · exact hp
+    · exact queueControlCommand_spanInv (hp.kept ⟨rfl, rfl, rfl, rfl⟩) _
   | .setPeerTimeout .. => modify_inv hi _ _ fun _ hp => hp.kept ⟨rfl, rfl, rfl, rfl⟩
   | .ping .. => modify_inv hi _ _ fun p hp => by
     split

@@ -247,51 +247,42 @@ command consumes `wireSize ≥ 4` wire bytes, so after `k` parses the remainder
 has size ≤ `size - 4k`.
 -/
 
-theorem go_eq_of_size_zero : ∀ (g : Nat) (rest : ByteArray) (acc : Array Protocol.Command),
-    rest.size = 0 → Datagram.parseCommands.go g rest acc = acc := by
+theorem go_eq_of_done (bytes : ByteArray) : ∀ (g off : Nat) (acc : Array Protocol.Command),
+    bytes.size ≤ off → Datagram.parseCommands.go bytes g off acc = acc := by
   intro g
-  induction g with
-  | zero => intro rest acc _; rfl
-  | succ g ih =>
-    intro rest acc h
-    have hb : (rest.size == 0) = true := by simp [h]
-    simp only [Datagram.parseCommands.go, hb]
-    exact if_pos trivial
+  cases g with
+  | zero => intro off acc _; rfl
+  | succ g =>
+    intro off acc h
+    simp only [Datagram.parseCommands.go]
+    exact if_pos h
 
-theorem parseCommands_go_fuel_adequate :
-    ∀ (f g : Nat) (rest : ByteArray) (acc : Array Protocol.Command),
-      rest.size ≤ f → rest.size ≤ g →
-        Datagram.parseCommands.go f rest acc = Datagram.parseCommands.go g rest acc := by
+theorem parseCommands_go_fuel_adequate (bytes : ByteArray) :
+    ∀ (f g off : Nat) (acc : Array Protocol.Command),
+      bytes.size - off ≤ f → bytes.size - off ≤ g →
+        Datagram.parseCommands.go bytes f off acc = Datagram.parseCommands.go bytes g off acc := by
   intro f
   induction f with
   | zero =>
-    intro g rest acc hf hg
-    have h0 : rest.size = 0 := Nat.le_antisymm hf (Nat.zero_le _)
-    rw [go_eq_of_size_zero g rest acc h0]
-    simp [Datagram.parseCommands.go]
+    intro g off acc hf hg
+    rw [go_eq_of_done bytes g off acc (by omega), go_eq_of_done bytes 0 off acc (by omega)]
   | succ f ih =>
-    intro g rest acc hf hg
-    by_cases h0 : rest.size = 0
-    · rw [go_eq_of_size_zero g rest acc h0]
-      simp [Datagram.parseCommands.go, h0]
+    intro g off acc hf hg
+    by_cases h0 : bytes.size ≤ off
+    · rw [go_eq_of_done bytes g off acc h0, go_eq_of_done bytes _ off acc h0]
     · cases g with
       | zero => omega
       | succ g =>
-        have hb : (rest.size == 0) = false := by simp [h0]
-        simp only [Datagram.parseCommands.go, hb, Bool.false_eq_true, if_false]
+        simp only [Datagram.parseCommands.go, if_neg h0]
         split
-        · next cmd hr =>
+        · next cmd _ _ =>
           have hws : 4 ≤ cmd.wireSize := by
             simp only [Protocol.Command.wireSize]; omega
-          have hsz : (rest.extract cmd.wireSize rest.size).size ≤ rest.size - 4 := by
-            rw [ByteArray.size_extract]
-            have : Nat.min rest.size rest.size = rest.size := Nat.min_self _
-            omega
           exact ih _ _ _ (by omega) (by omega)
         · rfl
 
 theorem parseCommands_fuel_adequate (bytes : ByteArray) (f : Nat) (h : bytes.size ≤ f) :
-    Datagram.parseCommands bytes = Datagram.parseCommands.go f bytes #[] := by
-  exact parseCommands_go_fuel_adequate bytes.size f bytes #[] (Nat.le_refl _) h
+    Datagram.parseCommands bytes = Datagram.parseCommands.go bytes f 0 #[] := by
+  exact parseCommands_go_fuel_adequate bytes bytes.size f 0 #[] (by omega) (by omega)
 
 end Lenet.Proofs

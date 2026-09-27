@@ -161,7 +161,7 @@ def run : Link → List Op → Link
 /-! ## The invariant -/
 
 /-- The receiver has message `m`: delivered or staged. -/
-def Recv (L : Link) (m : Nat) : Prop := m < L.d ∨ s.entry m ∈ L.rcv.stagedReliable
+def Recv (L : Link) (m : Nat) : Prop := m < L.d ∨ Staged L.rcv.stagedReliable (s.entry m)
 
 /-- The numbers queued and not sent yet, wrapped: what `ChanOk` calls
 `pend`. -/
@@ -180,8 +180,8 @@ structure Good (L : Link) : Prop where
   inv      : Delivery.Inv s L.rcv L.d
   out      : L.out = (List.range L.d).map s.out
   deliv    : s.start L.d - 1 ≤ L.S
-  staged   : ∀ e ∈ L.rcv.stagedReliable, ∃ i, L.d < i ∧ s.start i < s.start L.d + 32768 ∧ e = s.entry i ∧
-    s.start (i + 1) - 1 ≤ L.S
+  staged   : ∀ (k : UInt16) (e : StagedReliable), L.rcv.stagedReliable[k]? = some e →
+    ∃ i, L.d < i ∧ s.start i < s.start L.d + 32768 ∧ e = s.entry i ∧ s.start (i + 1) - 1 ≤ L.S
   retired  : ∀ m x, s.start m ≤ x → x < s.start (m + 1) → x ≤ L.S → x ∉ L.infl → Recv s L m
   net      : ∀ p ∈ L.net, p.2 ≤ L.S ∧ s.start (p.1 + 1) - 1 ≤ p.2 ∧ p.2 - s.start p.1 ≤ p.2 % 4096 + 20480
   acks     : ∀ a ∈ L.acks, s.start a.1 ≤ a.2.1 ∧ a.2.1 < s.start (a.1 + 1) ∧ a.2.2 ≤ L.S ∧
@@ -198,7 +198,7 @@ theorem good_init : Good s D {} where
   inv := inv_default s
   out := rfl
   deliv := by simp [Stream.start]
-  staged := by simp
+  staged := fun k e he => by simp at he
   retired := by
     intro m x h1 _ h3 _
     have := Stream.start_pos (s := s) m
@@ -232,9 +232,9 @@ theorem span {L : Link} (h : Good s D L) {y : Nat} (hy : y ∈ L.infl) : L.S - y
   omega
 
 /-- Message `d`, the next to deliver, is not staged. -/
-theorem next_not_staged {c : Channel} {d : Nat} (h : Delivery.Inv s c d) : s.entry d ∉ c.stagedReliable := by
+theorem next_not_staged {c : Channel} {d : Nat} (h : Delivery.Inv s c d) : ¬ Staged c.stagedReliable (s.entry d) := by
   intro hm
-  obtain ⟨i, hi, hib, he⟩ := h.staged _ hm
+  obtain ⟨-, i, hi, hib, he⟩ := h.staged _ _ hm
   have := Stream.start_lt (s := s) hi
   have := Stream.start_pos (s := s) d
   have := entry_inj (F := s.start d - 1) he (by omega) (by omega) (by omega) (by omega)
@@ -363,8 +363,8 @@ theorem Good.sendNext {L : Link} (h : Good s D L) : Good s D (L.sendNext s) := b
     · have := h.deliv
       show s.start L.d - 1 ≤ L.S + 1
       omega
-    · intro e he
-      obtain ⟨i, a, b, c, d⟩ := h.staged e he
+    · intro k e he
+      obtain ⟨i, a, b, c, d⟩ := h.staged k e he
       exact ⟨i, a, b, c, by show _ ≤ L.S + 1; omega⟩
     · intro m x h1 h2 h3 h4
       have hne : x ≠ L.S + 1 := fun he => h4 (he ▸ List.mem_cons_self)
@@ -458,13 +458,13 @@ theorem Good.deliver {L : Link} (h : Good s D L) (hD : D ≤ 12288) (i : Nat) : 
       have hk1 := Stream.start_lt_succ (s := s) k
       obtain ⟨j, hj, hinv, hout, -, hpers, hcarry, hdel, hrecv⟩ :=
         step_spec h.inv k hfit (fun i => s.start (i + 1) - 1 ≤ L.S)
-          (fun e he => by obtain ⟨i, a, b, c, d⟩ := h.staged e he; exact ⟨i, a, b, c, d⟩) (by omega)
+          (fun k' e he => by obtain ⟨i, a, b, c, d⟩ := h.staged k' e he; exact ⟨i, a, b, c, d⟩) (by omega)
       dsimp only
       generalize L.rcv.receiveReliableSpan (s.start k).toUInt16 (s.span k) (s.packet k) = r at hinv hout hpers hcarry hdel hrecv ⊢
       have hsize : r.2.size = j - L.d := by rw [← Array.length_toList, hout]; simp
       have hdj : L.d + r.2.size = j := by omega
       -- what the receiver had, it still has
-      have hkeep : ∀ m, s.start m ≤ L.S → Recv s L m → m < j ∨ s.entry m ∈ r.1.stagedReliable := by
+      have hkeep : ∀ m, s.start m ≤ L.S → Recv s L m → m < j ∨ Staged r.1.stagedReliable (s.entry m) := by
         intro m hm hR
         rcases hR with hR | hR
         · left; omega
@@ -474,7 +474,7 @@ theorem Good.deliver {L : Link} (h : Good s D L) (hD : D ≤ 12288) (i : Nat) : 
           · left; omega
       -- it receives every copy it ACKs, since every copy ahead is inside the
       -- receive window
-      have hrk : k < j ∨ s.entry k ∈ r.1.stagedReliable := by
+      have hrk : k < j ∨ Staged r.1.stagedReliable (s.entry k) := by
         rcases Nat.lt_or_ge k L.d with hl | hl
         · left; omega
         · exact hrecv hl (by omega)
@@ -493,8 +493,9 @@ theorem Good.deliver {L : Link} (h : Good s D L) (hD : D ≤ 12288) (i : Nat) : 
         · rw [hjd]; exact hdl
         · have := hdel (j - 1) (by omega) (by omega)
           rwa [show j - 1 + 1 = j by omega] at this
-      · show ∀ e ∈ r.1.stagedReliable, ∃ i, L.d + r.2.size < i ∧ s.start i < s.start (L.d + r.2.size) + 32768 ∧
-          e = s.entry i ∧ s.start (i + 1) - 1 ≤ L.S
+      · show ∀ (k : UInt16) (e : StagedReliable), r.1.stagedReliable[k]? = some e →
+          ∃ i, L.d + r.2.size < i ∧ s.start i < s.start (L.d + r.2.size) + 32768 ∧
+            e = s.entry i ∧ s.start (i + 1) - 1 ≤ L.S
         rw [hdj]; exact hcarry
       · intro m x h1 h2 h3 h4
         have h3' : x ≤ L.S := h3
@@ -504,7 +505,7 @@ theorem Good.deliver {L : Link} (h : Good s D L) (hD : D ≤ 12288) (i : Nat) : 
       · intro a ha
         have goal : ∀ a ∈ L.acks ++ (List.range' (s.start k) (s.span k)).map (fun x => (k, x, L.S)),
             s.start a.1 ≤ a.2.1 ∧ a.2.1 < s.start (a.1 + 1) ∧ a.2.2 ≤ L.S ∧ s.start (a.1 + 1) - 1 ≤ a.2.2 ∧
-              a.2.2 ≤ s.start a.1 + D + 24575 ∧ (a.1 < j ∨ s.entry a.1 ∈ r.1.stagedReliable) ∨
+              a.2.2 ≤ s.start a.1 + D + 24575 ∧ (a.1 < j ∨ Staged r.1.stagedReliable (s.entry a.1)) ∨
             a ∈ (List.range' (s.start k) (s.span k)).map (fun x => (k, x, L.S)) := by
           intro a ha
           rcases List.mem_append.mp ha with ha | ha
@@ -520,7 +521,7 @@ theorem Good.deliver {L : Link} (h : Good s D L) (hD : D ≤ 12288) (i : Nat) : 
           have hst : s.start (k + 1) = s.start k + s.span k := rfl
           refine ⟨?_, ?_, ?_, ?_, ?_⟩ <;> simp only <;> omega
         show s.start a.1 ≤ a.2.1 ∧ a.2.1 < s.start (a.1 + 1) ∧ a.2.2 ≤ L.S ∧ s.start (a.1 + 1) - 1 ≤ a.2.2 ∧
-          a.2.2 ≤ s.start a.1 + D + 24575 ∧ (a.1 < L.d + r.2.size ∨ s.entry a.1 ∈ r.1.stagedReliable)
+          a.2.2 ≤ s.start a.1 + D + 24575 ∧ (a.1 < L.d + r.2.size ∨ Staged r.1.stagedReliable (s.entry a.1))
         rw [hdj]
         split at ha
         · rcases goal a ha with hg | hg
@@ -567,7 +568,7 @@ delivered `m` or holds it staged, to deliver once the gap before it fills. -/
 theorem run_retired (hD : D ≤ 12288) (ops : List Op) :
     let L := run s D {} ops
     ∀ m x, s.start m ≤ x → x < s.start (m + 1) → x ≤ L.S → x ∉ L.infl →
-      m < L.d ∨ s.entry m ∈ L.rcv.stagedReliable :=
+      m < L.d ∨ Staged L.rcv.stagedReliable (s.entry m) :=
   (run_good hD ops (good_init s D)).retired
 
 /-- **Never past the receive window**: a copy the network can still
@@ -590,7 +591,7 @@ theorem deliver_next {L : Link} (h : Good s D L) (hD : D ≤ 12288) {i t : Nat} 
     (ht : L.S ≤ t + D) : L.d < (L.deliver s D i).d := by
   have hp : (L.d, t) ∈ L.net := List.mem_of_getElem? hi
   obtain ⟨j, -, -, hout, hnext, -⟩ := step_spec h.inv L.d (fits h hD hp ht) (fun _ => True)
-    (fun e he => by obtain ⟨i, a, b, c, -⟩ := h.staged e he; exact ⟨i, a, b, c, trivial⟩) trivial
+    (fun k e he => by obtain ⟨i, a, b, c, -⟩ := h.staged k e he; exact ⟨i, a, b, c, trivial⟩) trivial
   unfold Link.deliver
   rw [hi]
   simp only [if_pos ht]

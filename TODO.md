@@ -44,9 +44,21 @@ and docs. Worked through in order; each item says what was done.
    copies the array while the peer's channel array still shares it;
    `fragmentSetLive` scans the stage for up to 32 assemblers per data
    command.
+   **Done:** staged packets live in hash maps by sequence number
+   (unreliable ones by the reliable command they wait for, then their own
+   number), with byte and count totals kept alongside; the drain looks up
+   the next number, what the frontier jumps over is erased by range
+   (`Channel.eraseAfter`), and `receiveOnChannel` takes the channel out of
+   the peer so the maps change in place. Staging 16000 packets behind a gap
+   took 45 s under `lean --run`, now 0.4 s, linear. Proofs moved to the
+   maps (`Staged`, `Keyed`, `eraseAfter_get`). Bench: small packets 3-6%
+   slower, within reach of the noise; fragmented unchanged.
 5. **A freed slot keeps its queue.** `throttleConfigure` (and friends) on
    a free slot queue a command that the next `connect` or incoming CONNECT
    sends ahead of CONNECT / VERIFY_CONNECT, and the handshake fails.
+   **Done:** `throttleConfigure` leaves a free or zombie slot alone (the
+   only call that queued there; it also left its throttle settings for the
+   next connection). Unit test.
 6. **`lenet_host_poll_event` with a NULL buffer loses the packet.** The
    header says NULL learns the size, but the event is popped.
    **Done:** a receive event whose payload does not fit is kept and the
@@ -54,11 +66,18 @@ and docs. Worked through in order; each item says what was done.
    Pinned in `check.c`. lenet-rs must handle -2 (see "API and bindings").
 7. **Datagram parsing copies the rest of the buffer after every command**
    (O(n²) in the datagram, before any peer or session check).
+   **Done:** each command is read at an offset into the datagram; proofs
+   follow (`go_cmdsBytes` now takes a prefix). Unit test parses 16000
+   PINGs.
 8. **With checksums on, datagrams can be MTU + 4** (the checksum field is
    not counted when packing). `Lenet.Net` receives 4096 bytes, so at MTU
    4096 such a datagram is cut short and dropped. ENet has the same bug.
+   **Done:** an empty datagram counts 8 bytes with checksums on
+   (`PackState.headerSize`). Unit test fills a 576-byte datagram exactly.
 9. **`csrc/Makefile` picks the first installed toolchain**, not the one in
    `lean-toolchain`.
+   **Done:** `lean --print-prefix` from the repo root. (The archive now
+   also merges `libStd`, which the hash maps of item 4 need.)
 10. **`liblenet.a` exports every bundled symbol** (mimalloc, libuv, GMP,
     OpenSSL, libc++abi, libunwind, the Lean runtime), so apps linking any
     of those can clash.
@@ -100,12 +119,19 @@ and docs. Worked through in order; each item says what was done.
     work.
 24. `checkAndAdd_idempotent` covers the next check only; DESIGN says
     "always".
+    **Done (claim):** DESIGN now says what is proven. That a group stays
+    rejected while the window slides is not proven.
 25. `addFragment_completion_sound` does not tie the released data to the
     fragments written.
 26. `Panic.lean`'s division list is stale; its claim that library code
     panics only through a `…!` name is false (`Array.get!Internal`).
+    **Done:** the audit now follows the library code Lenet uses,
+    transitively, and fails on any name with a `!`, except four that only
+    instance fields mention (listed with the reason); the division list is
+    current and the lemmas say they are facts about each guard.
 27. `wire_roundtrip` and `nextDeadline_earliest` use `bv_decide` axioms;
     DESIGN does not say so.
+    **Done:** DESIGN, "What the proofs trust".
 28. `Connection` models fragment sets sent whole; the real receiver ACKs
     each fragment (already listed under "Proofs" below).
 
@@ -119,6 +145,8 @@ and docs. Worked through in order; each item says what was done.
     "one fragmented", a list of undecided divergences that does not exist,
     TODO's "What is left" and "big gap left", three different lossy-wrap
     run times, "What is compared" in test/README.md.
+    **Partly done:** all but the run times and "What is compared" (with
+    item 15).
 
 Done: full ENet 1.3.x interop except compression (21 golden-trace
 scenarios, each recorded at three clock starts, and 12 live interop
@@ -339,13 +367,13 @@ loss (and found the fragment assembler leak), and `test/Unit.lean` pins the
 fragment-assembler rules, retransmission, timeouts and disconnect-later.
 The candidate list is done (unsequenced window, `nextDeadline` against
 `service`, packet throttle, bandwidth limits across peers); add more there
-as bugs show where the corpus is blind. The big gap left is ENet under
-loss and across the wraps: tasks 1 and 2 at the top.
+as bugs show where the corpus is blind. ENet under loss and across the
+wraps, the gap this used to name, is covered by tasks 1 and 2.
 
 ## Proofs
 
 - Done: the whole connection over one channel (`Proofs/Connection`).
-  Not planned any further (see "What is left" above); the known limits of
+  Not planned any further (see "Not planned" above); the known limits of
   what is proven are:
   - Fragments one by one. The model sends and resends a fragment set
     whole, and the receiver ACKs its fragments once the set is complete;
@@ -395,9 +423,11 @@ copy, wrap the value in `dbgTraceIfShared "tag" x` for a moment and count
 the messages a bench run prints (that is how the reassembly copies were
 found). Known costs left:
 
-- Tried and dropped: `Peer.enqueue` and `Peer.receiveOnChannel` copy the
-  channel record on each send and receive. Removing those copies with an
-  out-of-line swap made the bench 1-4% slower, not faster.
+- `Peer.enqueue` copies the channel record on each send. Removing that
+  copy with an out-of-line swap made the bench 1-4% slower, not faster.
+  `Peer.receiveOnChannel` does take the channel out (`takeAt`), since the
+  staged maps must change in place however many packets are staged; the
+  cost is within the noise.
 - Fragmented sends copy each fragment out of the packet (`extract`).
 - `Datagram.parseCommands` copies the rest of the datagram after every
   command, but that is 0.3% of the profile: not worth a cursor rewrite.

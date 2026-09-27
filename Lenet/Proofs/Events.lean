@@ -1,4 +1,5 @@
 import Lenet.Host
+import Lenet.Proofs.Receive
 
 /-!
 # Event-level proofs
@@ -113,13 +114,13 @@ theorem removeSent_state (p : Peer) (c s) : (p.removeSentReliableCommand c s).1.
 theorem pruneAssemblers_state (p : Peer) (c) : (p.pruneAssemblers c).state = p.state := by
   unfold pruneAssemblers; split; split <;> rfl; rfl
 theorem receiveOnChannel_state (p : Peer) (c r) : (p.receiveOnChannel c r).1.state = p.state := by
-  unfold receiveOnChannel; split
-  · split; exact pruneAssemblers_state _ _
-  · rfl
+  by_cases h : c.toNat < p.channels.size
+  · rw [receiveOnChannel_eq _ _ _ h]; exact pruneAssemblers_state _ _
+  · rw [receiveOnChannel_out _ _ _ h]
 theorem receiveOnChannel_events (p : Peer) (c r) : ∀ e ∈ (p.receiveOnChannel c r).2, isReceive e := by
-  unfold receiveOnChannel; split
-  · split; intro e he; obtain ⟨x, _, rfl⟩ := Array.mem_map.mp he; rfl
-  · intro e he; simp at he
+  by_cases h : c.toNat < p.channels.size
+  · rw [receiveOnChannel_eq _ _ _ h]; intro e he; obtain ⟨x, _, rfl⟩ := Array.mem_map.mp he; rfl
+  · rw [receiveOnChannel_out _ _ _ h]; intro e he; simp at he
 
 theorem handleFragment_state (p : Peer) (c s pr u) : (p.handleFragment c s pr u).1.state = p.state := by
   unfold handleFragment; dsimp only
@@ -309,7 +310,7 @@ theorem checkPeerTimeouts_wf (p : Peer) (now) :
 theorem checkPeerPing_state (p : Peer) (now) : (Host.checkPeerPing p now).state = p.state := by
   unfold Host.checkPeerPing; split <;> rfl
 
-theorem packOutgoingCommands_state (p : Peer) (now) : (Host.packOutgoingCommands p now).1.state = p.state := rfl
+theorem packOutgoingCommands_state (p : Peer) (now hc) : (Host.packOutgoingCommands p now hc).1.state = p.state := rfl
 
 theorem pollPeer_go_wf : ∀ (fuel : Nat) (p : Peer) (now cs ds),
     EventsWf (phase p.state) (Host.pollPeer.go now cs fuel p ds).2.2.toList
@@ -329,8 +330,8 @@ theorem pollPeer_go_wf : ∀ (fuel : Nat) (p : Peer) (now cs ds),
     generalize (if p.state == .disconnectLater ∧ p.outgoingCommands.isEmpty ∧ p.sentReliableCommands.isEmpty
         then p.queueDisconnect p.eventData else p) = q at h1 ⊢
     rw [← h1]
-    have h2 := packOutgoingCommands_state q now
-    generalize Host.packOutgoingCommands q now = r at h2 ⊢
+    have h2 := packOutgoingCommands_state q now cs
+    generalize Host.packOutgoingCommands q now cs = r at h2 ⊢
     obtain ⟨q', cmds⟩ := r
     dsimp only at h2 ⊢
     rw [← h2]

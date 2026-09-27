@@ -233,6 +233,29 @@ def stagedPeer (seqs : List Nat) : Except String Peer := do
   return (feed (← serverPeer) (seqs.map fun s => reliableCmd 0 s.toUInt16 (bytes mb s))).1
 
 def budgetTests : List Test := [
+  { name := "28000 packets staged behind a gap all come out, in order, once it fills"
+    run := fun _ => do
+      let n := 28000
+      let p := (feed (← serverPeer) ((List.range n).map fun i => reliableCmd 0 (i + 2).toUInt16 (bytes 2 i))).1
+      expect (p.channels[0]?.map (·.stagedReliable.size) == some n) "not all staged"
+      let (p, evs) := feed p [reliableCmd 0 1 (bytes 2 99)]
+      let got := received evs
+      expect (got.size == n + 1) s!"{got.size} delivered"
+      expect (got.toList.drop 1 == (List.range n).map fun i => (0, bytes 2 i)) "out of order"
+      expect (p.heldBytes == 0) "still holding bytes" },
+  { name := "unreliable packets staged after reliable ones come out in order with them"
+    run := fun _ => do
+      -- after reliable 3 (staged): unreliable 3, 1, 2; after 2: 1
+      let (p, evs) := feed (← serverPeer)
+        [reliableCmd 0 3 (bytes 3 3), unreliableCmd 0 3 3 (bytes 2 33), unreliableCmd 0 3 1 (bytes 2 31),
+         unreliableCmd 0 3 2 (bytes 2 32), reliableCmd 0 2 (bytes 3 2), unreliableCmd 0 2 1 (bytes 2 21)]
+      expect evs.isEmpty "delivered past the gap"
+      expect (p.heldBytes == 3 + 3 + 2 * 4) "held bytes not counted"
+      let (p, evs) := feed p [reliableCmd 0 1 (bytes 3 1)]
+      expect (received evs == #[(0, bytes 3 1), (0, bytes 3 2), (0, bytes 3 3),
+        (0, bytes 2 31), (0, bytes 2 32), (0, bytes 2 33)]) s!"got {(received evs).size}"
+      -- unreliable 1 after reliable 2 was passed by the frontier: dropped
+      expect (p.heldBytes == 0) "still holding bytes" },
   { name := "past the budget a packet that would be staged is refused and not acked"
     run := fun _ => do
       let p ← stagedPeer ((List.range 32).map (· + 3))
@@ -420,7 +443,7 @@ def hostTests : List Test := [
       -- the window shrinks below what is in flight (ENet: the throttle falls on an RTT spike)
       let p := { p with client := p.client.modifyPeer p.clientPeer ({ · with packetThrottle := 0 }) }
       let p ← send p (pkt 0)
-      let (q, datagrams) := Host.packOutgoingCommands p.clientP p.now
+      let (q, datagrams) := Host.packOutgoingCommands p.clientP p.now false
       let cmds := datagrams.flatten
       -- ENet checks every command with a packet, empty or not (check_outgoing_commands)
       expect (!cmds.any (·.body matches .sendReliable ..)) "empty packet sent past the congestion window"
@@ -431,7 +454,7 @@ def hostTests : List Test := [
       -- the window shrinks to one MTU (1392): 1000 in flight + 500 is over, + 100 is not
       let p := { p with client := p.client.modifyPeer p.clientPeer ({ · with packetThrottle := 0 }) }
       let p ← send (← send p (pkt 500)) (pkt 100) (ch := 1)
-      let (q, datagrams) := Host.packOutgoingCommands p.clientP p.now
+      let (q, datagrams) := Host.packOutgoingCommands p.clientP p.now false
       let cmds := datagrams.flatten
       -- ENet stops taking from its reliable send list for the pass
       -- (check_outgoing_commands: currentSendReliableCommand = end)
@@ -740,6 +763,39 @@ def hostTests : List Test := [
         { channelId := 0xFF, reliableSequenceNumber := 2, acknowledge := true, body := .disconnect 5 } (some 0)
       expect evs.isEmpty "reported a disconnect for a peer never reported connected"
       expect (peer.state == .disconnected) "slot not freed" },
+  { name := "with checksums on, no datagram is larger than the MTU"
+    run := fun _ => do
+      -- MTU 576 on both ends, checksums on: unreliable commands of 26 bytes
+      -- (18 of data), 22 of which fill a 576-byte datagram with its 4-byte
+      -- header exactly, so the checksum field would take it over
+      let mk (a : Address) := { Host.create a 4 (mtu := 576) with checksumEnabled := true }
+      let .ok (client, cp) := (mk clientAddr).connect serverAddr 2 | throw "connect failed"
+      let p := ({ client, server := mk serverAddr, clientPeer := cp, now := 1000 } : Pair).rounds 10
+      expect (p.clientP.state == .connected) "no connection"
+      let client := (List.range 40).foldl (init := p.client) fun h i =>
+        (h.send cp 0 (.unreliable (bytes 18 i))).toOption.getD h
+      let (_, datagrams, _) := client.service p.now
+      expect (datagrams.size ≥ 2) "expected several datagrams"
+      expect (datagrams.all (·.2.size ≤ 576)) s!"datagram sizes {datagrams.map (·.2.size)}" },
+  { name := "a datagram of 16000 PINGs parses in place"
+    run := fun _ => do
+      let ping : Protocol.Command := { channelId := 0xFF, reliableSequenceNumber := 1, body := .ping }
+      let bytes := (List.replicate 16000 ping).foldl (init := ByteArray.empty) fun b c =>
+        b ++ WriterM.run c.encode 8
+      let cmds := Protocol.Datagram.parseCommands bytes
+      expect (cmds.size == 16000) s!"{cmds.size} parsed" },
+  { name := "throttleConfigure on a free slot changes nothing, and the next connection there works"
+    run := fun _ => do
+      let p ← connected
+      -- slot 3 of the client is free
+      let h := p.client.throttleConfigure 3 1000 7 7
+      expect (h.peers == p.client.peers) "a free slot was touched"
+      -- one host, one slot: configure it once free, then connect again
+      let .ok (client, _) := (Host.create clientAddr 1).connect serverAddr 2 | throw "connect failed"
+      let client := client.resetPeer 0 |>.throttleConfigure 0 1000 7 7
+      let .ok (client, peer) := client.connect serverAddr 2 | throw "reconnect failed"
+      let q := ({ client, server := Host.create serverAddr 1, clientPeer := peer, now := 1000 } : Pair).rounds 10
+      expect (q.clientP.state == .connected) "the connection after the free-slot call did not come up" },
   { name := "disconnect does nothing on a free slot or a second time"
     run := fun _ => do
       let p ← connected

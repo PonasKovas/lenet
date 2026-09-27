@@ -44,20 +44,21 @@ def computeChecksum (pre : ByteArray) (post : ByteArray) (connectId : UInt32 := 
 
 /-- Sequentially decodes commands until the first malformed one (ENet's
 receive loop `break`s there; everything before it was already applied).
-Every valid command consumes at least 4 wire bytes, so `fuel = payload
-size` always suffices. -/
+Each command is read where the one before it ended, in place: the bytes
+are never copied. Every valid command consumes at least 4 wire bytes, so
+`fuel = payload size` always suffices. -/
 def parseCommands (bytes : ByteArray) : Array Command :=
-  go bytes.size bytes #[]
+  go bytes.size 0 #[]
 where
-  go : Nat → ByteArray → Array Command → Array Command
+  go : Nat → Nat → Array Command → Array Command
     | 0, _, acc => acc
-    | fuel' + 1, rest, acc =>
-      if rest.size == 0 then
+    | fuel' + 1, offset, acc =>
+      if bytes.size ≤ offset then
         acc
       else
-        match ReaderM.run Command.decode rest with
-        | .ok cmd => go fuel' (rest.extract (cmd.wireSize) rest.size) (acc.push cmd)
-        | .error _ => acc
+        match EStateM.run Command.decode { bytes, offset } with
+        | .ok cmd _ => go fuel' (offset + cmd.wireSize) (acc.push cmd)
+        | .error _ _ => acc
 
 /--
 Decodes a datagram. `hasChecksum` says whether the 4-byte checksum field is

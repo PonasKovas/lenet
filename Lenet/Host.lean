@@ -246,9 +246,13 @@ def setChannelLimit (h : Host) (limit : Nat) : Host :=
       else Nat.max limit Constants.minimumChannelCount }
 
 /-- ENet's enet_peer_throttle_configure: sets the local throttle parameters
-and sends them to the remote peer. -/
+and sends them to the remote peer. A free slot (or a zombie one, about to be
+freed) is left alone: ENet queues the command there too, and the next
+connection on the slot then sends it ahead of its CONNECT or VERIFY_CONNECT,
+which the other side refuses, and inherits the throttle settings. -/
 def throttleConfigure (h : Host) (peerId : UInt16) (interval accel decel : UInt32) : Host :=
   h.modifyPeer peerId fun p =>
+    if p.state == .disconnected || p.state == .zombie then p else
     { p with
       packetThrottleInterval     := interval
       packetThrottleAcceleration := accel
@@ -435,6 +439,8 @@ structure PackState where
   channels          : Array Channel
   inTransitAdd      : Nat := 0
   packetSize        : Nat := 0
+  /-- The size of an empty datagram (`headerSize`). -/
+  emptySize         : Nat := 4
   /-- A reliable command hit a still-occupied sequence window: later reliable
   channel commands wait too, so none overtakes it (ENet's `windowWrap`). -/
   windowWrap        : Bool := false
@@ -455,14 +461,16 @@ namespace PackState
   st.commandsToPack.size < Constants.maximumPacketCommands ∧
     st.packetSize + cmd.wireSize ≤ mtu.toNat
 
-/-- The size of an empty datagram: ENetProtocolHeader (peer ID + sent time). -/
-def headerSize : Nat := 4
+/-- The size of an empty datagram: ENetProtocolHeader (peer ID + sent
+time), and the checksum field when checksums are on. ENet counts only the
+header, so its datagrams run 4 bytes over the MTU with checksums on. -/
+def headerSize (hasChecksum : Bool) : Nat := if hasChecksum then 8 else 4
 
 /-- Closes the datagram being filled (if it holds anything) and starts the
 next one. -/
 @[inline] def nextDatagram (st : PackState) : PackState :=
   if st.commandsToPack.isEmpty then st
-  else { st with datagrams := st.datagrams.push st.commandsToPack, commandsToPack := #[], packetSize := headerSize }
+  else { st with datagrams := st.datagrams.push st.commandsToPack, commandsToPack := #[], packetSize := st.emptySize }
 
 /-- Adds `cmd` to the datagram. -/
 @[inline] def pack (st : PackState) (cmd : Protocol.Command) : PackState :=
@@ -588,9 +596,11 @@ one pass it holds back again in the next (in-flight bytes and occupied
 windows only grow within a service), so the datagrams are the same, and a
 large packet's thousands of fragments are scanned once rather than once per
 datagram. -/
-def packOutgoingCommands (p : Peer) (now : UInt32) : Peer × Array (Array Protocol.Command) :=
+def packOutgoingCommands (p : Peer) (now : UInt32) (hasChecksum : Bool) :
+    Peer × Array (Array Protocol.Command) :=
   let initial : PackState := {
-    packetSize      := PackState.headerSize
+    packetSize      := PackState.headerSize hasChecksum
+    emptySize       := PackState.headerSize hasChecksum
     sentReliables   := p.sentReliableCommands
     channels        := p.channels
     throttleCounter := p.packetThrottleCounter
@@ -652,7 +662,7 @@ where
         if p.state == .disconnectLater ∧ p.outgoingCommands.isEmpty ∧ p.sentReliableCommands.isEmpty then
           p.queueDisconnect p.eventData
         else p
-      let (p, packed) := packOutgoingCommands p now
+      let (p, packed) := packOutgoingCommands p now checksumEnabled
       if !packed.isEmpty then
         go fuel p (datagrams ++ packed.map fun commands => (p.address, encodeDatagram p now checksumEnabled commands))
       else if p.state == .acknowledgingDisconnect ∧ p.acknowledgements.isEmpty then

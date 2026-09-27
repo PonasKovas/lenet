@@ -3,6 +3,7 @@ import Lenet.Host
 import Lenet.Channel
 import Lenet.Proofs.Reassembly
 import Lenet.Proofs.Channel
+import Lenet.Proofs.Receive
 
 /-!
 # Resource-safety proofs
@@ -142,10 +143,9 @@ theorem pruneAssemblers_size (p : Peer) (channelId : UInt8) :
 theorem receiveOnChannel_fragmentAssemblers_size (p : Peer) (channelId : UInt8)
     (receive : Channel → Channel × Array Packet) :
     (p.receiveOnChannel channelId receive).1.fragmentAssemblers.size ≤ p.fragmentAssemblers.size := by
-  unfold receiveOnChannel
-  split
-  · exact pruneAssemblers_size _ _
-  · exact Nat.le_refl _
+  by_cases h : channelId.toNat < p.channels.size
+  · rw [receiveOnChannel_eq _ _ _ h]; exact pruneAssemblers_size _ _
+  · rw [receiveOnChannel_out _ _ _ h]; exact Nat.le_refl _
 
 /-- Where `handleFragment` can leave the assembler array: unchanged, the
 absorbed array `xs`, `xs` with the set's assembler replaced by what
@@ -220,70 +220,7 @@ theorem handleFragment_cap_preserved (p : Peer) (channelId : UInt8) (reliableSeq
 
 open Channel
 
-/-- Draining delivers from the staged array; it never adds to it. -/
-theorem drainContiguousLoop_size : ∀ (f : Nat) (cur : UInt16) (staged : Array StagedReliable)
-    (del : Array (Nat × Packet)) (adv : Nat),
-    (drainContiguousLoop cur staged del f adv).2.2.1.size ≤ staged.size := by
-  intro f
-  induction f with
-  | zero => intro cur staged del adv; simp [drainContiguousLoop]
-  | succ f ih =>
-    intro cur staged del adv
-    simp only [drainContiguousLoop]
-    split
-    · next idx _ =>
-      split
-      · next hidx =>
-        have := ih ((cur + 1) + ((staged[idx]).span - 1).toUInt16) (staged.eraseIdx idx hidx)
-          (del.push ((staged[idx]).span, (staged[idx]).packet)) (adv + (staged[idx]).span)
-        rw [Array.size_eraseIdx] at this
-        omega
-      · exact Nat.le_refl _
-    · exact Nat.le_refl _
-
-/-- One reliable receive stages at most one delivery. -/
-theorem receiveReliableSpan_staged_le (c : Channel) (seq : UInt16) (span : Nat) (packet : Packet) :
-    (receiveReliableSpan c seq span packet).1.stagedReliable.size ≤ c.stagedReliable.size + 1 := by
-  unfold receiveReliableSpan
-  split
-  · simp
-  · split
-    · simp
-    · split
-      · have := drainContiguousLoop_size c.stagedReliable.size (seq + (span - 1).toUInt16)
-          c.stagedReliable #[] 0
-        simp only [drainContiguous]
-        generalize drainContiguousLoop _ c.stagedReliable #[] c.stagedReliable.size 0 = r at this ⊢
-        obtain ⟨_, _, rest, _⟩ := r
-        simp only at this ⊢
-        exact Nat.le_trans Array.size_filter_le (by omega)
-      · simp only []
-        split <;> simp
-
 /-! ## The staging bound -/
-
-/-- A sequence number the receive path admits lies fewer than
-`(freeReliableWindows - 1) * reliableWindowSize` numbers past the frontier
-(cyclically): the gate admits the frontier's window and the next six. -/
-theorem isReliableAhead_offset (c : Channel) (s : UInt16) (h : c.isReliableAhead s = true) :
-    (s - c.incomingReliableSequenceNumber).toNat
-      < (Constants.freeReliableWindows - 1) * Constants.reliableWindowSize := by
-  simp only [isReliableAhead, isIncomingReliableInWindow, Constants.reliableWindowSize,
-    Constants.reliableWindows, Constants.freeReliableWindows, Bool.and_eq_true,
-    bne_iff_ne, ne_eq] at h ⊢
-  obtain ⟨hw, -⟩ := h
-  have hs := UInt16.toNat_lt s
-  have hf := UInt16.toNat_lt c.incomingReliableSequenceNumber
-  rw [UInt16.toNat_sub]
-  split at hw
-  · next hlt =>
-    rw [UInt16.lt_iff_toNat_lt] at hlt
-    simp at hw
-    omega
-  · next hlt =>
-    rw [UInt16.lt_iff_toNat_lt] at hlt
-    simp at hw
-    omega
 
 /-- `isReliableAhead` reads only the dispatch frontier. -/
 theorem isReliableAhead_congr {c d : Channel}
@@ -291,111 +228,105 @@ theorem isReliableAhead_congr {c d : Channel}
     c.isReliableAhead s = d.isReliableAhead s := by
   simp [isReliableAhead, isIncomingReliableInWindow, h]
 
-/-- The staging invariant: staged sequence numbers are distinct, and each
-is still ahead of the frontier inside the receive window. -/
+/-- The staging invariant: each staged entry is stored under the sequence
+number it starts at, that number is still ahead of the frontier inside the
+receive window, and the entry spans at least one sequence number. -/
 def StagedReliableInv (c : Channel) : Prop :=
-  (c.stagedReliable.toList.map (·.seq)).Nodup ∧
-    ∀ e ∈ c.stagedReliable, c.isReliableAhead e.seq = true
+  ∀ (k : UInt16) (e : StagedReliable), c.stagedReliable[k]? = some e →
+    e.seq = k ∧ c.isReliableAhead k = true ∧ 1 ≤ e.span
 
 /-- The staging bound: distinct sequence numbers inside the window span
 number at most the span. -/
 theorem stagedReliableInv_size {c : Channel} (h : StagedReliableInv c) :
     c.stagedReliable.size ≤ (Constants.freeReliableWindows - 1) * Constants.reliableWindowSize := by
-  obtain ⟨hnd, hahead⟩ := h
-  let off (e : StagedReliable) : Nat := (e.seq - c.incomingReliableSequenceNumber).toNat
-  have hnd' : (c.stagedReliable.toList.map off).Nodup := by
-    rw [List.Nodup, List.pairwise_map] at hnd ⊢
+  let off (k : UInt16) : Nat := (k - c.incomingReliableSequenceNumber).toNat
+  have hnd : c.stagedReliable.keys.Nodup :=
+    Std.HashMap.distinct_keys.imp fun {a b} hab heq => by simp [heq] at hab
+  have hnd' : (c.stagedReliable.keys.map off).Nodup := by
+    rw [List.Nodup, List.pairwise_map]
     refine hnd.imp fun {a b} hab heq => hab ?_
-    have : a.seq - c.incomingReliableSequenceNumber = b.seq - c.incomingReliableSequenceNumber :=
+    have : a - c.incomingReliableSequenceNumber = b - c.incomingReliableSequenceNumber :=
       UInt16.toNat_inj.mp heq
-    rw [← UInt16.sub_add_cancel a.seq c.incomingReliableSequenceNumber, this,
-      UInt16.sub_add_cancel]
-  have hsub : c.stagedReliable.toList.map off
+    rw [← UInt16.sub_add_cancel a c.incomingReliableSequenceNumber, this, UInt16.sub_add_cancel]
+  have hsub : c.stagedReliable.keys.map off
       ⊆ List.range ((Constants.freeReliableWindows - 1) * Constants.reliableWindowSize) := by
     intro n hn
-    obtain ⟨e, he, rfl⟩ := List.mem_map.mp hn
-    exact List.mem_range.mpr (isReliableAhead_offset c e.seq (hahead e (Array.mem_toList_iff.mp he)))
-  have := hnd'.length_le_of_subset hsub
-  simpa using this
-
-/-- What the drain leaves staged is a sublist of what was staged. -/
-theorem drainContiguousLoop_sublist : ∀ (f : Nat) (cur : UInt16) (staged : Array StagedReliable)
-    (del : Array (Nat × Packet)) (adv : Nat),
-    (drainContiguousLoop cur staged del f adv).2.2.1.toList.Sublist staged.toList := by
-  intro f
-  induction f with
-  | zero => intro cur staged del adv; simp [drainContiguousLoop]
-  | succ f ih =>
-    intro cur staged del adv
-    simp only [drainContiguousLoop]
-    split
-    · next idx _ =>
-      split
-      · next hidx =>
-        refine (ih _ _ _ _).trans ?_
-        rw [Array.toList_eraseIdx]
-        exact List.eraseIdx_sublist _ _
-      · exact List.Sublist.refl _
-    · exact List.Sublist.refl _
+    obtain ⟨k, hk, rfl⟩ := List.mem_map.mp hn
+    have hmem : k ∈ c.stagedReliable := Std.HashMap.mem_keys.mp hk
+    obtain ⟨e, he⟩ := Option.isSome_iff_exists.mp (Std.HashMap.mem_iff_isSome_getElem?.mp hmem)
+    exact List.mem_range.mpr (isReliableAhead_offset c k (h k e he).2.1)
+  rw [← Std.HashMap.length_keys]
+  simpa using hnd'.length_le_of_subset hsub
 
 /-- Every reliable receive keeps the staging invariant: staging adds only an
 admitted, new sequence number, and an in-order delivery keeps only the
 entries still ahead of the new frontier. -/
 theorem receiveReliableSpan_stagedReliableInv {c : Channel} (h : StagedReliableInv c)
-    (seq : UInt16) (span : Nat) (packet : Packet) : StagedReliableInv (receiveReliableSpan c seq span packet).1 := by
-  obtain ⟨hnd, hahead⟩ := h
+    (seq : UInt16) (span : Nat) (packet : Packet) :
+    StagedReliableInv (receiveReliableSpan c seq span packet).1 := by
+  have hspans : ∀ (k : UInt16) (e : StagedReliable), c.stagedReliable[k]? = some e → 1 ≤ e.span :=
+    fun k e he => (h k e he).2.2
   unfold receiveReliableSpan
+  dsimp only
   split
-  · exact ⟨hnd, hahead⟩
+  · exact h
   · next hwin =>
     split
-    · exact ⟨hnd, hahead⟩
+    · exact h
     · next hdup =>
       split
-      · simp only [drainContiguous]
-        have hsub := drainContiguousLoop_sublist c.stagedReliable.size (seq + (span - 1).toUInt16)
-          c.stagedReliable #[] 0
-        generalize drainContiguousLoop _ c.stagedReliable #[] c.stagedReliable.size 0 = r at hsub ⊢
-        obtain ⟨newSeq, _, rest, _⟩ := r
-        simp only at hsub ⊢
-        refine ⟨?_, ?_⟩
-        · rw [Array.toList_filter]
-          exact hnd.sublist ((List.filter_sublist).map _ |>.trans (hsub.map _))
-        · intro e he
-          exact (Array.mem_filter.mp he).2
-      · simp only []
-        split
-        · exact ⟨hnd, hahead⟩
-        · next hany =>
-          refine ⟨?_, ?_⟩
-          · simp only [Array.toList_push, List.map_append, List.map_cons, List.map_nil]
-            refine List.nodup_append.mpr ⟨hnd, by simp, ?_⟩
-            intro a ha b hb
-            simp only [List.mem_singleton] at hb
-            subst hb
-            intro heq
-            subst heq
-            obtain ⟨e, he, rfl⟩ := List.mem_map.mp ha
-            exact hany (Array.any_eq_true'.mpr ⟨e, Array.mem_toList_iff.mp he, by simp⟩)
-          · intro e he
-            simp only [Array.mem_push] at he
-            rcases he with he | rfl
-            · exact hahead e he
-            · show c.isReliableAhead seq = true
-              simp only [Bool.not_eq_true'] at hwin
-              simp only [beq_iff_eq] at hdup
-              simp [isReliableAhead, hdup]
-              simpa using hwin
+      · next hnext =>
+        dsimp only
+        generalize hdr : drainContiguous _ c.stagedReliable = dr
+        obtain ⟨newSeq, drained, rest, adv⟩ := dr
+        dsimp only
+        have hfull : drainContiguousLoop (seq + (max span 1 - 1).toUInt16) c.stagedReliable #[]
+            c.stagedReliable.size 0 = (newSeq, drained, rest, adv) := by rw [← hdr]; rfl
+        obtain ⟨-, -, hadv, -⟩ := drainContiguousLoop_advance _ _ _ _ _ _ _ _ _ hspans hfull
+        have hseq : seq = c.incomingReliableSequenceNumber + 1 := by simpa using hnext
+        intro k e he
+        simp only [] at he
+        rw [eraseAfter_get] at he
+        split at he
+        · cases he
+        · next hnot =>
+          have hrest : rest[k]? = some e := he
+          have hold := h k e (drainContiguousLoop_get _ _ _ _ _ k e (by rw [hfull]; exact hrest))
+          refine ⟨hold.1, isReliableAhead_after_advance hold.2.1 (by simpa using hnot) ?_, hold.2.2⟩
+          show newSeq.toNat = (c.incomingReliableSequenceNumber.toNat + (max span 1 + adv)) % 65536
+          rw [hadv, UInt16.toNat_add, hseq, UInt16.toNat_add]
+          simp [UInt16.toNat_ofNat']
+          omega
+      · split
+        · exact h
+        · intro k e he
+          simp only [] at he
+          rw [Std.HashMap.getElem?_insert] at he
+          split at he
+          · next hk =>
+            simp only [beq_iff_eq] at hk
+            subst hk
+            cases he
+            refine ⟨rfl, ?_, Nat.le_max_right _ _⟩
+            simp only [Bool.not_eq_true'] at hwin
+            simp only [beq_iff_eq] at hdup
+            show (c.isIncomingReliableInWindow seq && seq != c.incomingReliableSequenceNumber) = true
+            simp only [Bool.and_eq_true, bne_iff_ne, ne_eq]
+            exact ⟨by simpa using hwin, hdup⟩
+          · exact h k e he
 
 /-- Releasing staged unreliable packets leaves reliable staging and the
 frontier alone. -/
-theorem releaseStagedUnreliable_reliable (c : Channel) :
-    (releaseStagedUnreliable c).1.stagedReliable = c.stagedReliable ∧
-      (releaseStagedUnreliable c).1.incomingReliableSequenceNumber = c.incomingReliableSequenceNumber := by
+theorem releaseStagedUnreliable_reliable (c : Channel) (old : UInt16) (advance : Nat) :
+    (releaseStagedUnreliable c old advance).1.stagedReliable = c.stagedReliable ∧
+      (releaseStagedUnreliable c old advance).1.incomingReliableSequenceNumber = c.incomingReliableSequenceNumber := by
   unfold releaseStagedUnreliable
   split
   · exact ⟨rfl, rfl⟩
-  · simp only []
+  · dsimp only
+    generalize eraseAfter _ _ _ _ = er
+    obtain ⟨_, _, _⟩ := er
+    dsimp only
     refine Array.foldl_induction
       (motive := fun _ (r : Channel × Array Packet) => r.1.stagedReliable = c.stagedReliable ∧
         r.1.incomingReliableSequenceNumber = c.incomingReliableSequenceNumber)
@@ -409,21 +340,28 @@ theorem releaseStagedUnreliable_reliable (c : Channel) :
 theorem stagedReliableInv_default : StagedReliableInv ({} : Channel) := by
   simp [StagedReliableInv]
 
+/-- The staging invariant reads only the staged map and the frontier. -/
+theorem stagedReliableInv_of_same {c d : Channel} (hs : d.stagedReliable = c.stagedReliable)
+    (hf : d.incomingReliableSequenceNumber = c.incomingReliableSequenceNumber)
+    (h : StagedReliableInv c) : StagedReliableInv d := by
+  intro k e he
+  rw [hs] at he
+  obtain ⟨h1, h2, h3⟩ := h k e he
+  exact ⟨h1, by rw [isReliableAhead_congr hf]; exact h2, h3⟩
+
 /-- The channel's reliable receive path keeps the staging invariant. -/
 theorem receiveReliableAndRelease_stagedReliableInv {c : Channel} (h : StagedReliableInv c)
     (seq : UInt16) (span : Nat) (packet : Packet) : StagedReliableInv (receiveReliableAndRelease c seq span packet).1 := by
   have h' := receiveReliableSpan_stagedReliableInv h seq span packet
   unfold receiveReliableAndRelease
+  dsimp only
   generalize receiveReliableSpan c seq span packet = r at h' ⊢
   obtain ⟨c', dels⟩ := r
-  simp only [] at h' ⊢
+  dsimp only at h' ⊢
   split
   · exact h'
-  · obtain ⟨hs, hf⟩ := releaseStagedUnreliable_reliable c'
-    obtain ⟨hnd, hahead⟩ := h'
-    refine ⟨by simpa [hs] using hnd, fun e he => ?_⟩
-    rw [isReliableAhead_congr hf]
-    exact hahead e (hs ▸ he)
+  · exact stagedReliableInv_of_same (releaseStagedUnreliable_reliable c' _ _).1
+      (releaseStagedUnreliable_reliable c' _ _).2 h'
 
 /-- Unreliable receives never touch reliable staging. -/
 theorem receiveUnreliable_stagedReliableInv {c : Channel} (h : StagedReliableInv c)
@@ -463,15 +401,6 @@ private theorem mem_modify_or {α} {xs : Array α} {i : Nat} {f : α → α} {x 
   split
   · next he => subst he; exact .inr ⟨_, Array.getElem_mem (by simpa using hj), rfl⟩
   · exact .inl (Array.getElem_mem _)
-
-/-- The staging invariant reads only the staged array and the frontier. -/
-theorem stagedReliableInv_of_same {c d : Channel} (hs : d.stagedReliable = c.stagedReliable)
-    (hf : d.incomingReliableSequenceNumber = c.incomingReliableSequenceNumber)
-    (h : StagedReliableInv c) : StagedReliableInv d := by
-  obtain ⟨hnd, hahead⟩ := h
-  refine ⟨hs ▸ hnd, fun e he => ?_⟩
-  rw [isReliableAhead_congr hf]
-  exact hahead e (hs ▸ he)
 
 /-- Sender-side window accounting never touches reliable staging. -/
 theorem acquireReliableWindow_stagedReliableInv {c : Channel} (h : StagedReliableInv c) (seq : UInt16) :
@@ -522,15 +451,14 @@ theorem receiveOnChannel_peerStagedInv {p : Peer} (h : PeerStagedInv p) (channel
     (receive : Channel → Channel × Array Packet)
     (hr : ∀ c, StagedReliableInv c → StagedReliableInv (receive c).1) :
     PeerStagedInv (p.receiveOnChannel channelId receive).1 := by
-  unfold Peer.receiveOnChannel
-  split
-  · next hlt =>
+  by_cases hlt : channelId.toNat < p.channels.size
+  · rw [receiveOnChannel_eq _ _ _ hlt]
     intro ch hch
     simp only [pruneAssemblers_channels] at hch
     rcases mem_set_or hch with hch | rfl
     · exact h ch hch
     · exact hr _ (h _ (Array.getElem_mem hlt))
-  · exact h
+  · rw [receiveOnChannel_out _ _ _ hlt]; exact h
 
 theorem handleData_peerStagedInv {p : Peer} (h : PeerStagedInv p) (cmd : Protocol.Command) :
     PeerStagedInv (p.handleData cmd).1 := by
@@ -643,8 +571,8 @@ theorem enqueue_peerStagedInv {p : Peer} (h : PeerStagedInv p) (channelId : UInt
         packetCommand_channels] at hch
       refine setIfInBounds_stagedReliableInv h _ ?_ ch hch
       first
-        | exact fragmentCommands_stagedReliableInv (h _ hmem) ..
-        | exact packetCommand_stagedReliableInv _ (h _ hmem) ..
+        | exact fragmentCommands_stagedReliableInv (h _ hmem) _ _ _ _
+        | exact packetCommand_stagedReliableInv _ (h _ hmem) _ _
 
 theorem send_peerStagedInv {p p' : Peer} (h : PeerStagedInv p) {channelId : UInt8} {packet : Packet}
     {hasChecksum : Bool} (hs : p.send channelId packet hasChecksum = .ok p') : PeerStagedInv p' := by
@@ -695,8 +623,8 @@ theorem packCommand_stagedReliableInv (p : Peer) (now : UInt32) (st : Host.PackS
        · exact acquireReliableWindow_stagedReliableInv (h' c hc) _)
 
 /-- Packing a datagram only occupies sender-side windows. -/
-theorem packOutgoingCommands_peerStagedInv {p : Peer} (h : PeerStagedInv p) (now : UInt32) :
-    PeerStagedInv (Host.packOutgoingCommands p now).1 := by
+theorem packOutgoingCommands_peerStagedInv {p : Peer} (h : PeerStagedInv p) (now : UInt32) (hc : Bool) :
+    PeerStagedInv (Host.packOutgoingCommands p now hc).1 := by
   unfold Host.packOutgoingCommands
   intro ch hch
   simp only at hch
@@ -816,12 +744,9 @@ theorem pruneAssemblers_ok {p : Peer} (h : ∀ a ∈ p.fragmentAssemblers, Assem
 theorem receiveOnChannel_ok {p : Peer} (h : ∀ a ∈ p.fragmentAssemblers, AssemblerOk a) (channelId : UInt8)
     (receive : Channel → Channel × Array Packet) :
     ∀ a ∈ (p.receiveOnChannel channelId receive).1.fragmentAssemblers, AssemblerOk a := by
-  unfold receiveOnChannel
-  split
-  · split
-    refine pruneAssemblers_ok ?_ _
-    exact h
-  · exact h
+  by_cases hc : channelId.toNat < p.channels.size
+  · rw [receiveOnChannel_eq _ _ _ hc]; refine pruneAssemblers_ok ?_ _; exact h
+  · rw [receiveOnChannel_out _ _ _ hc]; exact h
 
 theorem handleFragment_ok {p : Peer} (h : ∀ a ∈ p.fragmentAssemblers, AssemblerOk a) (channelId : UInt8)
     (reliableSeq : UInt16) (params : Protocol.FragmentParams) (unreliable : Bool) :
@@ -1017,12 +942,9 @@ theorem pruneAssemblers_waiting {p : Peer} (h : WaitingOk p.fragmentAssemblers) 
 theorem receiveOnChannel_waiting {p : Peer} (h : WaitingOk p.fragmentAssemblers) (channelId : UInt8)
     (receive : Channel → Channel × Array Packet) :
     WaitingOk (p.receiveOnChannel channelId receive).1.fragmentAssemblers := by
-  unfold receiveOnChannel
-  split
-  · split
-    refine pruneAssemblers_waiting ?_ _
-    exact h
-  · exact h
+  by_cases hc : channelId.toNat < p.channels.size
+  · rw [receiveOnChannel_eq _ _ _ hc]; refine pruneAssemblers_waiting ?_ _; exact h
+  · rw [receiveOnChannel_out _ _ _ hc]; exact h
 
 /-- **The fragment path keeps the waiting-data budget.** -/
 theorem handleFragment_waiting {p : Peer} (h : WaitingOk p.fragmentAssemblers) (channelId : UInt8)

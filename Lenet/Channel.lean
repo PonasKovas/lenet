@@ -1,3 +1,4 @@
+import Std.Data.HashMap
 import Lenet.Constants
 import Lenet.Packet
 
@@ -14,14 +15,6 @@ structure StagedReliable where
   seq : UInt16
   span : Nat
   packet : Packet
-deriving BEq, Inhabited
-
-/-- An unreliable delivery held back until the reliable dispatch frontier
-reaches `reliableSeq`, the reliable sequence number it was sent after. -/
-structure StagedUnreliable where
-  reliableSeq   : UInt16
-  unreliableSeq : UInt16
-  packet        : Packet
 deriving BEq, Inhabited
 
 /-- One channel of a connection: its sequence counters, the send-side
@@ -42,20 +35,60 @@ structure Channel where
   `Constants.reliableWindows` windows. Fixed-size by construction. -/
   reliableWindows                  : Vector UInt16 Constants.reliableWindows := Vector.replicate Constants.reliableWindows 0
   /-- Staged out-of-order reliable deliveries waiting for gaps in sequence
-  numbers to be filled. -/
-  stagedReliable                   : Array StagedReliable := #[]
+  numbers to be filled, by the sequence number each starts at (its `seq`). -/
+  stagedReliable                   : Std.HashMap UInt16 StagedReliable := {}
   /-- Unreliable deliveries sent after a reliable command that has not been
-  delivered yet; at most `maximumStagedUnreliable`, each key at most once. -/
-  stagedUnreliable                 : Array StagedUnreliable := #[]
+  delivered yet: by that command's sequence number, then by their own
+  unreliable sequence number. -/
+  stagedUnreliable                 : Std.HashMap UInt16 (Std.HashMap UInt16 Packet) := {}
+  /-- How many unreliable deliveries are staged: at most
+  `maximumStagedUnreliable`. -/
+  stagedUnreliableCount            : Nat := 0
+  /-- The bytes of the reliable packets staged. -/
+  reliableBytes                    : Nat := 0
+  /-- The bytes of the unreliable packets staged. -/
+  unreliableBytes                  : Nat := 0
 deriving BEq, Inhabited
 
 namespace Channel
 
 /-- The bytes of the packets the channel holds back, reliable and
 unreliable. -/
-def stagedBytes (c : Channel) : Nat :=
-  c.stagedReliable.foldl (fun n e => n + e.packet.data.size) 0 +
-    c.stagedUnreliable.foldl (fun n e => n + e.packet.data.size) 0
+def stagedBytes (c : Channel) : Nat := c.reliableBytes + c.unreliableBytes
+
+/-- Whether `key` is one of the `count` sequence numbers after `after`
+(at most one wrap's worth). -/
+def isAfter (after : UInt16) (count : Nat) (key : UInt16) : Bool :=
+  let offset := (key - after).toNat
+  1 ≤ offset && offset ≤ count
+
+/-- Two weights added up at once. -/
+def addWeight (a b : Nat × Nat) : Nat × Nat := (a.1 + b.1, a.2 + b.2)
+
+/-- `eraseAfter`, one key at a time, adding up what the erased values
+weigh. -/
+def eraseAfterLoop (m : Std.HashMap UInt16 β) (after : UInt16) (w : β → Nat × Nat) (weight : Nat × Nat) :
+    (count : Nat) → Std.HashMap UInt16 β × (Nat × Nat)
+  | 0 => (m, weight)
+  | n + 1 =>
+    let key := after + (n + 1).toUInt16
+    let weight := match m[key]? with
+      | some v => addWeight weight (w v)
+      | none => weight
+    eraseAfterLoop (m.erase key) after w weight n
+
+/-- `m` without the keys among the `count` sequence numbers after `after`,
+and what the erased values weigh by `w` (two weights, such as a count and
+bytes). Costs the fewer of `count` and `m.size` steps: a map smaller than
+the range is filtered instead. -/
+def eraseAfter (m : Std.HashMap UInt16 β) (after : UInt16) (count : Nat) (w : β → Nat × Nat) :
+    Std.HashMap UInt16 β × (Nat × Nat) :=
+  let count := min count 65535
+  if m.isEmpty then (m, (0, 0))
+  else if m.size ≤ count then
+    let weight := m.fold (fun n k v => if isAfter after count k then addWeight n (w v) else n) (0, 0)
+    (m.filter fun k _ => !isAfter after count k, weight)
+  else eraseAfterLoop m after w (0, 0) count
 
 /-- Any index reduced mod the window count is a valid window slot. -/
 theorem modWindowIndex_lt (i : Nat) :
@@ -181,22 +214,17 @@ Bounded by `fuel` (initial value: `staged.size`) to guarantee structural
 termination. Returns delivered entries as `(span, packet)` pairs and the
 accumulated total span of the delivered entries.
 -/
-def drainContiguousLoop (curSeq : UInt16) (staged : Array StagedReliable)
+def drainContiguousLoop (curSeq : UInt16) (staged : Std.HashMap UInt16 StagedReliable)
     (delivered : Array (Nat × Packet)) (fuel : Nat) (advance : Nat) :
-    UInt16 × Array (Nat × Packet) × Array StagedReliable × Nat :=
+    UInt16 × Array (Nat × Packet) × Std.HashMap UInt16 StagedReliable × Nat :=
   match fuel with
   | 0 => (curSeq, delivered, staged, advance)
   | fuel' + 1 =>
     let targetSeq := curSeq + 1
-    match staged.findIdx? (fun (e : StagedReliable) => e.seq == targetSeq) with
-    | some idx =>
-      if h : idx < staged.size then
-        let entry : StagedReliable := staged[idx]
-        let remaining := staged.eraseIdx idx h
-        drainContiguousLoop (targetSeq + (entry.span - 1).toUInt16) remaining
-          (delivered.push (entry.span, entry.packet)) fuel' (advance + entry.span)
-      else
-        (curSeq, delivered, staged, advance)
+    match staged[targetSeq]? with
+    | some entry =>
+      drainContiguousLoop (targetSeq + (entry.span - 1).toUInt16) (staged.erase targetSeq)
+        (delivered.push (entry.span, entry.packet)) fuel' (advance + entry.span)
     | none =>
       (curSeq, delivered, staged, advance)
 
@@ -206,8 +234,8 @@ Drains contiguous staged reliable deliveries starting from `curSeq + 1`.
 Returns the advanced sequence number, the drained `(span, packet)` entries
 in order, the remaining staged deliveries, and the total drained span.
 -/
-def drainContiguous (curSeq : UInt16) (staged : Array StagedReliable) :
-    UInt16 × Array (Nat × Packet) × Array StagedReliable × Nat :=
+def drainContiguous (curSeq : UInt16) (staged : Std.HashMap UInt16 StagedReliable) :
+    UInt16 × Array (Nat × Packet) × Std.HashMap UInt16 StagedReliable × Nat :=
   drainContiguousLoop curSeq staged #[] staged.size 0
 
 /--
@@ -230,28 +258,41 @@ fragmented packet).
   packet, and nothing would ever drain those (ENet keeps them at the head
   of its sorted queue, where they block dispatch until the numbers wrap).
 - If ahead within the window, stages it until preceding deliveries arrive.
+
+A span of 0 counts as 1 (fragment sets have at least one fragment). Each
+step costs what it delivers, stages or drops, not what is staged: the
+staged deliveries are found by sequence number.
 -/
 def receiveReliableSpan (c : Channel) (seq : UInt16) (span : Nat) (packet : Packet) :
     Channel × Array (Nat × Packet) :=
+  let span := max span 1
   if !c.isIncomingReliableInWindow seq then
     (c, #[])
   else if seq == c.incomingReliableSequenceNumber then
     (c, #[]) -- duplicate of the dispatch frontier
   else if seq == c.incomingReliableSequenceNumber + 1 then
-    let (newSeq, drained, remainingStaged, _) :=
-      drainContiguous (seq + (span - 1).toUInt16) c.stagedReliable
-    let advanced := { c with
-      incomingReliableSequenceNumber   := newSeq
-      incomingUnreliableSequenceNumber := 0
-    }
-    ({ advanced with stagedReliable := remainingStaged.filter (advanced.isReliableAhead ·.seq) },
+    let old := c.incomingReliableSequenceNumber
+    -- the map leaves `c` first, so it is held once and changes in place
+    let staged := c.stagedReliable
+    let c := { c with stagedReliable := {} }
+    let (newSeq, drained, staged, advance) := drainContiguous (seq + (span - 1).toUInt16) staged
+    -- what the frontier jumped over: the sequence numbers it moved past
+    let (staged, (_, jumped)) := eraseAfter staged old (span + advance) fun e => (1, e.packet.data.size)
+    let drainedBytes := drained.foldl (fun n d => n + d.2.data.size) 0
+    ({ c with
+        incomingReliableSequenceNumber   := newSeq
+        incomingUnreliableSequenceNumber := 0
+        stagedReliable                   := staged
+        reliableBytes                    := c.reliableBytes - drainedBytes - jumped },
       #[(span, packet)] ++ drained)
+  else if c.stagedReliable.contains seq then
+    (c, #[]) -- staged already
   else
-    -- Out-of-order: store in staged list (avoiding duplicate sequence insertions)
-    let alreadyStaged := c.stagedReliable.any (fun e => e.seq == seq)
-    let newStaged := if alreadyStaged then c.stagedReliable
-                     else c.stagedReliable.push { seq, span, packet }
-    ({ c with stagedReliable := newStaged }, #[])
+    let staged := c.stagedReliable
+    let c := { c with stagedReliable := {} }
+    ({ c with
+        stagedReliable := staged.insert seq { seq, span, packet }
+        reliableBytes  := c.reliableBytes + packet.data.size }, #[])
 
 /-- Processes an incoming single-sequence reliable packet (span 1). -/
 def receiveReliable (c : Channel) (seq : UInt16) (packet : Packet) :
@@ -279,25 +320,38 @@ def receiveUnreliable (c : Channel) (reliableSeq seq : UInt16) (packet : Packet)
       ({ c with incomingUnreliableSequenceNumber := seq }, some packet)
     else
       (c, none)
-  else if c.stagedUnreliable.size ≥ Constants.maximumStagedUnreliable ∨
-      c.stagedUnreliable.any (fun e => e.reliableSeq == reliableSeq ∧ e.unreliableSeq == seq) then
+  else if c.stagedUnreliableCount ≥ Constants.maximumStagedUnreliable ∨
+      (c.stagedUnreliable[reliableSeq]?).any (·.contains seq) then
     (c, none)
   else
-    ({ c with stagedUnreliable := c.stagedUnreliable.push { reliableSeq, unreliableSeq := seq, packet } }, none)
+    let staged := c.stagedUnreliable
+    let c := { c with stagedUnreliable := {} }
+    ({ c with
+        stagedUnreliable      := staged.alter reliableSeq fun b => some ((b.getD {}).insert seq packet)
+        stagedUnreliableCount := c.stagedUnreliableCount + 1
+        unreliableBytes       := c.unreliableBytes + packet.data.size }, none)
 
-/-- After the dispatch frontier moved: delivers the staged unreliable packets
-sent after the new frontier, in unreliable sequence order, and drops the ones
-the frontier has passed (ENet dispatch_incoming_unreliable_commands, which
+/-- After the dispatch frontier moved `advance` sequence numbers past `old`:
+delivers the staged unreliable packets sent after the new frontier, in
+unreliable sequence order, and drops the ones the frontier has passed
+(ENet dispatch_incoming_unreliable_commands, which
 dispatch_incoming_reliable_commands calls). -/
-def releaseStagedUnreliable (c : Channel) : Channel × Array Packet :=
+def releaseStagedUnreliable (c : Channel) (old : UInt16) (advance : Nat) : Channel × Array Packet :=
   if c.stagedUnreliable.isEmpty then (c, #[])
   else
-    let (due, rest) := c.stagedUnreliable.partition (·.reliableSeq == c.incomingReliableSequenceNumber)
-    let kept := rest.filter (c.isIncomingReliableInWindow ·.reliableSeq)
-    let due := due.qsort (·.unreliableSeq < ·.unreliableSeq)
-    due.foldl (init := ({ c with stagedUnreliable := kept }, #[])) fun (c, released) e =>
-      if e.unreliableSeq > c.incomingUnreliableSequenceNumber then
-        ({ c with incomingUnreliableSequenceNumber := e.unreliableSeq }, released.push e.packet)
+    let staged := c.stagedUnreliable
+    let c := { c with stagedUnreliable := {} }
+    let due := (staged[c.incomingReliableSequenceNumber]?).getD {}
+    -- the frontier passed or reached the reliable commands of these
+    let (staged, (count, bytes)) :=
+      eraseAfter staged old advance fun b => (b.size, b.fold (fun n _ p => n + p.data.size) 0)
+    let due := due.toArray.qsort (·.1 < ·.1)
+    due.foldl (init := ({ c with
+        stagedUnreliable      := staged
+        stagedUnreliableCount := c.stagedUnreliableCount - count
+        unreliableBytes       := c.unreliableBytes - bytes }, #[])) fun (c, released) (unreliableSeq, packet) =>
+      if unreliableSeq > c.incomingUnreliableSequenceNumber then
+        ({ c with incomingUnreliableSequenceNumber := unreliableSeq }, released.push packet)
       else
         (c, released)
 
@@ -305,10 +359,12 @@ def releaseStagedUnreliable (c : Channel) : Channel × Array Packet :=
 unreliable packets staged for the new frontier. -/
 def receiveReliableAndRelease (c : Channel) (seq : UInt16) (span : Nat) (packet : Packet) :
     Channel × Array Packet :=
+  let old := c.incomingReliableSequenceNumber
   let (c, delivered) := c.receiveReliableSpan seq span packet
   if delivered.isEmpty then (c, #[])
   else
-    let (c, released) := c.releaseStagedUnreliable
+    let advance := delivered.foldl (fun n d => n + d.1) 0
+    let (c, released) := c.releaseStagedUnreliable old advance
     (c, delivered.map (·.2) ++ released)
 
 end Channel

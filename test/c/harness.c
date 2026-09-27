@@ -241,7 +241,9 @@ static unsigned char payload_c[] = "hello-unsequenced-c2s";
 static unsigned char payload_d[] = "hello-reliable-s2c";
 static unsigned char payload_e[] = "hello-unreliable-s2c";
 static unsigned char payload_f[] = "hello-unsequenced-s2c";
-static unsigned char payload_mtu[] = "just-under-mtu-payload-0123456789";
+/* a short reliable packet (its text is from when it was meant to be near
+ * the MTU; the traces are recorded with it, so it stays) */
+static unsigned char payload_small[] = "just-under-mtu-payload-0123456789";
 
 /* 40000-byte deterministic pattern for the fragmentation test */
 static unsigned char payload_big[40000];
@@ -279,7 +281,7 @@ static const Action act_send_c2s[] = {
     A_SEND(150, ROLE_C, 0, ENET_PACKET_FLAG_RELIABLE, payload_a, sizeof payload_a - 1),
     A_SEND(150, ROLE_C, 0, 0, payload_b, sizeof payload_b - 1),
     A_SEND(150, ROLE_C, 1, ENET_PACKET_FLAG_UNSEQUENCED, payload_c, sizeof payload_c - 1),
-    A_SEND(160, ROLE_C, 0, ENET_PACKET_FLAG_RELIABLE, payload_mtu, sizeof payload_mtu - 1),
+    A_SEND(160, ROLE_C, 0, ENET_PACKET_FLAG_RELIABLE, payload_small, sizeof payload_small - 1),
 };
 
 static const Action act_send_s2c[] = {
@@ -308,7 +310,7 @@ static const Action act_fragthen[] = {
     A_SEND(200, ROLE_C, 0, ENET_PACKET_FLAG_RELIABLE, payload_a, sizeof payload_a - 1),
     A_SEND(210, ROLE_C, 0, 0, payload_b, sizeof payload_b - 1),
     /* after the first set has dispatched and been acked */
-    A_SEND(900, ROLE_C, 0, ENET_PACKET_FLAG_RELIABLE, payload_mtu, sizeof payload_mtu - 1),
+    A_SEND(900, ROLE_C, 0, ENET_PACKET_FLAG_RELIABLE, payload_small, sizeof payload_small - 1),
     A_SEND(950, ROLE_C, 0, ENET_PACKET_FLAG_RELIABLE, payload_big, sizeof payload_big),
     A_SEND(960, ROLE_C, 0, ENET_PACKET_FLAG_RELIABLE, payload_a, sizeof payload_a - 1),
 };
@@ -358,7 +360,7 @@ static const Action act_unfrag[] = {
 static const Action act_disclater[] = {
     { .at_ms = 5,   .kind = ACT_CONNECT, .role = ROLE_C, .a = 2, .b = 0 },
     A_SEND(150, ROLE_C, 0, ENET_PACKET_FLAG_RELIABLE, payload_a, sizeof payload_a - 1),
-    A_SEND(150, ROLE_C, 0, ENET_PACKET_FLAG_RELIABLE, payload_mtu, sizeof payload_mtu - 1),
+    A_SEND(150, ROLE_C, 0, ENET_PACKET_FLAG_RELIABLE, payload_small, sizeof payload_small - 1),
     A_DISCLATER(152, ROLE_C, 99),
 };
 
@@ -452,7 +454,7 @@ static const Action act_multichannel[] = {
     A_SEND(160, ROLE_C, 5, 0, payload_d, sizeof payload_d - 1),
     A_SEND(160, ROLE_C, 7, ENET_PACKET_FLAG_UNSEQUENCED, payload_e, sizeof payload_e - 1),
     A_SEND(170, ROLE_S, 2, ENET_PACKET_FLAG_RELIABLE, payload_f, sizeof payload_f - 1),
-    A_SEND(170, ROLE_S, 6, 0, payload_mtu, sizeof payload_mtu - 1),
+    A_SEND(170, ROLE_S, 6, 0, payload_small, sizeof payload_small - 1),
 };
 
 static const Action act_dup[] = {

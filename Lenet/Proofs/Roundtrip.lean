@@ -337,23 +337,25 @@ theorem cmdsBytes_size_ge : ∀ (l : List Command), (∀ c ∈ l, c.WellFormed) 
     simp only [cmdsBytes, ByteArray.size_append, hc, List.length_cons, Command.wireSize]
     omega
 
-theorem go_cmdsBytes : ∀ (l : List Command) (fuel : Nat) (acc : Array Command),
+theorem go_cmdsBytes : ∀ (l : List Command) (pre : ByteArray) (fuel : Nat) (acc : Array Command),
     (∀ c ∈ l, c.WellFormed) → l.length ≤ fuel →
-      Datagram.parseCommands.go fuel (cmdsBytes l) acc = acc ++ l.toArray
-  | [], fuel, acc, _, _ => by
-    rw [go_eq_of_size_zero fuel _ acc rfl]; simp
-  | c :: cs, fuel + 1, acc, h, hl => by
+      Datagram.parseCommands.go (pre ++ cmdsBytes l) fuel pre.size acc = acc ++ l.toArray
+  | [], pre, fuel, acc, _, _ => by
+    rw [go_eq_of_done _ fuel _ acc (by simp [cmdsBytes, ByteArray.size_append])]; simp
+  | c :: cs, pre, fuel + 1, acc, h, hl => by
     have hwf := h c List.mem_cons_self
-    have ⟨hs, _, _⟩ := cmdBytes_spec hwf
-    have hne : (cmdsBytes (c :: cs)).size ≠ 0 := by
+    have ⟨hs, _, hr⟩ := cmdBytes_spec hwf
+    have hne : ¬ (pre ++ cmdsBytes (c :: cs)).size ≤ pre.size := by
       simp only [cmdsBytes, ByteArray.size_append, hs, Command.wireSize]; omega
-    have hb : ((cmdsBytes (c :: cs)).size == 0) = false := by simp [hne]
-    simp only [Datagram.parseCommands.go, hb, Bool.false_eq_true, if_false]
-    rw [show cmdsBytes (c :: cs) = cmdBytes c ++ cmdsBytes cs from rfl, decode_cmdBytes hwf]
+    simp only [Datagram.parseCommands.go, if_neg hne]
+    have hbytes : pre ++ cmdsBytes (c :: cs) = pre ++ cmdBytes c ++ cmdsBytes cs := by
+      simp [cmdsBytes, ByteArray.append_assoc]
+    rw [hbytes, hr pre (cmdsBytes cs)]
     simp only []
-    rw [ByteArray.extract_append_eq_right (by rw [hs]) (by simp [ByteArray.size_append, hs])]
-    rw [go_cmdsBytes cs fuel (acc.push c) (fun x hx => h x (List.mem_cons_of_mem c hx))
-      (by simp at hl; omega)]
+    have hoff : pre.size + c.wireSize = (pre ++ cmdBytes c).size := by
+      simp [ByteArray.size_append, hs]
+    rw [hoff, go_cmdsBytes cs (pre ++ cmdBytes c) fuel (acc.push c)
+      (fun x hx => h x (List.mem_cons_of_mem c hx)) (by simp at hl; omega)]
     simp
 
 /-- **Command-sequence roundtrip**: parsing the concatenated wire bytes of
@@ -361,8 +363,10 @@ well-formed commands recovers exactly those commands, in order. -/
 theorem parseCommands_cmdsBytes (l : List Command) (h : ∀ c ∈ l, c.WellFormed) :
     Datagram.parseCommands (cmdsBytes l) = l.toArray := by
   have := cmdsBytes_size_ge l h
-  rw [Datagram.parseCommands, go_cmdsBytes l _ #[] h (by omega)]
-  simp
+  have := go_cmdsBytes l ByteArray.empty (cmdsBytes l).size #[] h (by omega)
+  rw [ByteArray.empty_append] at this
+  rw [Datagram.parseCommands]
+  exact (this.trans (by simp))
 
 /-! ## Header -/
 

@@ -355,7 +355,7 @@ private def checkResourceBounds (h : Host) (st : ReplayState) : ReplayState :=
   if h.peers.any fun p => p.fragmentAssemblers.size > Constants.maximumFragmentAssemblers
       ∨ h.peers.any fun p => p.channels.any fun ch =>
           ch.stagedReliable.size > (Constants.freeReliableWindows - 1) * Constants.reliableWindowSize
-            ∨ ch.stagedUnreliable.size > Constants.maximumStagedUnreliable
+            ∨ ch.stagedUnreliableCount > Constants.maximumStagedUnreliable
       ∨ h.peers.any fun p => p.acknowledgements.size > 65536 then
     { st with errors := st.errors.push "resource bound exceeded" }
   else st

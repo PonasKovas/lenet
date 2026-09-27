@@ -43,13 +43,13 @@ theorem queueDisconnect_peerId (p : Peer) (d) : (p.queueDisconnect d).peerId = p
   unfold queueDisconnect; split <;> (try split) <;> rfl
 
 theorem receiveOnChannel_peerId (p : Peer) (c r) : (p.receiveOnChannel c r).1.peerId = p.peerId := by
-  unfold receiveOnChannel; split
-  · split; exact pruneAssemblers_peerId _ _
-  · rfl
+  by_cases h : c.toNat < p.channels.size
+  · rw [receiveOnChannel_eq _ _ _ h]; exact pruneAssemblers_peerId _ _
+  · rw [receiveOnChannel_out _ _ _ h]
 theorem receiveOnChannel_named (p : Peer) (c r) : ∀ e ∈ (p.receiveOnChannel c r).2, eventPeer e = p.peerId := by
-  unfold receiveOnChannel; split
-  · split; intro e he; obtain ⟨x, _, rfl⟩ := Array.mem_map.mp he; rfl
-  · intro e he; simp at he
+  by_cases h : c.toNat < p.channels.size
+  · rw [receiveOnChannel_eq _ _ _ h]; intro e he; obtain ⟨x, _, rfl⟩ := Array.mem_map.mp he; rfl
+  · rw [receiveOnChannel_out _ _ _ h]; intro e he; simp at he
 
 theorem handleFragment_peerId (p : Peer) (c s pr u) : (p.handleFragment c s pr u).1.peerId = p.peerId := by
   unfold handleFragment; dsimp only
@@ -194,8 +194,8 @@ theorem pollPeer_go_peerId : ∀ (fuel : Nat) (p : Peer) (now cs ds),
     generalize (if p.state == .disconnectLater ∧ p.outgoingCommands.isEmpty ∧ p.sentReliableCommands.isEmpty
         then p.queueDisconnect p.eventData else p) = q at h1 ⊢
     rw [← h1]
-    have h2 : (Host.packOutgoingCommands q now).1.peerId = q.peerId := rfl
-    generalize Host.packOutgoingCommands q now = r at h2 ⊢
+    have h2 : (Host.packOutgoingCommands q now cs).1.peerId = q.peerId := rfl
+    generalize Host.packOutgoingCommands q now cs = r at h2 ⊢
     obtain ⟨q', cmds⟩ := r
     dsimp only at h2 ⊢
     rw [← h2]
@@ -694,7 +694,7 @@ theorem broadcast_similar (h : Host) (c pk) : Similar h.peers (h.broadcast c pk)
   split <;> simp [*]
 
 theorem throttleConfigure_similar (h : Host) (id i a d) : Similar h.peers (h.throttleConfigure id i a d).peers :=
-  .modify _ _ _ fun _ => ⟨rfl, rfl⟩
+  .modify _ _ _ fun _ => by split <;> exact ⟨rfl, rfl⟩
 
 theorem setPeerTimeout_similar (h : Host) (id l mn mx) : Similar h.peers (h.setPeerTimeout id l mn mx).peers :=
   .modify _ _ _ fun _ => ⟨rfl, rfl⟩

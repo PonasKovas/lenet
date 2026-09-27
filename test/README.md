@@ -31,7 +31,8 @@ C library, not against a spec. There are three parts:
 
 4. **`Lenet.Net` against ENet** (`c/echo.c`, `NetInterop.lean`). The Lean
    socket driver in one process and a real ENet host in another, each way
-   round: one side sends 31 reliable packets (one fragmented) and a few
+   round: one side sends 31 reliable packets of up to 3000 bytes (many
+   fragmented) and a few
    unsequenced ones, the other echoes them, and the sender checks every
    reliable one comes back once, in order and intact.
 
@@ -106,7 +107,7 @@ no real time.
 | name           | exercises                                                        |
 |----------------|------------------------------------------------------------------|
 | `connect`      | handshake both roles, CONNECT/VERIFY_CONNECT/ACK sequence        |
-| `send_c2s`     | reliable + unreliable + unsequenced sends, near-MTU packet       |
+| `send_c2s`     | reliable + unreliable + unsequenced sends, then one more reliable |
 | `send_s2c`     | same, server → client                                            |
 | `frag`         | 40 KB reliable packet split into MTU-bounded fragments           |
 | `fragthen`     | fragmentation span dispatch: more reliable/unreliable traffic queued behind and sent after a full fragment set, plus a second set - a span-naive dispatch frontier (advance-by-1 per set) deadlocks the channel and loses the follow-up traffic (regression for the fixed fragmentation frontier bug, see divergence triage) |
@@ -254,7 +255,8 @@ protocol.c, and the proofs cover the rest (see DESIGN.md, "No fuzzer").
 
 Behavioral differences from ENet, found by the tests or by reading both
 code bases, with their classification (DESIGN.md, "Correctness over
-compatibility"). Open, undecided differences are listed in TODO.md.
+compatibility"). None is open or undecided; one found later goes in
+TODO.md until it is sorted.
 
 - **Lenet bugs fixed in the 2026-09 review** (none visible to the corpus,
   whose clocks start at 0, whose traces are short and loss-free):
@@ -313,8 +315,8 @@ compatibility"). Open, undecided differences are listed in TODO.md.
   ENet acknowledges a reliable command (or fragment) it discards for being
   past the receive window (`peer.c` enet_peer_queue_incoming_command
   returns `&dummyCommand`, so handle_incoming_commands queues the ACK). The
-  sender may be one window past it: it keeps up to seven windows in flight
-  (`canSendReliable`), and the receiver's frontier can sit just before the
+  sender may be one window past it: an ENet sender keeps up to seven
+  windows in flight (a Lenet one six, `canSendReliable`), and the receiver's frontier can sit just before the
   oldest of them, one window lower. If the first command of a window is
   lost while the sender goes on for six more windows, the command that
   opens the seventh is acknowledged, retired and never delivered: the
@@ -428,6 +430,16 @@ compatibility"). Open, undecided differences are listed in TODO.md.
   one byte, not a zeroed 32 MB buffer (ENet mallocs the whole packet when
   the set starts). ENet also counts packets delivered but not yet read by
   the application; Lenet hands those out as events.
+- **Receive cost grew with what was staged (lenet bug - fixed
+  2026-09-27, hostile input).** Staged packets were arrays: staging one
+  scanned the array for a duplicate and copied it (the peer still held the
+  channel), each fragment scanned it again for every assembler, and the
+  drain found each next packet by a scan and erased it by shifting, so
+  28000 packets staged behind a gap cost O(n²) to stage and again to drain.
+  Now they are maps by sequence number and each step costs what it
+  delivers, stages or drops (`Channel.receiveReliableSpan`,
+  `eraseAfter`); pinned by a unit test that stages 28000. ENet's sorted
+  lists are O(n) per out-of-order insert too.
 - **Fragment validation (lenet bug - fixed, hostile input).** ENet refuses
   an empty fragment and one whose total length or fragment count differs
   from the set under way (no ACK, the rest of the datagram dropped). Lenet

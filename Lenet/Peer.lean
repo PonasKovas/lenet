@@ -410,9 +410,9 @@ def fragmentSetLive (ch : Channel) (origin : FragmentOrigin) (startSeq : UInt16)
     ch.isIncomingReliableInWindow origin.reliableSeq &&
       !(origin.reliableSeq == ch.incomingReliableSequenceNumber &&
         startSeq ≤ ch.incomingUnreliableSequenceNumber) &&
-      !ch.stagedUnreliable.any fun e => e.reliableSeq == origin.reliableSeq && e.unreliableSeq == startSeq
+      !(ch.stagedUnreliable[origin.reliableSeq]?).any (·.contains startSeq)
   else
-    ch.isReliableAhead startSeq && !ch.stagedReliable.any (·.seq == startSeq)
+    ch.isReliableAhead startSeq && !ch.stagedReliable.contains startSeq
 
 /-- Discards the assemblers of channel `channelId` whose set can no longer be
 delivered: the dispatch frontier or the last unreliable delivery moved past
@@ -434,9 +434,15 @@ events. Commands for a channel the peer does not have are dropped. -/
 def receiveOnChannel (p : Peer) (channelId : UInt8) (receive : Channel → Channel × Array Packet) :
     Peer × Array Event :=
   if h : channelId.toNat < p.channels.size then
-    let (ch, delivered) := receive p.channels[channelId.toNat]
-    (({ p with channels := p.channels.set channelId.toNat ch h } : Peer).pruneAssemblers channelId,
-      delivered.map (Event.receive p.peerId channelId))
+    -- the channel leaves the peer (`takeAt`), so `receive` holds it once and
+    -- its staged maps change in place: a shared one would be copied whole
+    let peerId := p.peerId
+    let channels := p.channels
+    let p := { p with channels := #[] }
+    let (ch, channels) := takeAt channels channelId.toNat default h
+    let (ch, delivered) := receive ch
+    (({ p with channels := channels.setIfInBounds channelId.toNat ch } : Peer).pruneAssemblers channelId,
+      delivered.map (Event.receive peerId channelId))
   else
     (p, #[])
 
