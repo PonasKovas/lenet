@@ -9,6 +9,7 @@ import Lenet.Proofs.Panic
 import Lenet.Proofs.Resources
 import Lenet.Proofs.Events
 import Lenet.Proofs.HostEvents
+import Lenet.Proofs.Window
 
 /-!
 # LenetProofs

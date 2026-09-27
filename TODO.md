@@ -6,64 +6,36 @@ scenarios pass), unit tests, a lossy-link benchmark, the C distribution,
 and the proofs listed in [DESIGN.md](DESIGN.md#what-is-proven). What
 follows is what is left, roughly in priority order.
 
-## Next step (handoff, 2026-09-26, third and fourth sessions)
+## Next step (handoff, 2026-09-27)
 
 Done this session:
 
-- **Host-level event proof** (`Proofs/HostEvents.lean`). `run_wf`: from
-  `Host.create`, after any sequence of datagrams, `service` calls and
-  application calls (`Op`), every slot's events are well formed and name
-  an existing slot; `EventsWf.disconnect_between` says what that rules
-  out. The per-slot projection works because slot `i` holds peer ID `i`
-  (`IdsOk`). The command fold of `handleDatagram` is now its own function,
-  `Host.handlePeerDatagram`, so the proof can name it (bench unchanged).
-- **Peer count capped at 4095** (test/README.md): found by that proof.
-- **Reliable send order follows ENet** (test/README.md, two entries): a
-  reliable packet held back by congestion or its window now holds back
-  every later one for the pass, and empty ones get the congestion check.
-  This matters for the sender-side span proof below: first sends of a
-  channel's reliable commands now happen strictly in sequence order,
-  which is the fact that argument needs.
-- **Incoming commands follow ENet's refusals** (test/README.md, "Refused
-  commands" and "Remote DISCONNECT keeps the queues"): a refused command
-  gets no ACK and ends its datagram, ACKs depend on the state after the
-  command, and both disconnects drop the queues and channels.
-- **ENet audit** (fourth session): four parallel read-only audits
-  (connection setup, incoming data, outgoing data, timers) compared ENet's
-  C line by line with Lenet. Fixed, each with a unit test that fails
-  without its fix (test/README.md has an entry per item): unreliable
-  numbers used up (a streaming channel went silent after 65535 packets),
-  no ping while unreliable data was queued (a dead remote was never timed
-  out), zero timeout parameters, retransmitted CONNECT, bandwidth
-  recalculation after disconnects in service, data while disconnecting
-  later, ACK of a command queued for resend, the client's throttle
-  parameters, a connect's channel count, the client's own connect event
-  data (0, as ENet; the live `connect` scenario expected the old value),
-  the 32 MB send limit, header bytes, and fragment validation. Four ENet
-  quirks are recorded as not copied.
-- Receiver cap raised to ENet's 32 MB (was 4 MB), the user's call, so
-  sender and receiver agree, with ENet's 32 MB waiting-data budget on the
-  assemblers (proven: `handleFragment_waiting`).
-- A review of the session's commits found reassembly quadratic (made
-  much worse by the 32 MB cap): fixed by taking the peer, the assembler
-  array and the assembler out before changing them (`takeAt`). The
-  sending side was quadratic too: packing now fills every datagram of a
-  service in one pass. Both are in the Performance section.
-- ENet API parity: disconnect_now, peer reset, ping, ping interval,
-  bandwidth limit, channel limit, flush and a peer-info getter.
-- Another proof hazard: when a value must stay unshared, `swapAt` alone is
-  not enough, since the compiler may sink its write; `takeAt` is
-  `@[noinline]` for that reason.
-- A proof hazard worth knowing: never let the kernel compare `h` with a
-  host whose `randomSeed` was advanced (`h.randomSeed + 0x6D2B79F5`). It
-  unfolds the addition one successor at a time, with no heartbeat limit,
-  and the build just gets killed. Go through `random_peers` instead.
+- **Sender-side window span proof** (`Proofs/Window.lean`). `run_span`:
+  from `Host.create`, after any sequence of operations, the reliable
+  commands in flight on a channel lie within seven windows ending at the
+  last one sent. Along the way: first sends go out in sequence order and
+  the window counters count exactly what is in flight. `SpanInv` is the
+  per-peer invariant; every writer of the peer's queues and channels keeps
+  it. `disconnectNow_inv` and `resetPeer_inv` cover the two calls `Op`
+  leaves out.
+- Two code changes the proof needed, both the same behavior on every
+  reachable state: `removeSentReliableCommand` erases the index it found
+  (was `find?` then `erase` by value), and a reliable command too big for
+  any datagram sets `reliableHeld` like every other deferral (fragments are
+  sized to fit, so it does not happen).
+- Proof hazards worth knowing (from earlier sessions, still true): when a
+  value must stay unshared, `swapAt` alone is not enough, since the
+  compiler may sink its write (`takeAt` is `@[noinline]` for that); and
+  never let the kernel compare `h` with a host whose `randomSeed` was
+  advanced (`h.randomSeed + 0x6D2B79F5`): it unfolds the addition one
+  successor at a time and the build gets killed. Go through
+  `random_peers`.
+- Lean tips from this one: a structure literal split over lines must keep
+  its fields aligned, or the parser stops with "expected '}'"; and `split`
+  picks the outermost `if`, so an `if` inside another's condition needs
+  `by_cases` or a lemma over the general shape (`scanStep`, `ite_map_inv`).
 
-The bench ran about 25% under the baseline below all session, old code
-included (tested with the change stashed): the machine was slower, not
-the code. Re-measure before trusting a regression.
-
-Suggested next: the sender-side window span proof, or the typed Lean API.
+Suggested next: the typed Lean API.
 
 Checks before each commit: `lake build` (library and proofs, including the
 no-panic audit in `Proofs/Panic.lean`), `./.lake/build/bin/unit`,
@@ -84,15 +56,9 @@ as bugs show where the corpus is blind.
 
 ## Proofs
 
-- **Sender-side window span.** The in-flight reliable commands of a channel
-  span at most seven windows (the stronger "always in the receiver's
-  window" is false, for ENet too). The argument: first sends go in sequence
-  order (`PackState.reliableHeld`), and the first command of window `w`
-  only goes when windows `w .. w+9` are empty, so what is in flight sits in
-  `w-6 .. w`. The proof needs an invariant tying each channel's
-  `reliableWindows` counts to the peer's in-flight and queued commands,
-  kept by enqueue, packing, ACKs, timeouts and the two disconnects (which
-  now drop the channels, `Peer.resetQueues`).
+- Open: nothing queued. Candidates as they come up: the receiver side of a
+  whole connection (a reliable packet sent is delivered once, in order,
+  given the datagrams arrive) would tie `Window` and `Channel` together.
 
 ## Performance
 

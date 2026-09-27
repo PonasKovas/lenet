@@ -94,6 +94,7 @@ default build and CI compile. The C library never includes them.
 | `Resources`     | the fragment-assembler cap holds and every assembler stays well formed with its memory fixed at creation (`handleFragment_assemblersOk`), the assemblers hold under 64 MB per peer (`handleFragment_waiting`), and a channel stages at most seven windows of reliable packets whatever the sender does (`stagedReliableInv_size`) |
 | `Events`        | every per-peer step keeps the peer's events consistent: connect only when not already connected, receives only while connected, no way back but a disconnect (`handleCommand_wf`, `checkPeerTimeouts_wf`, `pollPeer_wf`) |
 | `HostEvents`    | the same for the whole host: from `Host.create`, after any sequence of received datagrams, `service` calls and application calls, every peer slot's events are consistent, so between two connects of a slot there is always a disconnect (`run_wf`, `EventsWf.disconnect_between`) |
+| `Window`        | the sender side of every channel: from `Host.create`, after any sequence of operations, first sends of reliable commands go out in sequence order (`SpanInv.consecutive`), the window counters count exactly the commands in flight (`SpanInv.counters`), and those lie within seven windows ending at the last one sent (`run_span`, `SpanInv.windows`) |
 | `Panic`         | a build-time scan of every `Lenet.*` definition fails the build on any panicking construct; every division is listed with a proof its divisor is not zero |
 
 A kernel theorem cannot say "does not panic", because in Lean's logic
