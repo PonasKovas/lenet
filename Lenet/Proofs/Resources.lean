@@ -50,8 +50,9 @@ The attacker-controlled memory surfaces and their bounds:
 The mutators of `fragmentAssemblers` are `Peer.handleFragment` (via
 `absorbFragment`, then replacing or erasing the set's assembler) and
 `Peer.receiveOnChannel`, which only prunes (`Peer.reset` clears the
-field), so these theorems cover every growth path; the replay corpus
-asserts the bounds after every service step of every scenario.
+field). `Proofs/ResourcesRun` carries every bound here through every host
+operation from `Host.create` on (`runApp_resources`); the replay corpus
+asserts them after every service step of every scenario too.
 -/
 
 namespace Lenet.Proofs

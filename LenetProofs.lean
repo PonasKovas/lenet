@@ -12,6 +12,7 @@ import Lenet.Proofs.HostEvents
 import Lenet.Proofs.Window
 import Lenet.Proofs.Delivery
 import Lenet.Proofs.Connection
+import Lenet.Proofs.ResourcesRun
 
 /-!
 # LenetProofs

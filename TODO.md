@@ -162,6 +162,11 @@ and docs. Worked through in order; each item says what was done.
     two closing calls, each with a marker disconnect for its slot, and
     `runApp_wf` / `runApp_span` cover those runs.
 22. Resource bounds are per step, not composed over whole runs.
+    **Done:** `Proofs/ResourcesRun` (`runApp_resources`): the assembler
+    cap and footprint, the 64 MB claim bound and the staging bound hold
+    from `Host.create` over any run, the application's closes included.
+    Not proven: the byte budget over staged packets (its counters are
+    kept alongside the maps; unit tests cover it).
 23. `nextDeadline_earliest` only says the fold finds the minimum of the
     list it folds; nothing says `service` before the deadline does no
     work.
