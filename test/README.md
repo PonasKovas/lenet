@@ -35,6 +35,16 @@ C library, not against a spec. There are three parts:
    unsequenced ones, the other echoes them, and the sender checks every
    reliable one comes back once, in order and intact.
 
+5. **Over a bad link** (`c/proxy.c`, `c/stream.c`, `NetStream.lean`).
+   Part 4 again, but through a UDP proxy that drops, duplicates, delays
+   and reorders datagrams from a seed. Both ends send the same mixed
+   stream on three channels (reliable, fragmented reliable, unreliable,
+   unreliable fragments, unsequenced) and check the other's: reliable
+   packets arrive once each and in order, unreliable ones at most once and
+   in order, nothing is corrupt, nothing of either side's is left queued or
+   unacknowledged at the end, and the run ends with a clean DISCONNECT.
+   See "Lossy-link interop" below.
+
 ENet is built out of tree from a checkout at `../enet` (next to this
 repository); the checkout is never modified. CI clones it at the pinned
 revision the traces were recorded with (`5a9c537`, v1.3.18-17).
@@ -53,6 +63,8 @@ LENET_DEBUG=1 ./.lake/build/bin/replay test/traces frag
 make -C test interop           # builds everything, runs all scenarios
 ./test/c/interop connect       # one scenario
 make -C test net-interop       # Lenet.Net against ENet, two processes
+make -C test lossy-interop     # the same through a lossy proxy (about a minute)
+make -C test lossy-interop ROUNDS=1000 PER=4 SEEDS="1 2 3 4 5"   # longer
 
 # re-record the traces (only when scenarios change; not byte-reproducible,
 # since recording uses the real clock and ENet's randomness)
@@ -114,6 +126,78 @@ no real time.
 | `retimeout`    | client-side timeout: server stops responding → retransmit backoff → client timeout event |
 | `mtu576`       | hosts at minimum MTU: 40000-byte fragmented send at MTU 576 (~73 fragments) |
 | `throttleconf` | `enet_peer_throttle_configure` both directions (THROTTLE_CONFIGURE commands) |
+
+## Lossy-link interop
+
+`make -C test lossy-interop` runs every profile of `c/proxy.c` (below) with
+each seed in `SEEDS`, once with a Lenet client and an ENet server and once
+the other way round. A run is `ROUNDS` rounds 10 ms apart; each round sends
+`PER` reliable packets on channels 0 and 1 (every tenth one on channel 0
+fragmented, so several fragment sets are in flight at once), one unreliable
+packet on channel 1, one unreliable-fragment packet on channel 2 and one
+unsequenced packet on channel 2. The defaults are 200 rounds of 2. CI runs
+`PROFILES="light burst"`: heavy is slow and, for ENet itself, not reliable
+enough (see below).
+
+| profile | each way, per datagram                        | timeouts            |
+|---------|-----------------------------------------------|---------------------|
+| `light` | drop 1 in 20, double 1 in 50, 0-20 ms delay   | ENet's defaults     |
+| `heavy` | drop 1 in 5, double 1 in 20, 0-40 ms delay (about a third of round trips fail) | raised on both ends |
+| `burst` | 0-10 ms delay, and everything for 200-500 ms every 2-4 s | ENet's defaults |
+
+Each direction's decisions come from its own generator seeded by the seed,
+one set of draws per datagram, so a failure replays as far as both ends send
+the same datagrams in the same order. Timing moves them, so in practice a
+seed picks the kind of link, not the exact run. When a run fails:
+
+- Both programs print a stall report after 2 s without receiving a packet
+  (queues, oldest unacknowledged command with its tries and resend
+  timeout, each channel's frontiers, staged packets and windows).
+- `PROXY_LOG=<file>` makes the proxy log every datagram and its fate.
+- `make -C test lossy-enet` runs ENet against ENet through the same proxy.
+  If ENet fails alone too, the link is past what ENet was built for, and
+  Lenet is not at fault.
+
+To run one pair by hand:
+
+```sh
+./test/c/stream server 40030 200 2 &
+PROXY_LOG=/tmp/wire.log ./test/c/proxy 40031 40030 7 burst &
+./.lake/build/bin/netstream client 40031 200 2
+```
+
+What the first runs found (2026-09-27): no divergence. 16 light runs, 50
+burst runs and 16 heavy runs at 1000 or 500 rounds of 4, both ways round,
+ended with every reliable packet delivered once and in order. Every failure
+along the way was a link harsher than ENet itself survives, checked each
+time with ENet on both ends:
+
+- **Heavy is 1 in 5 each way, not 1 in 3.** At 1 in 3 each way a command's
+  round trip fails 56% of the time. ENet doubles the resend timeout on every
+  try with no cap, so out of some hundreds of commands one loses seven tries
+  in a row and the peer times out (ENet against ENet: 3 runs of 3). Even at
+  1 in 5 with raised timeouts, ENet against ENet fails about 1 run in 16 at
+  200 rounds of 2 and 1 in 9 at 500 rounds of 4: loss before the first RTT
+  sample leaves resend timeouts starting at 500 ms and doubling to 32 s, or
+  one command late in a run needs nine tries. So heavy stays out of CI.
+- **Bursts every 2-4 s, with no random loss on top.** A burst takes a
+  command's first five tries at once (the resend timeout starts near 30 ms).
+  With bursts every 1-2 s and 1 in 50 random loss, the next one or two tries
+  often die too. By then the throttle is at 0, the window is one MTU, no
+  other command is in flight to bring back an ACK that resets the timeout
+  clock, and the peer times out. ENet against ENet did the same.
+- **The last ACK.** The side receiving the DISCONNECT must see it (with the
+  data the other side sent). The disconnecting side may not hear back: if
+  the link loses the ACK of its DISCONNECT, the other side is gone by then
+  and nothing answers again, in ENet as in Lenet. It waits 5 s and passes,
+  saying so.
+- **Unreliable counts vary a lot**, from all of them to a handful: loss
+  and RTT jitter drive the packet throttle down, and at 0 it lets one
+  unreliable packet in 32 through. Lenet and ENet run the same throttle
+  (`enet_peer_throttle`), but through the proxy the ENet side tends to
+  receive fewer of Lenet's unreliable packets than the other way round, on
+  a clean link too. The likely reason is the Lean program reading ACKs
+  later than the C one (its RTT samples are noisier), not the protocol.
 
 ## Hostile-input probes (`inject` scenario)
 

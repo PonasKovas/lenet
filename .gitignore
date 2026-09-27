@@ -3,4 +3,6 @@ test/.build/
 test/c/harness
 test/c/interop
 test/c/echo
+test/c/stream
+test/c/proxy
 csrc/build/

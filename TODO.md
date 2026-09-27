@@ -16,7 +16,15 @@ leak, the ACK that lost a packet) all lived in the loss and resend paths,
 and every test against real ENet runs on a clean link. The lossy benchmark
 is Lenet against Lenet only, so it cannot catch a divergence from ENet.
 
-### 1. Interop with real ENet over a bad link
+### 1. Interop with real ENet over a bad link (done 2026-09-27)
+
+Done: `make -C test lossy-interop` (in CI with the light and burst
+profiles), `c/proxy.c`, `c/stream.c`, `NetStream.lean`; see test/README.md,
+"Lossy-link interop". No divergence found in long runs both ways round.
+Two changes from the plan below, both because ENet fails against itself
+otherwise (measured with `make -C test lossy-enet`): heavy is 1 in 5 each
+way (about a third of round trips) with raised timeouts, and stays out of
+CI; bursts come every 2-4 s with no random loss on top. The plan as it was:
 
 - A small UDP proxy (C, in `test/c/`, or Lean over `Std.Async.UDP`) that
   sits between the two processes of `make -C test net-interop` and drops,
@@ -167,7 +175,18 @@ Done this session:
   stays, as the defense against ENet senders). The host-level unit test
   now checks the sender holds seq 28672 back while seq 4096 is lost.
 
-Suggested next: task 1 of "What is left before Lenet is done" above.
+- **Task 1 done** (later the same day): Lenet against ENet through a lossy
+  proxy, both ways, see above and test/README.md. `Lenet.Net.PeerInfo`
+  now also reports what is queued and in flight. Tools for task 2: the
+  stream programs take any round count (`ROUNDS=`, `PER=`), print a stall
+  report after 2 s without a packet, and the proxy logs every datagram
+  with `PROXY_LOG=`. A decoder for that log is quick to write (ENet header,
+  then commands with their fixed sizes plus data lengths); the one used
+  here did not stay in the repo.
+
+Suggested next: task 2. For the clock wrap, `Lenet.Net.Endpoint.now` is
+`IO.monoMsNow` and has no offset yet; an endpoint needs a clock offset
+(say `Config.clockStart`) so the test can start it just before 2^32.
 
 Checks before each commit: `lake build` (library and proofs, including the
 no-panic audit in `Proofs/Panic.lean`), `./.lake/build/bin/unit`,

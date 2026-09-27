@@ -125,6 +125,12 @@ structure PeerInfo where
   roundTripTime         : UInt32
   roundTripTimeVariance : UInt32
   packetThrottle        : UInt32
+  /-- Commands queued and not yet sent (ENet's outgoing queues). -/
+  queuedCommands        : Nat
+  /-- Reliable commands sent and not yet acknowledged. -/
+  reliableInFlight      : Nat
+  /-- Bytes of those, as counted against the congestion window. -/
+  reliableDataInTransit : Nat
 
 /-- ENet speaks IPv4 only. -/
 def toAddress : SocketAddress → Option Address
@@ -353,7 +359,9 @@ def info (e : Endpoint) (peer : PeerHandle) : IO (Option PeerInfo) := do
   if !s.isLive peer then return none
   return s.host.peers[peer.slot.toNat]?.map fun p =>
     { address := ofAddress p.address, state := p.state, roundTripTime := p.roundTripTime
-      roundTripTimeVariance := p.roundTripTimeVariance, packetThrottle := p.packetThrottle }
+      roundTripTimeVariance := p.roundTripTimeVariance, packetThrottle := p.packetThrottle
+      queuedCommands := p.outgoingCommands.size, reliableInFlight := p.sentReliableCommands.size
+      reliableDataInTransit := p.reliableDataInTransit }
 
 /-- Sends everything queued now, without running the timers (ENet's
 enet_host_flush). -/

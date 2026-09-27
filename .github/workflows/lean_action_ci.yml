@@ -76,3 +76,6 @@ jobs:
       - run: make -C test interop
       # Lenet.Net (a Lean program) against ENet, in two processes
       - run: make -C test ENET_DIR="$GITHUB_WORKSPACE/../enet" net-interop
+      # The same through a lossy proxy (heavy loss runs locally only, since
+      # ENet fails it against itself now and then: test/README.md)
+      - run: make -C test ENET_DIR="$GITHUB_WORKSPACE/../enet" lossy-interop PROFILES="light burst" SEEDS="1 2"

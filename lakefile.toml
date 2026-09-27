@@ -41,6 +41,12 @@ name = "netinterop"
 root = "NetInterop"
 srcDir = "test"
 
+# The Lean side of the lossy-link test against ENet (make -C test lossy-interop).
+[[lean_exe]]
+name = "netstream"
+root = "NetStream"
+srcDir = "test"
+
 # Benchmark: built in CI, run locally (baseline numbers in TODO.md).
 [[lean_exe]]
 name = "bench"

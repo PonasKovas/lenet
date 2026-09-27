@@ -5,6 +5,11 @@
 #   make c/interop     -> builds the live interop runner
 #   make interop       -> runs every interop scenario
 #   make net-interop   -> Lenet.Net (Lean, own process) against ENet, both ways
+#   make lossy-interop -> the same through a lossy proxy, every profile, both
+#                         ways (ROUNDS, PER, SEEDS, PROFILES to run longer;
+#                         PORT and PORT+1 are used)
+#   make lossy-enet    -> ENet against ENet through the same proxy: when a
+#                         lossy-interop run fails, does ENet fail alone too?
 #   make traces        -> records all scenario traces into traces/, once
 #                         with ENet's clock at 0 and once per CLOCK_OFFSETS
 #   make record SCENARIO=connect
@@ -30,7 +35,7 @@ SCENARIOS := connect send_c2s send_s2c frag fragthen disc_client disc_server idl
 CLOCK_OFFSETS := 65203 4294966963
 INTEROP_SCENARIOS := connect connect_r send frag disconnect disconnect_r timeout checksum bandwidth disclater multip unfrag
 
-.PHONY: all traces record interop net-interop clean FORCE
+.PHONY: all traces record interop net-interop lossy-interop lossy-enet clean FORCE
 
 all: $(HARNESS)
 
@@ -85,5 +90,44 @@ net-interop: c/echo FORCE
 	  test $$c -eq 0 -a $$e -eq 0 || { echo "FAIL net-interop (lenet server)"; exit 1; }
 	@echo "PASS net-interop"
 
+c/stream: c/stream.c $(ENET_LIB)
+	$(CC) $(CFLAGS) c/stream.c $(ENET_LIB) -o $@ -lm
+
+c/proxy: c/proxy.c
+	$(CC) -O1 -g -Wall c/proxy.c -o $@
+
+NETSTREAM := ../.lake/build/bin/netstream
+ROUNDS   ?= 200
+PER      ?= 2
+SEEDS    ?= 1
+PROFILES ?= light heavy burst
+PORT     ?= 40030
+
+# Server, proxy in front of it, client through the proxy; each side checks
+# the other's stream (c/stream.c). A failure prints the seed that replays it.
+# The heavy profile needs longer timeouts than ENet's defaults (c/proxy.c).
+# $(1) = label, $(2) = server command, $(3) = client command
+define lossy_run
+	@for p in $(PROFILES); do for seed in $(SEEDS); do \
+	  echo "lossy-interop: $(1), $$p, seed $$seed"; \
+	  t=; test $$p = heavy && t=long; \
+	  $(2) server $(PORT) $(ROUNDS) $(PER) $$t & s=$$!; \
+	  ./c/proxy $$(($(PORT) + 1)) $(PORT) $$seed $$p & x=$$!; sleep 0.2; \
+	  $(3) client $$(($(PORT) + 1)) $(ROUNDS) $(PER) $$t; c=$$?; wait $$s; e=$$?; \
+	  kill $$x; wait $$x; \
+	  test $$c -eq 0 -a $$e -eq 0 || { echo "FAIL lossy-interop ($(1), $$p, seed $$seed)"; exit 1; }; \
+	done; done
+endef
+
+lossy-interop: c/stream c/proxy FORCE
+	cd .. && lake build netstream
+	$(call lossy_run,lenet client enet server,./c/stream,$(NETSTREAM))
+	$(call lossy_run,enet client lenet server,$(NETSTREAM),./c/stream)
+	@echo "PASS lossy-interop"
+
+lossy-enet: c/stream c/proxy FORCE
+	$(call lossy_run,enet client enet server,./c/stream,./c/stream)
+	@echo "PASS lossy-enet"
+
 clean:
-	rm -rf $(BUILD) $(HARNESS) c/interop c/echo
+	rm -rf $(BUILD) $(HARNESS) c/interop c/echo c/stream c/proxy
