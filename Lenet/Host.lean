@@ -753,13 +753,14 @@ def checkTimeoutsAndPings (h : Host) (now : UInt32) : Host × Array Event :=
 (enet_host_bandwidth_throttle): a peer whose own outgoing bandwidth is below
 the current per-peer share is capped at that rate ("marked"), its rate leaves
 the pool, and the share is recomputed until no more peers get marked.
-Returns the final share and the marked peers. -/
-def incomingBandwidthShare (bandwidth : UInt32) (peers : Array Peer) : UInt32 × Array UInt16 :=
+Returns the final share and the marked peers, a set so each round costs one
+pass over the peers. -/
+def incomingBandwidthShare (bandwidth : UInt32) (peers : Array Peer) : UInt32 × Std.HashSet UInt16 :=
   -- every round but the last marks at least one more peer
-  go bandwidth peers.size 0 #[] (peers.size + 1)
+  go bandwidth peers.size 0 {} (peers.size + 1)
 where
-  go (bandwidth : UInt32) (remaining : Nat) (share : UInt32) (marked : Array UInt16) :
-      Nat → UInt32 × Array UInt16
+  go (bandwidth : UInt32) (remaining : Nat) (share : UInt32) (marked : Std.HashSet UInt16) :
+      Nat → UInt32 × Std.HashSet UInt16
     | 0 => (share, marked)
     | fuel + 1 =>
       if remaining == 0 then (share, marked)
@@ -768,7 +769,7 @@ where
         let (bandwidth', remaining', marked') :=
           peers.foldl (init := (bandwidth, remaining, marked)) fun (bw, rem, m) p =>
             if m.contains p.peerId ∨ (p.outgoingBandwidth > 0 ∧ p.outgoingBandwidth ≥ share) then (bw, rem, m)
-            else (bw - p.outgoingBandwidth, rem - 1, m.push p.peerId)
+            else (bw - p.outgoingBandwidth, rem - 1, m.insert p.peerId)
         if marked'.size > marked.size then go bandwidth' remaining' share marked' fuel
         else (share, marked')
 
@@ -816,6 +817,7 @@ def outgoingThrottleLimits (h : Host) (elapsed : Nat) : Array Peer :=
   if limited.size ≥ connected then peers
   else
     let throttle := budget.throttle
+    let limited : Std.HashSet UInt16 := limited.foldl (·.insert ·) {}
     peers.map fun p =>
       if p.isConnected ∧ !limited.contains p.peerId then limitPeerThrottle p throttle else p
 where
@@ -831,7 +833,9 @@ where
         let (peers', budget', limited') :=
           peers.foldl (init := (#[], budget, limited)) fun (acc, budget, limited) p =>
             let peerBandwidth := p.incomingBandwidth.toNat * elapsed / 1000
-            if !p.isConnected ∨ p.incomingBandwidth == 0 ∨ limited.contains p.peerId ∨
+            -- a peer limited in an earlier round has no bytes queued any more
+            -- (`limitPeerThrottle`), so the last test passes it by
+            if !p.isConnected ∨ p.incomingBandwidth == 0 ∨
                 throttle * p.outgoingDataTotal / Constants.packetThrottleScale.toNat ≤ peerBandwidth then
               (acc.push p, budget, limited)
             else
@@ -859,7 +863,7 @@ def bandwidthThrottle (h : Host) (now : UInt32) : Host :=
         if !h.recalculateBandwidthLimits then peers
         else
           let (share, marked) :=
-            if h.incomingBandwidth == 0 then (0, #[]) else incomingBandwidthShare h.incomingBandwidth connected
+            if h.incomingBandwidth == 0 then (0, {}) else incomingBandwidthShare h.incomingBandwidth connected
           peers.map fun p =>
             if p.isConnected then
               let incoming := if marked.contains p.peerId then p.outgoingBandwidth else share

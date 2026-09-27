@@ -37,11 +37,9 @@ theorem checkAndAdd_rejects {w : UnsequencedWindow} {g : UInt16}
     (hhist : (-sequenceDistance g w.highestGroup).toNat < Constants.unsequencedWindowSize)
     (hbit : w.window[g.toNat % Constants.unsequencedWindowSize]'(modSlot_lt g.toNat) = true) :
     UnsequencedWindow.checkAndAdd w g = none := by
-  unfold UnsequencedWindow.checkAndAdd
-  simp only [hrec, Bool.not_true, Bool.false_eq_true, reduceIte]
-  simp only [hle, reduceIte]
-  simp only [hhist, reduceIte]
-  simp only [hbit, reduceIte]
+  unfold UnsequencedWindow.checkAndAdd UnsequencedWindow.accepts
+  simp only [hrec, Bool.not_true, Bool.false_eq_true, reduceIte, hle, hhist, hbit, decide_true,
+    Bool.not_true, Bool.and_false]
 
 /-- The idempotence of unsequenced dedup: acceptance of `g` writes the ring
 slot that a duplicate `g` probes, so the second lookup always reads
@@ -50,35 +48,26 @@ theorem checkAndAdd_idempotent (w w' : UnsequencedWindow) (g : UInt16)
     (hw : UnsequencedWindow.checkAndAdd w g = some w') :
     UnsequencedWindow.checkAndAdd w' g = none := by
   unfold UnsequencedWindow.checkAndAdd at hw
-  by_cases hfresh : (!w.hasReceived) = true
-  · simp only [hfresh, reduceIte] at hw
+  split at hw
+  · next hacc =>
     cases hw
-    refine checkAndAdd_rejects (by simp) ?_ ?_ ?_
-    · simp [sequenceDistance_self]
-    · simp [sequenceDistance_self, Constants.unsequencedWindowSize]
-    · simp
-  by_cases hnewer : (sequenceDistance g w.highestGroup : Int) > 0
-  · simp only [hfresh, hnewer, Bool.false_eq_true, reduceIte] at hw
-    cases hw
-    refine checkAndAdd_rejects (by simp) ?_ ?_ ?_
-    · simp [sequenceDistance_self]
-    · simp [sequenceDistance_self, Constants.unsequencedWindowSize]
-    · simp
-  · simp only [hfresh, hnewer, Bool.false_eq_true, reduceIte] at hw
-    by_cases hhist : (-sequenceDistance g w.highestGroup).toNat < Constants.unsequencedWindowSize
-    · by_cases hdup : w.window[g.toNat % Constants.unsequencedWindowSize]'
-          (modSlot_lt g.toNat) = true
-      · simp only [hhist, hdup, reduceIte] at hw
-        simp at hw
-      · simp only [hhist, hdup, Bool.false_eq_true, reduceIte] at hw
-        simp only [Option.some.injEq] at hw
-        obtain ⟨rfl⟩ := hw
-        refine checkAndAdd_rejects ?_ hnewer hhist ?_
-        · cases hb : w.hasReceived
-          · simp [hb] at hfresh
-          · rfl
-        · exact set_self (modSlot_lt g.toNat)
-    · simp only [hhist, reduceIte] at hw
-      simp at hw
+    obtain ⟨hg, hr, win⟩ := w
+    unfold UnsequencedWindow.add
+    dsimp only
+    cases hr
+    · refine checkAndAdd_rejects rfl ?_ ?_ (set_self (modSlot_lt g.toNat))
+      · simp [sequenceDistance_self]
+      · simp [sequenceDistance_self, Constants.unsequencedWindowSize]
+    · by_cases hnewer : (sequenceDistance g hg : Int) > 0
+      · simp only [Bool.not_true, Bool.false_eq_true, reduceIte, hnewer]
+        refine checkAndAdd_rejects rfl ?_ ?_ (set_self (modSlot_lt g.toNat))
+        · simp [sequenceDistance_self]
+        · simp [sequenceDistance_self, Constants.unsequencedWindowSize]
+      · simp only [Bool.not_true, Bool.false_eq_true, reduceIte, hnewer]
+        unfold UnsequencedWindow.accepts at hacc
+        simp only [Bool.not_true, Bool.false_eq_true, reduceIte, hnewer, Bool.and_eq_true,
+          decide_eq_true_eq] at hacc
+        exact checkAndAdd_rejects rfl hnewer hacc.1 (set_self (modSlot_lt g.toNat))
+  · cases hw
 
 end Lenet.Proofs

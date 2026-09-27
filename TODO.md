@@ -103,6 +103,18 @@ and docs. Worked through in order; each item says what was done.
     in-flight array; `packOutgoingCommands` rebuilds the whole queue every
     service; the bandwidth throttle's `contains` in a fold is O(P³) worst
     case.
+    **Done in part:** the unsequenced window is split into `accepts` and
+    `add` and marked in place (unsequenced 1200B: ~2425 to ~1485 ns a
+    packet); `clearRange` is a loop; the throttle's rounds are one pass
+    each (a limited peer has no bytes queued, so `limitPeers` needs no
+    membership test; `incomingBandwidthShare` marks into a hash set).
+    **Left, on purpose:** an ACK searches the in-flight array and a timeout
+    scan walks it each service, O(in flight) like ENet's lists (ENet skips
+    the scan until its next timeout); `packOutgoingCommands` walks the whole
+    queue each service where ENet stops reading its reliable list at the
+    first held command. Both are bounded by what the application queued and
+    the sender's window, not by the remote side; splitting the queues would
+    rework most of `Proofs/Window`.
 
 ### Tests that check less than they say
 

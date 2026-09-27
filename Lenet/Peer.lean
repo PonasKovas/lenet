@@ -596,10 +596,12 @@ def handleData (p : Peer) (cmd : Protocol.Command) : Peer × Array Event :=
       let (ch, delivered) := ch.receiveUnreliable cmd.reliableSequenceNumber seq (.unreliable data)
       (ch, delivered.toArray)
   | .sendUnsequenced group data =>
-    match p.unsequencedWindow.checkAndAdd group with
-    | some window =>
-      ({ p with unsequencedWindow := window }, #[.receive p.peerId cmd.channelId (.unsequenced data)])
-    | none => (p, #[])
+    if p.unsequencedWindow.accepts group then
+      -- the window leaves the peer first, so it is marked in place
+      let window := p.unsequencedWindow
+      let p := { p with unsequencedWindow := {} }
+      ({ p with unsequencedWindow := window.add group }, #[.receive p.peerId cmd.channelId (.unsequenced data)])
+    else (p, #[])
   | _ => (p, #[])
 
 /-- Handles an ACK (ENet handle_acknowledge): updates the RTT, retires the

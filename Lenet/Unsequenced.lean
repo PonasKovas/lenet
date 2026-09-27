@@ -31,28 +31,39 @@ theorem modSlot_lt (i : Nat) :
     i % Constants.unsequencedWindowSize < Constants.unsequencedWindowSize :=
   Nat.mod_lt _ (by decide)
 
-/-- Clears a range of skipped slots in the circular buffer `(fromGroup, toGroup)`. -/
-def clearRange (win : Vector Bool Constants.unsequencedWindowSize) (fromGroup : UInt16) (count : Nat) :
-    Vector Bool Constants.unsequencedWindowSize :=
-  (List.range count).foldl (init := win) fun w step =>
-    let slot := (fromGroup.toNat + 1 + step) % Constants.unsequencedWindowSize
-    w.set slot false (modSlot_lt (fromGroup.toNat + 1 + step))
+/-- Clears the `count` slots after `fromGroup` in the circular buffer (the
+groups a newer one skipped). A loop, not a list of the slots. -/
+def clearRange (win : Vector Bool Constants.unsequencedWindowSize) (fromGroup : UInt16) :
+    (count : Nat) → Vector Bool Constants.unsequencedWindowSize
+  | 0 => win
+  | n + 1 =>
+    let slot := (fromGroup.toNat + 1 + n) % Constants.unsequencedWindowSize
+    clearRange (win.set slot false (modSlot_lt (fromGroup.toNat + 1 + n))) fromGroup n
 
-/--
-Deduplicates incoming unsequenced packets.
-- Returns `some updatedWindow` if accepted.
-- Returns `none` if duplicate or stale.
--/
-def checkAndAdd (w : UnsequencedWindow) (group : UInt16) : Option UnsequencedWindow :=
-  let winSize := Constants.unsequencedWindowSize
-  let slot := group.toNat % winSize
-
-  if !w.hasReceived then
-    -- First unsequenced packet ever received:
-    some { highestGroup := group, hasReceived := true,
-           window := w.window.set slot true (modSlot_lt group.toNat) }
+/-- Whether an unsequenced packet of `group` is new: the first one, newer
+than the highest so far, or within the 1024-group history and not seen. -/
+def accepts (w : UnsequencedWindow) (group : UInt16) : Bool :=
+  if !w.hasReceived then true
   else
     let diff := sequenceDistance group w.highestGroup
+    if diff > 0 then true
+    else
+      (-diff).toNat < Constants.unsequencedWindowSize &&
+        !w.window[group.toNat % Constants.unsequencedWindowSize]'(modSlot_lt group.toNat)
+
+/-- The window after taking an unsequenced packet of `group`: its slot
+marked, and when it is the newest, the window slid up to it. The fields
+leave `w` first, so a window held once changes in place. -/
+def add (w : UnsequencedWindow) (group : UInt16) : UnsequencedWindow :=
+  let winSize := Constants.unsequencedWindowSize
+  let slot := group.toNat % winSize
+  match w with
+  | { highestGroup, hasReceived, window } =>
+  if !hasReceived then
+    -- First unsequenced packet ever received:
+    { highestGroup := group, hasReceived := true, window := window.set slot true (modSlot_lt group.toNat) }
+  else
+    let diff := sequenceDistance group highestGroup
     if diff > 0 then
       -- 1. Newer packet:
       let gap := diff.toNat
@@ -61,19 +72,20 @@ def checkAndAdd (w : UnsequencedWindow) (group : UInt16) : Option UnsequencedWin
           Vector.replicate winSize false
         else
           -- Clear only the skipped slots (for gap = 1, clears 0 slots)
-          clearRange w.window w.highestGroup (gap - 1)
-      some { highestGroup := group, hasReceived := true,
-             window := clearedWin.set slot true (modSlot_lt group.toNat) }
+          clearRange window highestGroup (gap - 1)
+      { highestGroup := group, hasReceived := true,
+        window := clearedWin.set slot true (modSlot_lt group.toNat) }
     else
-      -- 2. Older packet: check if within the 1024-packet history
-      let offset := (-diff).toNat
-      if offset < winSize then
-        if w.window[slot]'(modSlot_lt group.toNat) then
-          none -- Duplicate
-        else
-          some { w with window := w.window.set slot true (modSlot_lt group.toNat) }
-      else
-        none -- Stale / too old
+      -- 2. Older packet within the history: mark it
+      { highestGroup, hasReceived, window := window.set slot true (modSlot_lt group.toNat) }
+
+/--
+Deduplicates incoming unsequenced packets.
+- Returns `some updatedWindow` if accepted.
+- Returns `none` if duplicate or stale.
+-/
+def checkAndAdd (w : UnsequencedWindow) (group : UInt16) : Option UnsequencedWindow :=
+  if w.accepts group then some (w.add group) else none
 
 end UnsequencedWindow
 
