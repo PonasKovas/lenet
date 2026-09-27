@@ -3,8 +3,8 @@ Lenet.Net against real ENet over a bad link: the Lean side of
 `make -C test lossy-interop`, whose ENet side is test/c/stream.c and whose
 link is test/c/proxy.c.
 
-  netstream server <port> <rounds> <per round> [long]
-  netstream client <port> <rounds> <per round> [long]
+  netstream server <port> <rounds> <per round> [long] [clock <ms>] [bw <bytes/s>]
+  netstream client <port> <rounds> <per round> [long] [clock <ms>] [bw <bytes/s>]
 
 The stream both ends send, what they check and how the run ends are
 described in test/c/stream.c; this file follows it line by line.
@@ -26,10 +26,11 @@ end Kind
 
 def size (kind ch i : Nat) : Nat :=
   if kind == Kind.reliable then
-    if ch == 0 then (if i % 10 == 3 then 3000 + (i * 337) % 6000 else 5 + (i * 97) % 1000)
+    if ch == 0 then (if i % 10 == 1 then 3000 + (i * 353) % 6000 else 5 + (i * 97) % 1000)
     else 5 + (i * 53) % 400
   else if kind == Kind.unreliable then
-    if ch == 1 then 5 + (i * 71) % 1100 else 1500 + (i * 211) % 3000
+    if ch == 1 then 5 + (i * 71) % 1100
+    else if i % 8 == 0 then 1500 + (i * 211) % 3000 else 5 + (i * 29) % 300
   else if kind == Kind.unsequenced then 5 + (i * 13) % 200
   else 5
 
@@ -43,8 +44,8 @@ def packet (kind ch i : Nat) : ByteArray := Id.run do
   return b
 
 structure Received where
+  /-- Packets per channel and kind, but channel 1's unreliable ones. -/
   total          : Nat
-  rounds         : Nat
   reliable       : Array Nat := #[0, 0]
   /-- Last index seen per channel; none before the first. -/
   unreliable     : Array (Option Nat) := #[none, none, none]
@@ -76,7 +77,7 @@ def Received.receive (r : Received) (ch : Nat) (d : ByteArray) : Except String R
     return { r with unreliable := r.unreliable.set! ch (some i),
                     unreliableSeen := r.unreliableSeen.modify ch (· + 1) }
   else if kind == Kind.unsequenced then
-    if ch != 2 || i ≥ r.rounds || r.unsequenced[i]! then
+    if ch != 2 || i ≥ r.total || r.unsequenced[i]! then
       throw s!"unsequenced packet {i} twice or out of range"
     return { r with unsequenced := r.unsequenced.set! i true, unsequencedSeen := r.unsequencedSeen + 1 }
   else
@@ -98,6 +99,7 @@ structure Run where
   rounds        : Nat
   per           : Nat
   long          : Bool
+  clock         : Option UInt32 := none
   me            : String
   start         : Nat
   lastReceive   : Nat
@@ -118,8 +120,10 @@ def sendRound (e : Endpoint) (conn : Connection) (per k : Nat) : IO Unit := do
   for i in [k * per:(k + 1) * per] do
     let _ ← e.send conn ch1 (.reliable (packet Kind.reliable 1 i))
   let _ ← e.send conn ch1 (.unreliable (packet Kind.unreliable 1 k))
-  let _ ← e.send conn ch2 (.unreliableFragment (packet Kind.unreliable 2 k))
-  let _ ← e.send conn ch2 (.unsequenced (packet Kind.unsequenced 2 k))
+  for i in [k * per:(k + 1) * per] do
+    let _ ← e.send conn ch2 (.unreliableFragment (packet Kind.unreliable 2 i))
+  for i in [k * per:(k + 1) * per] do
+    let _ ← e.send conn ch2 (.unsequenced (packet Kind.unsequenced 2 i))
 
 /-- What the host holds for the connection: printed when nothing has come in
 for a while, to see where a stuck link is stuck. -/
@@ -127,7 +131,7 @@ def stallReport (e : Endpoint) (st : Run) : IO Unit := do
   let some conn := st.conn | return
   let s ← e.state.get
   let some p := s.host.peers[conn.peer.slot.toNat]? | return
-  let now ← Endpoint.now
+  let now ← e.now
   let cmd (c : OutgoingCommand) :=
     s!"ch {c.command.channelId} seq {c.command.reliableSequenceNumber} tries {c.sendAttempts} rto {c.roundTripTimeout} age {Time.difference now c.sentTime}"
   let chans := p.channels.toList.map fun c =>
@@ -150,7 +154,8 @@ partial def loop (e : Endpoint) (st : Run) : IO UInt32 := do
     stallReport e st
     st := { st with lastReport := now }
   if let some conn := st.conn then
-    while st.sentRounds < st.rounds && now - st.connectedAt ≥ st.sentRounds * 10 do
+    let queued := (← e.info conn.peer).map (·.queuedCommands) |>.getD 0
+    if st.sentRounds < st.rounds && now - st.connectedAt ≥ st.sentRounds * 10 && queued < 1000 then
       sendRound e conn st.per st.sentRounds
       st := { st with sentRounds := st.sentRounds + 1 }
     if st.sentRounds == st.rounds && st.received.allReliable && (← idle e conn.peer) then
@@ -182,14 +187,26 @@ partial def loop (e : Endpoint) (st : Run) : IO UInt32 := do
       IO.eprintln s!"FAIL: {st.me}: DISCONNECT (data {data}) before the end: {r.reliable[0]!}+{r.reliable[1]!} of {r.total} reliable, done {r.done}"
       return 1
     let secs := (← IO.monoMsNow) - st.start
-    IO.println s!"  {st.me}: {r.total} reliable per channel in order; unreliable {r.unreliableSeen[1]!}+{r.unreliableSeen[2]!}, unsequenced {r.unsequencedSeen} of {st.rounds}; clean end, {secs / 1000}.{secs % 1000 / 100} s"
+    let hostNow ← e.now
+    let clock := match st.clock with
+      | some c => s!"; clock {c} to {hostNow}"
+      | none => ""
+    IO.println s!"  {st.me}: {r.total} reliable per channel in order; unreliable {r.unreliableSeen[1]!}+{r.unreliableSeen[2]!}, unsequenced {r.unsequencedSeen} of {r.total}; clean end, {secs / 1000}.{secs % 1000 / 100} s{clock}"
     -- let the ACK of the DISCONNECT go out
     if st.isServer then let _ ← e.serviceFor 100
     return 0
   | none => loop e st
 
-def run (isServer : Bool) (port : UInt16) (rounds per : Nat) (long : Bool) : IO UInt32 := do
-  let e ← Endpoint.bind (loopback (if isServer then port else 0)) { peerCount := 4, channelLimit := 3 }
+structure Options where
+  long      : Bool := false
+  clock     : Option UInt32 := none
+  bandwidth : UInt32 := 0
+
+def run (isServer : Bool) (port : UInt16) (rounds per : Nat) (o : Options) : IO UInt32 := do
+  let long := o.long
+  let e ← Endpoint.bind (loopback (if isServer then port else 0))
+    { peerCount := 4, channelLimit := 3, clock := o.clock, incomingBandwidth := o.bandwidth,
+      outgoingBandwidth := o.bandwidth }
   let me := if isServer then "lenet server" else "lenet client"
   if !isServer then
     match ← e.connect (loopback port) 3 7 with
@@ -197,17 +214,27 @@ def run (isServer : Bool) (port : UInt16) (rounds per : Nat) (long : Bool) : IO 
     | .error err => IO.eprintln s!"FAIL: connect: {err}"; return 1
   let start ← IO.monoMsNow
   loop e
-    { isServer, rounds, per, long, me, start, lastReceive := start, received := { total := rounds * per, rounds, unsequenced := .replicate rounds false } }
+    { isServer, rounds, per, long, clock := o.clock, me, start, lastReceive := start, received := { total := rounds * per, unsequenced := .replicate (rounds * per) false } }
 
 end NetStream
 
 def usage : IO UInt32 := do
-  IO.eprintln "usage: netstream server|client <port> <rounds> <per round> [long]"; return 2
+  IO.eprintln "usage: netstream server|client <port> <rounds> <per round> [long] [clock <ms>] [bw <bytes/s>]"
+  return 2
+
+def options (o : NetStream.Options) : List String → Option NetStream.Options
+  | [] => some o
+  | "long" :: rest => options { o with long := true } rest
+  | "clock" :: ms :: rest => ms.toNat?.bind fun ms => options { o with clock := some ms.toUInt32 } rest
+  | "bw" :: b :: rest => b.toNat?.bind fun b => options { o with bandwidth := b.toUInt32 } rest
+  | _ => none
 
 def main (args : List String) : IO UInt32 := do
-  let (args, long) := if args.getLast? == some "long" then (args.dropLast, true) else (args, false)
   match args with
-  | [role, port, rounds, per] =>
-    if role != "server" && role != "client" then usage
-    else NetStream.run (role == "server") port.toNat!.toUInt16 rounds.toNat! per.toNat! long
+  | role :: port :: rounds :: per :: rest =>
+    match options {} rest with
+    | some o =>
+      if role != "server" && role != "client" then usage
+      else NetStream.run (role == "server") port.toNat!.toUInt16 rounds.toNat! per.toNat! o
+    | none => usage
   | _ => usage

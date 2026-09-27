@@ -1,11 +1,17 @@
 # Open work
 
-Done so far: full ENet 1.3.x interop except compression (21 golden-trace
-scenarios, each recorded at three clock starts, and 12 live interop
-scenarios pass), unit tests, a lossy-link benchmark, the C distribution,
-and the proofs listed in [DESIGN.md](DESIGN.md#what-is-proven).
+**The engine is done (2026-09-27).** Both tasks below pass locally, both
+ways round; the lossy and clock-wrap steps are in CI but have not run
+there yet (nothing pushed). What remains in this file is history, notes,
+known limits and things decided against.
 
-## What is left before Lenet is done (decided 2026-09-27)
+Done: full ENet 1.3.x interop except compression (21 golden-trace
+scenarios, each recorded at three clock starts, and 12 live interop
+scenarios pass), Lenet against ENet over lossy links and through every
+wrap, unit tests, a lossy-link benchmark, the C distribution, and the
+proofs listed in [DESIGN.md](DESIGN.md#what-is-proven).
+
+## The last two tasks (decided 2026-09-27, both done the same day)
 
 Two tasks, then the engine is done. Everything else in this file is
 history, notes, or explicitly not planned (see the end of this section).
@@ -45,7 +51,15 @@ CI; bursts come every 2-4 s with no random loss on top. The plan as it was:
 - For every divergence: triage in test/README.md ("Divergence triage"),
   fix Lenet or record the ENet bug, and pin it with a unit test.
 
-### 2. Long runs through the wraps
+### 2. Long runs through the wraps (done 2026-09-27)
+
+Done: `make -C test lossy-wrap` (94500 packets of each kind per channel,
+two fragment sets straddling the reliable wraps) and `make -C test
+lossy-clock` (both clocks start 10 s before 2^32, bandwidth limits on),
+light and burst loss, both ways round, two seeds each; see test/README.md.
+Both are local only (a minute or more each way); CI runs a short clock
+wrap. `Lenet.Net.Config.clock` sets an endpoint's clock. No divergence
+found. The plan as it was:
 
 - More than 65536 reliable packets per channel through the proxy of task
   1, against ENet both ways, so the 16-bit sequence numbers wrap for real
@@ -184,9 +198,16 @@ Done this session:
   then commands with their fixed sizes plus data lengths); the one used
   here did not stay in the repo.
 
-Suggested next: task 2. For the clock wrap, `Lenet.Net.Endpoint.now` is
-`IO.monoMsNow` and has no offset yet; an endpoint needs a clock offset
-(say `Config.clockStart`) so the test can start it just before 2^32.
+- **Task 2 done** (later still): the stream programs send `PER` of every
+  kind per round (so channel 2's unreliable counter and the unsequenced
+  group wrap too), hold new rounds while more than 1000 commands are
+  queued (without that the Lean program fell behind, then sent hundreds of
+  rounds without servicing and the peer timed out), and take `clock <ms>`
+  and `bw <bytes/s>`. `Lenet.Net.Endpoint.now` now takes the endpoint.
+
+Suggested next: push and watch the new CI steps (the lossy runs have only
+run on this machine). After that, nothing is planned; see "Not planned".
+
 
 Checks before each commit: `lake build` (library and proofs, including the
 no-panic audit in `Proofs/Panic.lean`), `./.lake/build/bin/unit`,

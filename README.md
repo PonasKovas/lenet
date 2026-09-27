@@ -116,10 +116,13 @@ lake build net && ./.lake/build/bin/net                     # Lenet.Net over UDP
 make -C csrc check                                          # C API smoke test
 make -C test interop                                        # live interop (needs ENet in ../enet)
 make -C test net-interop                                    # Lenet.Net against ENet, two processes
+make -C test lossy-interop                                  # the same over a lossy link
+make -C test lossy-wrap lossy-clock                         # through every wrap (long, local)
 lake build bench && ./.lake/build/bin/bench                 # benchmark
 ```
 
-CI runs all of it except the benchmark, which it only builds. How the ENet
+CI runs all of it except the benchmark, which it only builds, and the two
+long runs (it runs a short clock wrap instead). How the ENet
 comparison works is explained in [test/README.md](test/README.md).
 
 ## Layout

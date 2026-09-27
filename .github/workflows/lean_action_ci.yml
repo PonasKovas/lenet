@@ -79,3 +79,5 @@ jobs:
       # The same through a lossy proxy (heavy loss runs locally only, since
       # ENet fails it against itself now and then: test/README.md)
       - run: make -C test ENET_DIR="$GITHUB_WORKSPACE/../enet" lossy-interop PROFILES="light burst" SEEDS="1 2"
+      # Both clocks cross 2^32 a second in (make -C test lossy-clock is the long one)
+      - run: make -C test ENET_DIR="$GITHUB_WORKSPACE/../enet" lossy-interop PROFILES="light burst" SEEDS=3 STREAM_OPTS="clock 4294966296 bw 1000000"

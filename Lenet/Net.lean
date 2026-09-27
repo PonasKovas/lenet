@@ -117,6 +117,10 @@ structure Config where
   checksum          : Bool := false
   /-- Seed for connect IDs; by default taken from the clock. -/
   seed              : Option UInt32 := none
+  /-- What the host's millisecond clock reads at `bind`; by default the
+  monotonic clock's value. It wraps at 2^32 like ENet's, so a test can
+  start it just before the wrap (ENet's enet_time_set). -/
+  clock             : Option UInt32 := none
 
 /-- A peer as seen from its endpoint. -/
 structure PeerInfo where
@@ -171,6 +175,8 @@ structure Endpoint where
   inbox  : IO.Ref Inbox
   /-- Who to wake when the receive completes, while `service` sleeps. -/
   waiter : IO.Ref (Option (Std.Async.Waiter Unit))
+  /-- The host's clock minus the monotonic clock (`Config.clock`). -/
+  clockOffset : UInt32
 
 namespace State
 
@@ -228,7 +234,7 @@ end State
 namespace Endpoint
 
 /-- The clock the host runs on, in milliseconds. It wraps like ENet's. -/
-def now : IO UInt32 := return (← IO.monoMsNow).toUInt32
+def now (e : Endpoint) : IO UInt32 := return (← IO.monoMsNow).toUInt32 + e.clockOffset
 
 /-- The largest datagram ENet sends. -/
 def maximumDatagram : UInt64 := Constants.maximumMtu.toUInt64
@@ -259,7 +265,8 @@ def bind (address : SocketAddress) (config : Config := {}) : IO Endpoint := do
   let state ← IO.mkRef { host, live := Array.replicate host.peers.size none }
   let waiter ← IO.mkRef none
   let inbox ← IO.mkRef (← arm socket waiter)
-  return ⟨socket, state, inbox, waiter⟩
+  let mono := (← IO.monoMsNow).toUInt32
+  return ⟨socket, state, inbox, waiter, config.clock.getD mono - mono⟩
 
 /-- The address the socket is bound to. -/
 def localAddress (e : Endpoint) : IO SocketAddress := e.socket.getSockName
@@ -366,7 +373,7 @@ def info (e : Endpoint) (peer : PeerHandle) : IO (Option PeerInfo) := do
 /-- Sends everything queued now, without running the timers (ENet's
 enet_host_flush). -/
 def flush (e : Endpoint) : IO Unit := do
-  let now ← now
+  let now ← e.now
   let datagrams ← e.state.modifyGet fun s =>
     let (host, datagrams, events) := s.host.pollOutgoing now
     (datagrams, { s with host }.push events)
@@ -381,14 +388,14 @@ def popEvent (e : Endpoint) : IO (Option Event) :=
 /-- Feeds one received datagram to the host. -/
 def deliver (e : Endpoint) (bytes : ByteArray) (from? : Option SocketAddress) : IO Unit := do
   let some from_ := from? >>= toAddress | return
-  let now ← now
+  let now ← e.now
   e.state.modify fun s =>
     let (host, events) := s.host.handleDatagram now from_ bytes
     { s with host }.push events
 
 /-- Runs the host's timers and sends what they and the queues produce. -/
 def serviceHost (e : Endpoint) : IO Unit := do
-  let now ← now
+  let now ← e.now
   let datagrams ← e.state.modifyGet fun s =>
     let (host, datagrams, events) := s.host.service now
     (datagrams, { s with host }.push events)
@@ -444,12 +451,12 @@ when the time is up with nothing to report; 0 checks once without waiting.
 Call it regularly: nothing is sent or received in between. -/
 def service (e : Endpoint) (timeout : UInt32 := 0) : IO (Option Event) := do
   if let some ev ← e.popEvent then return some ev
-  let start ← now
+  let start ← e.now
   for _ in [0:timeout.toNat + extraRounds] do
     e.drain 256
     e.serviceHost
     if let some ev ← e.popEvent then return some ev
-    let t ← now
+    let t ← e.now
     let elapsed := Time.difference t start
     if elapsed ≥ timeout then return none
     -- sleep until a datagram comes, the host's next timer, or the timeout
@@ -465,10 +472,10 @@ servicing until then). Each round either reports an event or services until
 the time is up, so there are at most as many rounds as events, bounded like
 `service`'s. -/
 def serviceFor (e : Endpoint) (timeout : UInt32) : IO (Array Event) := do
-  let start ← now
+  let start ← e.now
   let mut acc := #[]
   for _ in [0:timeout.toNat + extraRounds] do
-    let elapsed := Time.difference (← now) start
+    let elapsed := Time.difference (← e.now) start
     if elapsed ≥ timeout then break
     match ← e.service (timeout - elapsed) with
     | some ev => acc := acc.push ev

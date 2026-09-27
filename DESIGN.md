@@ -125,11 +125,12 @@ build-time audit rather than a theorem.
   (with ENet as the oracle) plus the proofs. Random fuzzing would cost more
   than it finds here.
 - **Not covered by traces:** sequence-number wrap (it takes ~65k commands
-  per channel; the proofs cover it) and packet loss or reordering
-  (recording those is not deterministic). The benchmark's lossy link covers
-  loss: it drops every n-th datagram between two Lenet hosts and checks
-  that reliable packets all arrive, once and in order, and that nothing is
-  left in transit afterwards.
+  per channel) and packet loss or reordering (recording those is not
+  deterministic). Live runs against ENet cover both instead: a seeded
+  proxy drops, doubles, delays and reorders datagrams between the two,
+  both ends check what arrives, and the long runs take every 16-bit
+  counter and the 32-bit clock through their wraps (test/README.md,
+  "Lossy-link interop"). The proofs cover the wrap arithmetic too.
 
 ## Resource bounds
 

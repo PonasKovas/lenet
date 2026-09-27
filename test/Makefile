@@ -10,6 +10,10 @@
 #                         PORT and PORT+1 are used)
 #   make lossy-enet    -> ENet against ENet through the same proxy: when a
 #                         lossy-interop run fails, does ENet fail alone too?
+#   make lossy-wrap    -> 94500 packets of each kind per channel, so every
+#                         16-bit counter wraps (about 2 min a run, local)
+#   make lossy-clock   -> both clocks start 10 s before the 32-bit wrap and
+#                         run 30 s past it, with bandwidth limits (local)
 #   make traces        -> records all scenario traces into traces/, once
 #                         with ENet's clock at 0 and once per CLOCK_OFFSETS
 #   make record SCENARIO=connect
@@ -35,7 +39,7 @@ SCENARIOS := connect send_c2s send_s2c frag fragthen disc_client disc_server idl
 CLOCK_OFFSETS := 65203 4294966963
 INTEROP_SCENARIOS := connect connect_r send frag disconnect disconnect_r timeout checksum bandwidth disclater multip unfrag
 
-.PHONY: all traces record interop net-interop lossy-interop lossy-enet clean FORCE
+.PHONY: all traces record interop net-interop lossy-interop lossy-enet lossy-wrap lossy-clock clean FORCE
 
 all: $(HARNESS)
 
@@ -102,6 +106,8 @@ PER      ?= 2
 SEEDS    ?= 1
 PROFILES ?= light heavy burst
 PORT     ?= 40030
+# more options for both ends, e.g. "clock 4294957296 bw 4000000" (c/stream.c)
+STREAM_OPTS ?=
 
 # Server, proxy in front of it, client through the proxy; each side checks
 # the other's stream (c/stream.c). A failure prints the seed that replays it.
@@ -111,9 +117,9 @@ define lossy_run
 	@for p in $(PROFILES); do for seed in $(SEEDS); do \
 	  echo "lossy-interop: $(1), $$p, seed $$seed"; \
 	  t=; test $$p = heavy && t=long; \
-	  $(2) server $(PORT) $(ROUNDS) $(PER) $$t & s=$$!; \
+	  $(2) server $(PORT) $(ROUNDS) $(PER) $$t $(STREAM_OPTS) & s=$$!; \
 	  ./c/proxy $$(($(PORT) + 1)) $(PORT) $$seed $$p & x=$$!; sleep 0.2; \
-	  $(3) client $$(($(PORT) + 1)) $(ROUNDS) $(PER) $$t; c=$$?; wait $$s; e=$$?; \
+	  $(3) client $$(($(PORT) + 1)) $(ROUNDS) $(PER) $$t $(STREAM_OPTS); c=$$?; wait $$s; e=$$?; \
 	  kill $$x; wait $$x; \
 	  test $$c -eq 0 -a $$e -eq 0 || { echo "FAIL lossy-interop ($(1), $$p, seed $$seed)"; exit 1; }; \
 	done; done
@@ -124,6 +130,15 @@ lossy-interop: c/stream c/proxy FORCE
 	$(call lossy_run,lenet client enet server,./c/stream,$(NETSTREAM))
 	$(call lossy_run,enet client lenet server,$(NETSTREAM),./c/stream)
 	@echo "PASS lossy-interop"
+
+# Past 94261 packets on channel 0 two fragment sets straddle the wraps
+# (c/stream.c). Heavy loss would take too long here.
+lossy-wrap:
+	$(MAKE) lossy-interop ROUNDS=2700 PER=35 PROFILES="light burst"
+
+# 2^32 - 10000: the clocks wrap 10 s in, under traffic
+lossy-clock:
+	$(MAKE) lossy-interop ROUNDS=4000 PER=2 PROFILES="light burst" STREAM_OPTS="clock 4294957296 bw 1000000"
 
 lossy-enet: c/stream c/proxy FORCE
 	$(call lossy_run,enet client enet server,./c/stream,./c/stream)

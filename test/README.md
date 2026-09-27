@@ -158,6 +158,34 @@ seed picks the kind of link, not the exact run. When a run fails:
   If ENet fails alone too, the link is past what ENet was built for, and
   Lenet is not at fault.
 
+Two longer runs go through the wraps (local only, the commands print
+their results the same way):
+
+- `make -C test lossy-wrap`: 2700 rounds of 35, so 94500 packets of each
+  kind per channel. Every 16-bit counter wraps: the reliable sequence
+  numbers of channels 0 and 1, channel 2's unreliable one (channel 1's
+  starts over at every reliable packet) and the unsequenced group. Channel
+  0's packet sizes are picked so that two fragment sets straddle the
+  reliable wraps (packets 47131 and 94261). Light and burst loss, about a
+  minute each way.
+- `make -C test lossy-clock`: both ends' millisecond clocks start 10 s
+  before 2^32 (`clock`: enet_time_set for ENet, `Config.clock` for
+  Lenet.Net) and run 30 s past it under light and burst loss, with 1 MB/s
+  bandwidth limits so the bandwidth throttle runs too. RTT samples,
+  resend timeouts, pings and throttle epochs all cross the wrap. CI runs a
+  short version (the wrap 1 s into a default run).
+
+Senders hold new rounds while more than 1000 commands wait to go out, so a
+long run measures the link, not how far the Lean program falls behind.
+
+What these found (2026-09-27): no divergence. Both long runs pass both
+ways round under light and burst loss (two seeds each). To check they can
+fail: with `Time.difference` made naive (plain distance, no wrap) the short
+clock run times out at the wrap; with `Time.less` made naive it still
+passes, since the only effect is that ACKs of commands sent just before
+the wrap are taken for ACKs from the future and ignored, and the resends
+after the wrap are acknowledged normally.
+
 To run one pair by hand:
 
 ```sh

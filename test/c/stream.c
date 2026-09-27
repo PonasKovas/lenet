@@ -3,15 +3,23 @@
  * real ENet host in its own process, talking to Lenet.Net
  * (test/NetStream.lean) through test/c/proxy.c.
  *
- *   stream server <port> <rounds> <per round> [long]
- *   stream client <port> <rounds> <per round> [long]
+ *   stream server <port> <rounds> <per round> [long] [clock <ms>] [bw <bytes/s>]
+ *   stream client <port> <rounds> <per round> [long] [clock <ms>] [bw <bytes/s>]
  *
  * Both ends send the same stream and check the other's. Round r (one every
- * 10 ms from the connect on) sends, with P = <per round>:
+ * 10 ms from the connect on, later while more than 1000 commands wait to
+ * go out, and one per turn of the loop) sends, with P = <per round>:
  *   channel 0: reliable packets rP .. rP+P-1, every tenth one fragmented
+ *              (sized so that the sets of packets 47131 and 94261 straddle
+ *              the reliable sequence number's wraps: sequence numbers
+ *              65533-65539 and 131071-131076, counting from 1)
  *   channel 1: reliable packets rP .. rP+P-1, then unreliable packet r
- *   channel 2: unreliable-fragment packet r (always fragmented), then
- *              unsequenced packet r
+ *   channel 2: unreliable packets rP .. rP+P-1, sent as unreliable
+ *              fragments (every eighth one is big enough to fragment),
+ *              then unsequenced packets rP .. rP+P-1
+ * So with rounds * P past 65536 every 16-bit counter wraps: the reliable
+ * ones of channels 0 and 1, the unreliable one of channel 2 (channel 1's
+ * starts over at each reliable packet) and the unsequenced group.
  * A packet is its kind (byte 0: 0 reliable, 1 unreliable, 2 unsequenced,
  * 3 done), its index (bytes 1-4, big-endian) and filler bytes; its size
  * and filler follow from kind, channel and index (`size`, `fill`).
@@ -30,7 +38,10 @@
  * as in Lenet), so after 5 s the client passes without it and says so.
  *
  * `long` sets both ends' timeouts to limit 256, minimum 20 s, maximum
- * 60 s (enet_peer_timeout), for links too lossy for the defaults.
+ * 60 s (enet_peer_timeout), for links too lossy for the defaults. `clock`
+ * starts the host's millisecond clock at <ms> (enet_time_set), so a run
+ * can cross the 32-bit wrap; `bw` gives the host that incoming and
+ * outgoing bandwidth, so the bandwidth throttle runs.
  *
  * Exit code 0 = passed. Gives up after 90 s without receiving a packet
  * (longer than any timeout, so a stuck link ends in a timeout first).
@@ -53,10 +64,11 @@ static uint32_t now_ms(void) {
 static size_t size(int kind, int ch, uint32_t i) {
     switch (kind) {
     case RELIABLE:
-        if (ch == 0) return i % 10 == 3 ? 3000 + (i * 337) % 6000 : 5 + (i * 97) % 1000;
+        if (ch == 0) return i % 10 == 1 ? 3000 + (i * 353) % 6000 : 5 + (i * 97) % 1000;
         return 5 + (i * 53) % 400;
     case UNRELIABLE:
-        return ch == 1 ? 5 + (i * 71) % 1100 : 1500 + (i * 211) % 3000;
+        if (ch == 1) return 5 + (i * 71) % 1100;
+        return i % 8 == 0 ? 1500 + (i * 211) % 3000 : 5 + (i * 29) % 300;
     case UNSEQUENCED:
         return 5 + (i * 13) % 200;
     default:
@@ -79,8 +91,7 @@ static void send_one(ENetPeer *peer, int kind, int ch, uint32_t i, enet_uint32 f
 }
 
 typedef struct {
-    uint32_t total;             /* reliable packets per channel */
-    uint32_t rounds;
+    uint32_t total;             /* packets per channel and kind, but channel 1's unreliable */
     uint32_t reliable[2];       /* next expected, channels 0 and 1 */
     int64_t unreliable[3];      /* last seen, channels 1 and 2 */
     uint32_t unreliableSeen[3];
@@ -122,7 +133,7 @@ static const char *receive(Received *r, int ch, const uint8_t *d, size_t n) {
         r->unreliableSeen[ch]++;
         return NULL;
     case UNSEQUENCED:
-        if (ch != 2 || i >= r->rounds || r->unsequenced[i]) {
+        if (ch != 2 || i >= r->total || r->unsequenced[i]) {
             snprintf(err, sizeof err, "unsequenced packet %u twice or out of range", i);
             return err;
         }
@@ -137,6 +148,10 @@ static const char *receive(Received *r, int ch, const uint8_t *d, size_t n) {
 }
 
 static int all_reliable(const Received *r) { return r->reliable[0] == r->total && r->reliable[1] == r->total; }
+
+static size_t queued(ENetPeer *p) {
+    return enet_list_size(&p->outgoingCommands) + enet_list_size(&p->outgoingSendReliableCommands);
+}
 
 static int idle(const ENetPeer *p) {
     return enet_list_empty(&p->sentReliableCommands) && enet_list_empty(&p->outgoingSendReliableCommands) &&
@@ -171,26 +186,32 @@ static void stall_report(const char *me, const Received *r, uint32_t sentRounds,
     fprintf(stderr, "\n");
 }
 
-static int run(int isServer, uint16_t port, uint32_t rounds, uint32_t per, int longTimeouts) {
+typedef struct {
+    int longTimeouts;
+    int setClock;
+    uint32_t clock, bandwidth;
+} Options;
+
+static int run(int isServer, uint16_t port, uint32_t rounds, uint32_t per, Options o) {
+    if (o.setClock) enet_time_set(o.clock);
     ENetAddress a;
     memset(&a, 0, sizeof a);
     enet_address_set_host(&a, "127.0.0.1");
     a.port = port;
-    ENetHost *host = enet_host_create(isServer ? &a : NULL, 4, 3, 0, 0);
+    ENetHost *host = enet_host_create(isServer ? &a : NULL, 4, 3, o.bandwidth, o.bandwidth);
     if (!host) { fprintf(stderr, "FATAL: enet_host_create\n"); return 2; }
     ENetPeer *peer = NULL;
     if (!isServer) {
         peer = enet_host_connect(host, &a, 3, 7);
         if (!peer) { fprintf(stderr, "FATAL: enet_host_connect\n"); return 2; }
-        if (longTimeouts) enet_peer_timeout(peer, 256, 20000, 60000);
+        if (o.longTimeouts) enet_peer_timeout(peer, 256, 20000, 60000);
     }
     const char *me = isServer ? "enet server" : "enet client";
     Received r;
     memset(&r, 0, sizeof r);
     r.total = rounds * per;
     r.unreliable[1] = r.unreliable[2] = -1;
-    r.rounds = rounds;
-    r.unsequenced = calloc(rounds ? rounds : 1, 1);
+    r.unsequenced = calloc(r.total ? r.total : 1, 1);
 
     uint32_t start = now_ms(), connectedAt = 0, lastReceive = start, lastReport = 0;
     uint32_t sentRounds = 0;
@@ -202,15 +223,17 @@ static int run(int isServer, uint16_t port, uint32_t rounds, uint32_t per, int l
             lastReport = now_ms();
         }
         if (connected) {
-            while (sentRounds < rounds && now_ms() - connectedAt >= sentRounds * 10) {
+            if (sentRounds < rounds && now_ms() - connectedAt >= sentRounds * 10 && queued(peer) < 1000) {
                 uint32_t k = sentRounds;
                 for (uint32_t i = k * per; i < (k + 1) * per; i++)
                     send_one(peer, RELIABLE, 0, i, ENET_PACKET_FLAG_RELIABLE);
                 for (uint32_t i = k * per; i < (k + 1) * per; i++)
                     send_one(peer, RELIABLE, 1, i, ENET_PACKET_FLAG_RELIABLE);
                 send_one(peer, UNRELIABLE, 1, k, 0);
-                send_one(peer, UNRELIABLE, 2, k, ENET_PACKET_FLAG_UNRELIABLE_FRAGMENT);
-                send_one(peer, UNSEQUENCED, 2, k, ENET_PACKET_FLAG_UNSEQUENCED);
+                for (uint32_t i = k * per; i < (k + 1) * per; i++)
+                    send_one(peer, UNRELIABLE, 2, i, ENET_PACKET_FLAG_UNRELIABLE_FRAGMENT);
+                for (uint32_t i = k * per; i < (k + 1) * per; i++)
+                    send_one(peer, UNSEQUENCED, 2, i, ENET_PACKET_FLAG_UNSEQUENCED);
                 sentRounds++;
             }
             if (sentRounds == rounds && all_reliable(&r) && idle(peer)) {
@@ -238,7 +261,7 @@ static int run(int isServer, uint16_t port, uint32_t rounds, uint32_t per, int l
             case ENET_EVENT_TYPE_CONNECT:
                 if (connected) { fprintf(stderr, "FAIL: %s: a second connection\n", me); return 1; }
                 peer = ev.peer;
-                if (longTimeouts) enet_peer_timeout(peer, 256, 20000, 60000);
+                if (o.longTimeouts) enet_peer_timeout(peer, 256, 20000, 60000);
                 connected = 1;
                 connectedAt = now_ms();
                 break;
@@ -255,9 +278,11 @@ static int run(int isServer, uint16_t port, uint32_t rounds, uint32_t per, int l
                             me, ev.data, r.reliable[0], r.reliable[1], r.total, r.done);
                     return 1;
                 }
-                printf("  %s: %u reliable per channel in order; unreliable %u+%u, unsequenced %u of %u; clean end, %.1f s\n",
-                       me, r.total, r.unreliableSeen[1], r.unreliableSeen[2], r.unsequencedSeen, rounds,
+                printf("  %s: %u reliable per channel in order; unreliable %u+%u, unsequenced %u of %u; clean end, %.1f s",
+                       me, r.total, r.unreliableSeen[1], r.unreliableSeen[2], r.unsequencedSeen, r.total,
                        (double)(now_ms() - start) / 1000);
+                if (o.setClock) printf("; clock %u to %u", o.clock, enet_time_get());
+                printf("\n");
                 enet_host_destroy(host);
                 free(r.unsequenced);
                 return 0;
@@ -272,14 +297,18 @@ static int run(int isServer, uint16_t port, uint32_t rounds, uint32_t per, int l
 }
 
 int main(int argc, char **argv) {
-    if (argc < 5 || argc > 6 || (strcmp(argv[1], "server") && strcmp(argv[1], "client")) ||
-        (argc == 6 && strcmp(argv[5], "long"))) {
-        fprintf(stderr, "usage: stream server|client <port> <rounds> <per round> [long]\n");
-        return 2;
+    const char *usage = "usage: stream server|client <port> <rounds> <per round> [long] [clock <ms>] [bw <bytes/s>]\n";
+    if (argc < 5 || (strcmp(argv[1], "server") && strcmp(argv[1], "client"))) { fputs(usage, stderr); return 2; }
+    Options o = {0, 0, 0, 0};
+    for (int i = 5; i < argc; i++) {
+        if (!strcmp(argv[i], "long")) o.longTimeouts = 1;
+        else if (!strcmp(argv[i], "clock") && i + 1 < argc) { o.setClock = 1; o.clock = (uint32_t)strtoul(argv[++i], NULL, 10); }
+        else if (!strcmp(argv[i], "bw") && i + 1 < argc) o.bandwidth = (uint32_t)strtoul(argv[++i], NULL, 10);
+        else { fputs(usage, stderr); return 2; }
     }
     if (enet_initialize() != 0) { fprintf(stderr, "FATAL: enet_initialize\n"); return 2; }
     int r = run(!strcmp(argv[1], "server"), (uint16_t)atoi(argv[2]), (uint32_t)atoi(argv[3]),
-                (uint32_t)atoi(argv[4]), argc == 6);
+                (uint32_t)atoi(argv[4]), o);
     enet_deinitialize();
     return r;
 }
