@@ -381,17 +381,21 @@ def hostTests : List Test := [
       let frag := relFrag 0 28672 10 2 1
       let (q, _, _) := peer.handleCommand 2000 frag (some 0)
       expect q.acknowledgements.isEmpty "a fragment of a set in window 7 acknowledged" },
-  { name := "a reliable packet sent seven windows past a lost one still arrives"
+  { name := "a lost command holds back the window six past it, then everything arrives"
     run := fun _ => do
-      -- 30000 empty reliable packets; seq 4096 (window 1) is lost until
-      -- seq 28672 (window 7) went out: the receiver's frontier is still in
-      -- window 0, so 28672 is past its window. Acknowledged, it would be
-      -- lost for good and the channel would stall behind it (ENet does).
+      -- 30000 empty reliable packets; seq 4096 (window 1) is lost for a
+      -- while. The receiver's frontier stays in window 0, whose receive
+      -- window ends with window 6, so seq 24576 (window 6) may go out and
+      -- seq 28672 (window 7) must wait: ENet would send it, and an ENet
+      -- receiver would acknowledge and drop it.
       let total := 30000
       let p ← (List.range total).foldlM (init := ← connected) fun p _ => send p (pkt 0)
       let p := p.rounds 60 (edit := stripReliable 0 4096)
-      expect (!p.clientP.outgoingCommands.any fun o =>
-          o.sendAttempts == 0 && o.command.reliableSequenceNumber ≤ 28672) "28672 not sent yet"
+      let firstSent := fun (seq : UInt16) => !p.clientP.outgoingCommands.any fun o =>
+        o.sendAttempts == 0 && o.command.reliableSequenceNumber ≤ seq
+      expect (firstSent 28671) "the windows before 7 not sent"
+      expect (p.clientP.outgoingCommands.any fun o =>
+          o.sendAttempts == 0 && o.command.reliableSequenceNumber == 28672) "28672 sent while 4096 is in flight"
       let p := p.rounds 400
       let got := (received p.serverEvents).size
       expect (got == total) s!"{got} of {total} delivered"

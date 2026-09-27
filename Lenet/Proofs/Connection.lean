@@ -40,17 +40,21 @@ Results, from the start of a connection, after any operations:
 * `run_fits`: every copy the network can still deliver `Fits` the receiver
   (`Proofs/Delivery`), which is what the two halves needed from each other.
 * `run_retired`: a message the sender retired a command of is delivered or
-  staged: no ACK retires a packet the receiver dropped. Without the
-  `isReliableTooFarAhead` rule this fails (TODO.md, test/README.md).
+  staged: no ACK retires a packet the receiver dropped.
+* `run_ahead_admitted`: every copy ahead of the receiver's frontier is
+  inside its receive window. So the receiver never drops a copy for being
+  ahead, and the proof holds with ENet's ACK rule too: a Lenet sender is
+  safe with an ENet receiver. (With ENet's sender, whose span is seven
+  windows, this fails; `isReliableTooFarAhead` is the receiver's defense,
+  test/README.md.)
 * `deliver_next`: a copy of the next message delivers it.
 
 The argument: every command the sender retired belongs to a message the
 receiver has (`Good.retired`), so the receiver's frontier is at most one
-before the oldest command in flight, and the sender's span (seven windows,
-`ChanOk.span`) puts every copy within seven windows past the frontier's
-window (`sent_window`). The delay bound puts it at most nine behind. An
-arrival seven windows past is the one the receive window drops, and the
-receiver does not ACK it.
+before the oldest command in flight, and the sender's span (six windows,
+`ChanOk.span`) puts every copy within six windows past the frontier's
+window (`sent_window`), the last the receive window takes. The delay bound
+puts it at most nine behind.
 -/
 
 namespace Lenet.Proofs.Connection
@@ -179,9 +183,9 @@ structure Good (L : Link) : Prop where
   staged   : ∀ e ∈ L.rcv.stagedReliable, ∃ i, L.d < i ∧ s.start i < s.start L.d + 32768 ∧ e = s.entry i ∧
     s.start (i + 1) - 1 ≤ L.S
   retired  : ∀ m x, s.start m ≤ x → x < s.start (m + 1) → x ≤ L.S → x ∉ L.infl → Recv s L m
-  net      : ∀ p ∈ L.net, p.2 ≤ L.S ∧ s.start (p.1 + 1) - 1 ≤ p.2 ∧ p.2 - s.start p.1 ≤ p.2 % 4096 + 24576
+  net      : ∀ p ∈ L.net, p.2 ≤ L.S ∧ s.start (p.1 + 1) - 1 ≤ p.2 ∧ p.2 - s.start p.1 ≤ p.2 % 4096 + 20480
   acks     : ∀ a ∈ L.acks, s.start a.1 ≤ a.2.1 ∧ a.2.1 < s.start (a.1 + 1) ∧ a.2.2 ≤ L.S ∧
-    s.start (a.1 + 1) - 1 ≤ a.2.2 ∧ a.2.2 ≤ s.start a.1 + D + 28671 ∧ Recv s L a.1
+    s.start (a.1 + 1) - 1 ≤ a.2.2 ∧ a.2.2 ≤ s.start a.1 + D + 24575 ∧ Recv s L a.1
 
 theorem good_init : Good s D {} where
   sent_le := by simp [Stream.start]
@@ -219,9 +223,9 @@ theorem toNat_sub_wrap {a b : Nat} (h1 : b ≤ a) (h2 : a < b + 65536) :
   simp only [UInt16.toNat_sub, Nat.toUInt16, UInt16.toNat_ofNat', Nat.reducePow]
   omega
 
-/-- **The sender's span, unwrapped**: every number in flight is at most six
+/-- **The sender's span, unwrapped**: every number in flight is at most five
 windows and a part behind the last one sent. -/
-theorem span {L : Link} (h : Good s D L) {y : Nat} (hy : y ∈ L.infl) : L.S - y ≤ L.S % 4096 + 24576 := by
+theorem span {L : Link} (h : Good s D L) {y : Nat} (hy : y ∈ L.infl) : L.S - y ≤ L.S % 4096 + 20480 := by
   have hs := h.chan.span y.toUInt16 (List.mem_map_of_mem hy)
   rw [frontier_eq h, toNat_sub_wrap (h.infl_le y hy).1 (h.infl_le y hy).2] at hs
   simp only [Nat.toUInt16, UInt16.toNat_ofNat', Nat.reducePow] at hs
@@ -236,11 +240,12 @@ theorem next_not_staged {c : Channel} {d : Nat} (h : Delivery.Inv s c d) : s.ent
   have := entry_inj (F := s.start d - 1) he (by omega) (by omega) (by omega) (by omega)
   omega
 
-/-- **The receiver keeps up**: the last number sent is at most seven windows
-past the frontier's window. The next message's first number is either not
-sent yet or in flight (it is not delivered, not staged, so not retired),
-and what is in flight spans at most seven windows. -/
-theorem sent_window {L : Link} (h : Good s D L) : L.S / 4096 ≤ (s.start L.d - 1) / 4096 + 7 := by
+/-- **The receiver keeps up**: the last number sent is at most six windows
+past the frontier's window, the last one the receive window takes. The
+next message's first number is either not sent yet or in flight (it is not
+delivered, not staged, so not retired), and what is in flight spans at
+most six windows. -/
+theorem sent_window {L : Link} (h : Good s D L) : L.S / 4096 ≤ (s.start L.d - 1) / 4096 + 6 := by
   by_cases hsd : s.start L.d ≤ L.S
   · by_cases hin : s.start L.d ∈ L.infl
     · have := span h hin
@@ -251,7 +256,7 @@ theorem sent_window {L : Link} (h : Good s D L) : L.S / 4096 ≤ (s.start L.d - 
   · omega
 
 /-- **Every arrival fits**: a copy still in transit starts within nine
-windows behind the frontier's window (the delay bound) and seven ahead. -/
+windows behind the frontier's window (the delay bound) and six ahead. -/
 theorem fits {L : Link} (h : Good s D L) (hD : D ≤ 12288) {k t : Nat} (hp : (k, t) ∈ L.net)
     (ht : L.S ≤ t + D) : Fits s L.d k := by
   obtain ⟨ht1, ht2, ht3⟩ := h.net _ hp
@@ -273,12 +278,6 @@ theorem msg_unique {m m' x : Nat} (h1 : s.start m ≤ x) (h2 : x < s.start (m + 
   · have := Stream.start_le (s := s) (show m + 1 ≤ m' by omega); omega
   · exact he
   · have := Stream.start_le (s := s) (show m' + 1 ≤ m by omega); omega
-
-theorem tooFarAhead_of (c : Channel) (F x : Nat) (hc : c.incomingReliableSequenceNumber.toNat = F % 65536)
-    (hx : x / 4096 = F / 4096 + 7) : c.isReliableTooFarAhead x.toUInt16 = true := by
-  simp only [Channel.isReliableTooFarAhead, Constants.reliableWindowSize, Constants.reliableWindows,
-    Constants.freeReliableWindows, UInt16.lt_iff_toNat_lt, toNat_toUInt16, hc]
-  split <;> simp <;> omega
 
 /-! ## Every operation keeps the invariant -/
 
@@ -441,9 +440,9 @@ theorem Good.ackArrive {L : Link} (h : Good s D L) (hD : D ≤ 12288) (i : Nat) 
 
 /-- **An arrival**: where the halves meet. The copy fits (`fits`), so the
 receiver's step does what `step_spec` says; what the receiver had it
-still has; and it ACKs the copy only if it received it, since a copy it
-drops for being ahead is exactly seven windows past the frontier's window,
-where `isReliableTooFarAhead` holds. -/
+still has; and it has the copy afterwards (delivered or staged) unless the
+copy is behind, since every copy ahead is inside the receive window. So
+every ACK is for something received. -/
 theorem Good.deliver {L : Link} (h : Good s D L) (hD : D ≤ 12288) (i : Nat) : Good s D (L.deliver s D i) := by
   unfold Link.deliver
   split
@@ -473,20 +472,12 @@ theorem Good.deliver {L : Link} (h : Good s D L) (hD : D ≤ 12288) (i : Nat) : 
           · exact hpers m hl (by omega) hR
           · subst he; exact absurd hR (next_not_staged h.inv)
           · left; omega
-      -- it ACKs only what it received
-      have hack : (!L.rcv.isReliableTooFarAhead (s.start k).toUInt16) = true →
-          k < j ∨ s.entry k ∈ r.1.stagedReliable := by
-        intro hk
+      -- it receives every copy it ACKs, since every copy ahead is inside the
+      -- receive window
+      have hrk : k < j ∨ s.entry k ∈ r.1.stagedReliable := by
         rcases Nat.lt_or_ge k L.d with hl | hl
         · left; omega
-        · apply hrecv hl
-          have hsk := Stream.start_le (s := s) hl
-          have hpos := Stream.start_pos (s := s) L.d
-          refine Nat.lt_of_not_le fun hno => ?_
-          have := tooFarAhead_of L.rcv (s.start L.d - 1) (s.start k)
-            (by rw [h.inv.frontier, toNat_toUInt16]) (by omega)
-          rw [this] at hk
-          exact absurd hk (by decide)
+        · exact hrecv hl (by omega)
       refine { sent_le := h.sent_le, counter := h.counter, chan := h.chan, infl_le := h.infl_le,
                inv := ?_, out := ?_, deliv := ?_, staged := ?_, retired := ?_, net := h.net, acks := ?_ }
       · show Delivery.Inv s r.1 (L.d + r.2.size)
@@ -513,7 +504,7 @@ theorem Good.deliver {L : Link} (h : Good s D L) (hD : D ≤ 12288) (i : Nat) : 
       · intro a ha
         have goal : ∀ a ∈ L.acks ++ (List.range' (s.start k) (s.span k)).map (fun x => (k, x, L.S)),
             s.start a.1 ≤ a.2.1 ∧ a.2.1 < s.start (a.1 + 1) ∧ a.2.2 ≤ L.S ∧ s.start (a.1 + 1) - 1 ≤ a.2.2 ∧
-              a.2.2 ≤ s.start a.1 + D + 28671 ∧ (a.1 < j ∨ s.entry a.1 ∈ r.1.stagedReliable) ∨
+              a.2.2 ≤ s.start a.1 + D + 24575 ∧ (a.1 < j ∨ s.entry a.1 ∈ r.1.stagedReliable) ∨
             a ∈ (List.range' (s.start k) (s.span k)).map (fun x => (k, x, L.S)) := by
           intro a ha
           rcases List.mem_append.mp ha with ha | ha
@@ -522,22 +513,21 @@ theorem Good.deliver {L : Link} (h : Good s D L) (hD : D ≤ 12288) (i : Nat) : 
           · exact Or.inr ha
         have hnew : ∀ a ∈ (List.range' (s.start k) (s.span k)).map (fun x => (k, x, L.S)),
             s.start a.1 ≤ a.2.1 ∧ a.2.1 < s.start (a.1 + 1) ∧ a.2.2 ≤ L.S ∧ s.start (a.1 + 1) - 1 ≤ a.2.2 ∧
-              a.2.2 ≤ s.start a.1 + D + 28671 := by
+              a.2.2 ≤ s.start a.1 + D + 24575 := by
           intro a ha
           obtain ⟨x, hx, rfl⟩ := List.mem_map.mp ha
           rw [List.mem_range'_1] at hx
           have hst : s.start (k + 1) = s.start k + s.span k := rfl
           refine ⟨?_, ?_, ?_, ?_, ?_⟩ <;> simp only <;> omega
         show s.start a.1 ≤ a.2.1 ∧ a.2.1 < s.start (a.1 + 1) ∧ a.2.2 ≤ L.S ∧ s.start (a.1 + 1) - 1 ≤ a.2.2 ∧
-          a.2.2 ≤ s.start a.1 + D + 28671 ∧ (a.1 < L.d + r.2.size ∨ s.entry a.1 ∈ r.1.stagedReliable)
+          a.2.2 ≤ s.start a.1 + D + 24575 ∧ (a.1 < L.d + r.2.size ∨ s.entry a.1 ∈ r.1.stagedReliable)
         rw [hdj]
         split at ha
-        · next hk =>
-          rcases goal a ha with hg | hg
+        · rcases goal a ha with hg | hg
           · exact hg
           · obtain ⟨a1, a2, a3, a4, a5⟩ := hnew a hg
             obtain ⟨x, -, rfl⟩ := List.mem_map.mp hg
-            exact ⟨a1, a2, a3, a4, a5, hack hk⟩
+            exact ⟨a1, a2, a3, a4, a5, hrk⟩
         · obtain ⟨a1, a2, a3, a4, a5, a6⟩ := h.acks a ha
           exact ⟨a1, a2, a3, a4, a5, hkeep a.1 (by omega) a6⟩
     · exact h
@@ -579,6 +569,21 @@ theorem run_retired (hD : D ≤ 12288) (ops : List Op) :
     ∀ m x, s.start m ≤ x → x < s.start (m + 1) → x ≤ L.S → x ∉ L.infl →
       m < L.d ∨ s.entry m ∈ L.rcv.stagedReliable :=
   (run_good hD ops (good_init s D)).retired
+
+/-- **Never past the receive window**: a copy the network can still
+deliver, if it is ahead of the receiver's frontier, is inside the receive
+window, so the receiver takes it (`admitted_iff`), whatever its ACK rule. -/
+theorem run_ahead_admitted (hD : D ≤ 12288) (ops : List Op) :
+    let L := run s D {} ops
+    ∀ k t, (k, t) ∈ L.net → L.S ≤ t + D → L.d ≤ k →
+      s.start k / 4096 < (s.start L.d - 1) / 4096 + 7 := by
+  intro L k t hp _ _
+  have h : Good s D L := run_good hD ops (good_init s D)
+  obtain ⟨n1, n2, -⟩ := h.net _ hp
+  have := sent_window h
+  have := Stream.start_lt_succ (s := s) k
+  simp only at n1 n2
+  omega
 
 /-- **Progress**: a copy of the next message, delivered, delivers it. -/
 theorem deliver_next {L : Link} (h : Good s D L) (hD : D ≤ 12288) {i t : Nat} (hi : L.net[i]? = some (L.d, t))

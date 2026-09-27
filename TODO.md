@@ -86,8 +86,8 @@ Done this session:
   delivered or staged (`run_retired`), and the next message's copy
   delivers it (`deliver_next`). The key step is `sent_window`: the
   receiver's frontier is at most one before the oldest command in flight,
-  so the last one sent is at most seven windows past the frontier's
-  window. `Delivery.step_spec` is the arrival step with what that needed
+  so the last one sent is at most six windows past the frontier's window
+  (seven before the sender-side fix below). `Delivery.step_spec` is the arrival step with what that needed
   (staged messages stay staged, nothing made up, an in-window arrival is
   received); `Inv` now keeps staged entries inside the receive window.
   Breaking `isReliableTooFarAhead` breaks the proof (`tooFarAhead_of`).
@@ -97,8 +97,16 @@ Done this session:
   names its message only within a wrap, so facts about "the message of
   this entry" carry the index with them (`step_spec`'s `P`).
 
-Suggested next: the connection proof's gaps (see Proofs), or the
-sender-side half of the ACK fix for ENet receivers.
+- **Sender-side half of the ACK fix** (later still): `canSendReliable`
+  now holds the first command of a window until the window six back is
+  empty too (range of 11 windows, ENet 10), so a Lenet sender keeps six
+  windows in flight and never gets past an ENet receiver's window.
+  `Window`'s span is now five windows and a part; `Connection` gains
+  `run_ahead_admitted` and no longer needs the receiver's ACK rule (which
+  stays, as the defense against ENet senders). The host-level unit test
+  now checks the sender holds seq 28672 back while seq 4096 is lost.
+
+Suggested next: the connection proof's gaps (see Proofs).
 
 Checks before each commit: `lake build` (library and proofs, including the
 no-panic audit in `Proofs/Panic.lean`), `./.lake/build/bin/unit`,
@@ -135,12 +143,6 @@ as bugs show where the corpus is blind.
   - The delay bound is in first sends, not time. That is the natural unit
     here (like TCP's segment lifetime), but no test checks real traffic
     stays under three windows per datagram lifetime.
-- ENet receivers still have the bug: a Lenet sender can put a command one
-  window past an ENet receiver's window, which ENet ACKs and drops.
-  Holding the first send of a window until the window six back is empty
-  too (`canSendReliable` over 11 windows, not 10) would keep the sender
-  inside ENet's receive window. It changes when Lenet sends, only with
-  over five windows in flight; `Window`'s span becomes six windows.
 
 ## Performance
 

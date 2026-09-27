@@ -101,12 +101,12 @@ def isReliableAhead (c : Channel) (seq : UInt16) : Bool :=
   c.isIncomingReliableInWindow seq && seq != c.incomingReliableSequenceNumber
 
 /-- Whether reliable sequence number `seq` lies in the window just past the
-receive window, which the receive path drops. A sender may be that far
-ahead: it keeps up to seven windows in flight ending at the last one sent
-(Proofs/Window.lean), and the oldest of them may be the first after the
-frontier, in the window after the frontier's. So such a command is not
-acknowledged, or the sender would retire a packet the receiver dropped.
-ENet acknowledges it and loses the packet. -/
+receive window, which the receive path drops. An ENet sender may be that
+far ahead: it keeps up to seven windows in flight ending at the last one
+sent, and the oldest of them may be the first after the frontier, in the
+window after the frontier's. So such a command is not acknowledged, or the
+sender would retire a packet the receiver dropped. ENet acknowledges it and
+loses the packet. (A Lenet sender keeps six windows, `canSendReliable`.) -/
 def isReliableTooFarAhead (c : Channel) (seq : UInt16) : Bool :=
   let winSize := Constants.reliableWindowSize
   let rawWin  := seq.toNat / winSize
@@ -144,6 +144,10 @@ def isWindowRangeInUse (c : Channel) (startWin : Nat) (length : Nat) : Bool :=
 /--
 Checks whether an outgoing reliable command with sequence number `seq` can be sent
 without colliding with previous unacknowledged windows (window wrap check).
+The first command of a window waits until the window six back is empty, so
+what is in flight spans at most six windows. ENet waits only for the one
+seven back, but then a command may reach a receiver one window past its
+receive window, which ENet acknowledges and drops (`isReliableTooFarAhead`).
 -/
 def canSendReliable (c : Channel) (seq : UInt16) : Bool :=
   let winSize  := Constants.reliableWindowSize
@@ -158,7 +162,7 @@ def canSendReliable (c : Channel) (seq : UInt16) : Bool :=
     if prevCount.toNat ≥ winSize then
       false
     else
-      !c.isWindowRangeInUse relWin (freeWins + 2)
+      !c.isWindowRangeInUse relWin (freeWins + 3)
 
 /--
 Recursively drains contiguous staged reliable deliveries starting from

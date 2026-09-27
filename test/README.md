@@ -207,11 +207,17 @@ compatibility"). Open, undecided differences are listed in TODO.md.
   lost while the sender goes on for six more windows, the command that
   opens the seventh is acknowledged, retired and never delivered: the
   channel stalls behind it for good (reproduced with 30000 empty reliable
-  packets and one lost datagram). Lenet drops such a command without an ACK
-  (`Peer.tooFarAhead`, `Channel.isReliableTooFarAhead`), so the sender
-  sends it again once the receiver has caught up. ENet senders see only a
-  retransmission. Pinned by two unit tests; `Proofs/Connection.lean` proves
-  no reliable packet is lost this way.
+  packets and one lost datagram). Lenet fixes both ends. As receiver, it
+  drops such a command without an ACK (`Peer.tooFarAhead`,
+  `Channel.isReliableTooFarAhead`), so an ENet sender sends it again once
+  the receiver has caught up. As sender, it holds the first command of a
+  window until the window six back is empty, not just the one seven back
+  (`Channel.canSendReliable`), so it keeps six windows in flight and never
+  gets past an ENet receiver's window. That changes when Lenet sends only
+  with more than five windows in flight, which no trace reaches. Pinned by
+  two unit tests; `Proofs/Connection.lean` proves no reliable packet is
+  lost this way (`run_retired`) and that a Lenet sender stays inside the
+  receive window (`run_ahead_admitted`).
 - **Throttle drops of unreliable packets (lenet bug - fixed).** ENet drops
   unreliable, unsequenced and unreliable-fragment packets on send in
   proportion to the packet throttle (`protocol.c` check_outgoing_commands,

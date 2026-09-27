@@ -4,14 +4,15 @@ import Lenet.Proofs.HostEvents
 # The sender-side window span
 
 A channel's reliable commands in flight (sent, not yet acknowledged) span at
-most seven windows: every one of them is at most six windows and a part
-behind the last one sent (`run_span`, `SpanInv.windows`). The stronger
-"always in the receiver's window" is false, for ENet too.
+most six windows: every one of them is at most five windows and a part
+behind the last one sent (`run_span`, `SpanInv.windows`). That keeps them
+inside the receiver's window (`Proofs/Connection`, `run_ahead_admitted`);
+ENet's sender, with seven, can get past it.
 
 The argument: first sends of a channel's reliable commands go out in
 sequence order, and the first command of window `w` only goes when windows
-`w .. w+9` are empty (`canSendReliable`), so what is in flight sits in
-`w-6 .. w`. That needs the window counters to count exactly what is in
+`w .. w+10` are empty (`canSendReliable`), so what is in flight sits in
+`w-5 .. w`. That needs the window counters to count exactly what is in
 flight, which is the other half of the invariant.
 
 `ChanOk` is the invariant for one channel, over the numbers of its commands
@@ -49,10 +50,10 @@ theorem windowIndex_eq (s : UInt16) : Channel.windowIndex s = s.toNat / 4096 := 
   omega
 
 /-- The step of the span bound when the next command goes out. Past a window
-boundary, the window seven back must be empty (`canSendReliable`). -/
-theorem span_step (S s : UInt16) (h : (S - s).toNat ≤ S.toNat % 4096 + 24576)
-    (hw : (S + 1).toNat % 4096 = 0 → Channel.windowIndex s ≠ (Channel.windowIndex (S + 1) + 9) % 16) :
-    (S + 1 - s).toNat ≤ (S + 1).toNat % 4096 + 24576 := by
+boundary, the window six back must be empty (`canSendReliable`). -/
+theorem span_step (S s : UInt16) (h : (S - s).toNat ≤ S.toNat % 4096 + 20480)
+    (hw : (S + 1).toNat % 4096 = 0 → Channel.windowIndex s ≠ (Channel.windowIndex (S + 1) + 10) % 16) :
+    (S + 1 - s).toNat ≤ (S + 1).toNat % 4096 + 20480 := by
   rw [windowIndex_eq, windowIndex_eq] at hw
   rw [toNat_sub16] at h ⊢
   have hS := S.toNat_lt
@@ -60,7 +61,7 @@ theorem span_step (S s : UInt16) (h : (S - s).toNat ≤ S.toNat % 4096 + 24576)
   simp only [UInt16.toNat_add, UInt16.toNat_one] at hw ⊢
   omega
 
-theorem span_ne (S s : UInt16) (h : (S - s).toNat ≤ S.toNat % 4096 + 24576) : s ≠ S + 1 := by
+theorem span_ne (S s : UInt16) (h : (S - s).toNat ≤ S.toNat % 4096 + 20480) : s ≠ S + 1 := by
   rintro rfl
   rw [toNat_sub16] at h
   have hS := S.toNat_lt
@@ -71,7 +72,7 @@ theorem span_ne (S s : UInt16) (h : (S - s).toNat ≤ S.toNat % 4096 + 24576) : 
 /-- A pigeonhole bound: distinct in-flight numbers within the span are at
 most the span's size, far below a window counter's `UInt16` limit. -/
 theorem span_length (S : UInt16) (l : List UInt16) (hnd : l.Nodup)
-    (h : ∀ s ∈ l, (S - s).toNat ≤ S.toNat % 4096 + 24576) : l.length ≤ 28672 := by
+    (h : ∀ s ∈ l, (S - s).toNat ≤ S.toNat % 4096 + 20480) : l.length ≤ 28672 := by
   have hinj : ∀ a b : UInt16, (S - a).toNat = (S - b).toNat → a = b := by
     intro a b hab
     have := UInt16.toNat_inj.mp hab
@@ -122,12 +123,12 @@ def frontier (ch : Channel) (pend : List UInt16) : UInt16 :=
 
 /-- **The sender side of one channel.** The commands never sent carry the
 numbers right after the frontier, in order (so they go out in sequence
-order); every command in flight is at most six windows and a part behind
+order); every command in flight is at most five windows and a part behind
 the frontier and appears once; each window counter counts exactly the
 commands in flight in its window. -/
 structure ChanOk (ch : Channel) (pend infl : List UInt16) : Prop where
   consecutive : pend = (List.range pend.length).map fun i => frontier ch pend + 1 + i.toUInt16
-  span : ∀ s ∈ infl, (frontier ch pend - s).toNat ≤ (frontier ch pend).toNat % 4096 + 24576
+  span : ∀ s ∈ infl, (frontier ch pend - s).toNat ≤ (frontier ch pend).toNat % 4096 + 20480
   nodup : infl.Nodup
   count : ∀ w (hw : w < Constants.reliableWindows),
     ch.reliableWindows[w].toNat = infl.countP fun s => Channel.windowIndex s == w
@@ -158,10 +159,10 @@ macro "u16_omega" : tactic => `(tactic| (
   simp only [UInt16.toNat_sub, UInt16.toNat_add, UInt16.toNat_one, Nat.toUInt16, UInt16.toNat_ofNat', Nat.reducePow]
   omega))
 
-/-- Past a window boundary, `canSendReliable` finds the window seven back
-(nine ahead, cyclically) empty. -/
+/-- Past a window boundary, `canSendReliable` finds the window six back
+(ten ahead, cyclically) empty. -/
 theorem canSend_free {ch : Channel} {x : UInt16} (h : ch.canSendReliable x = true) (hx : x.toNat % 4096 = 0) :
-    ch.reliableWindows[(Channel.windowIndex x + 9) % Constants.reliableWindows]'(Channel.modWindowIndex_lt _) = 0 := by
+    ch.reliableWindows[(Channel.windowIndex x + 10) % Constants.reliableWindows]'(Channel.modWindowIndex_lt _) = 0 := by
   unfold Channel.canSendReliable Channel.isWindowRangeInUse at h
   dsimp only at h
   split at h
@@ -169,7 +170,7 @@ theorem canSend_free {ch : Channel} {x : UInt16} (h : ch.canSendReliable x = tru
   · split at h
     · cases h
     · simp only [Bool.not_eq_true', List.any_eq_false, List.mem_range] at h
-      have := h 9 (by decide)
+      have := h 10 (by decide)
       simp only [Channel.windowIndex] at this ⊢
       simpa using this
 
@@ -195,12 +196,12 @@ theorem ChanOk.send {ch : Channel} {x : UInt16} {pend infl : List UInt16} (h : C
   have hfr : frontier (ch.acquireReliableWindow x) pend = frontier ch (x :: pend) + 1 := frontier_cons ch x pend
   suffices ∀ S, frontier (ch.acquireReliableWindow x) pend = S + 1 →
       (x :: pend = (List.range (x :: pend).length).map fun i => S + 1 + i.toUInt16) →
-      (∀ s ∈ infl, (S - s).toNat ≤ S.toNat % 4096 + 24576) →
+      (∀ s ∈ infl, (S - s).toNat ≤ S.toNat % 4096 + 20480) →
       ChanOk (ch.acquireReliableWindow x) pend (x :: infl) from this _ hfr hcons hspan
   clear hfr hcons hspan
   intro S hfr hcons hspan
   suffices ChanOk' : pend = (List.range pend.length).map (fun i => S + 1 + 1 + i.toUInt16) ∧
-      (∀ s ∈ x :: infl, (S + 1 - s).toNat ≤ (S + 1).toNat % 4096 + 24576) ∧ (x :: infl).Nodup ∧
+      (∀ s ∈ x :: infl, (S + 1 - s).toNat ≤ (S + 1).toNat % 4096 + 20480) ∧ (x :: infl).Nodup ∧
       ∀ w (hw : w < Constants.reliableWindows),
         (ch.acquireReliableWindow x).reliableWindows[w].toNat = (x :: infl).countP fun s => Channel.windowIndex s == w by
     obtain ⟨a, b, c, d⟩ := ChanOk'
@@ -221,7 +222,7 @@ theorem ChanOk.send {ch : Channel} {x : UInt16} {pend infl : List UInt16} (h : C
     · simp
     · refine span_step S s (hspan s hs) fun hb he => ?_
       have hfree := canSend_free hcan hb
-      have hc := hcnt _ (Channel.modWindowIndex_lt (Channel.windowIndex (S + 1) + 9))
+      have hc := hcnt _ (Channel.modWindowIndex_lt (Channel.windowIndex (S + 1) + 10))
       rw [hfree] at hc
       have := countP_zero hc.symm s hs
       simp [he, Constants.reliableWindows] at this
@@ -1695,9 +1696,9 @@ def sentFrontier (p : Peer) (c : Nat) (hc : c < p.channels.size) : UInt16 :=
 def inFlight (p : Peer) (c : Nat) : List UInt16 :=
   inflSeqs c p.sentReliableCommands.toList p.outgoingCommands.toList
 
-/-- In flight means at most seven windows back from the last command sent. -/
+/-- In flight means at most six windows back from the last command sent. -/
 theorem SpanInv.span {p : Peer} (h : SpanInv p) (c : Nat) (hc : c < p.channels.size) (h255 : c < 255) :
-    ∀ s ∈ inFlight p c, (sentFrontier p c hc - s).toNat < 7 * Constants.reliableWindowSize := by
+    ∀ s ∈ inFlight p c, (sentFrontier p c hc - s).toNat < 6 * Constants.reliableWindowSize := by
   intro s hs
   have := (h.chans c hc h255).span s hs
   simp only [Constants.reliableWindowSize]
@@ -1705,9 +1706,9 @@ theorem SpanInv.span {p : Peer} (h : SpanInv p) (c : Nat) (hc : c < p.channels.s
   omega
 
 /-- ... so the windows of the commands in flight are the frontier's window
-and at most six before it. -/
+and at most five before it. -/
 theorem SpanInv.windows {p : Peer} (h : SpanInv p) (c : Nat) (hc : c < p.channels.size) (h255 : c < 255) :
-    ∀ s ∈ inFlight p c, ∃ k ≤ 6,
+    ∀ s ∈ inFlight p c, ∃ k ≤ 5,
       Channel.windowIndex s = (Channel.windowIndex (sentFrontier p c hc) + Constants.reliableWindows - k) %
         Constants.reliableWindows := by
   intro s hs
@@ -1737,12 +1738,12 @@ theorem SpanInv.counters {p : Peer} (h : SpanInv p) (c : Nat) (hc : c < p.channe
 
 /-- **The sender-side window span.** From `Host.create`, after any sequence
 of received datagrams, `service` calls and application calls, the reliable
-commands in flight on every data channel of every peer lie within seven
+commands in flight on every data channel of every peer lie within six
 windows ending at the last one sent (`SpanInv.windows` names them). -/
 theorem run_span (address peerCount channelLimit inBw outBw seed mtu) (ops : List Op) :
     let h := (run (Host.create address peerCount channelLimit inBw outBw seed mtu) ops).1
     ∀ p ∈ h.peers, ∀ c (hc : c < p.channels.size), c < 255 →
-      ∀ s ∈ inFlight p c, (sentFrontier p c hc - s).toNat < 7 * Constants.reliableWindowSize := by
+      ∀ s ∈ inFlight p c, (sentFrontier p c hc - s).toNat < 6 * Constants.reliableWindowSize := by
   intro h p hp c hc h255
   exact (run_inv ops (create_inv address peerCount channelLimit inBw outBw seed mtu) p hp).span c hc h255
 
