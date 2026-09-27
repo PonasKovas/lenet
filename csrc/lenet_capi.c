@@ -20,6 +20,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdint.h>
+#include <sys/random.h>
 #include <time.h>
 
 #include <lean/lean.h>
@@ -120,6 +122,19 @@ static lean_object *mk_byte_array(const void *data, size_t len) {
 
 /* ---- lifecycle ---- */
 
+/* The seed of a host's connect IDs: from the OS, or else the clock's
+ * nanoseconds mixed with the host's address, so hosts made together still
+ * differ (ENet mixes in the host pointer too). */
+static uint32_t host_seed(const void *salt) {
+    uint32_t seed;
+    if (getrandom(&seed, sizeof seed, GRND_NONBLOCK) == (ssize_t)sizeof seed)
+        return seed;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint32_t)ts.tv_nsec ^ (uint32_t)ts.tv_sec * 2654435761u ^
+        (uint32_t)(uintptr_t)salt;
+}
+
 lenet_host *lenet_host_create(uint32_t bind_ip, uint16_t bind_port,
                               size_t peer_count, size_t channel_limit,
                               uint32_t incoming_bw, uint32_t outgoing_bw,
@@ -127,7 +142,9 @@ lenet_host *lenet_host_create(uint32_t bind_ip, uint16_t bind_port,
     lenet_initialize();
     /* peer ID 0xFFF addresses CONNECTs (ENet enet_host_create refuses too) */
     if (peer_count > 0xFFF) return NULL;
-    uint32_t seed = (uint32_t)time(NULL);
+    lenet_host *h = malloc(sizeof *h);
+    if (h == NULL) return NULL;
+    uint32_t seed = host_seed(h);
     if (mtu == 0) mtu = 1392;
     lean_object *r = lenet_ffi_host_create(bind_ip, bind_port, peer_count,
                                            channel_limit, incoming_bw,
@@ -135,11 +152,7 @@ lenet_host *lenet_host_create(uint32_t bind_ip, uint16_t bind_port,
     if (!lean_io_result_is_ok(r)) {
         lean_io_result_show_error(r);
         lean_dec(r);
-        return NULL;
-    }
-    lenet_host *h = malloc(sizeof *h);
-    if (h == NULL) {
-        lean_dec(r);
+        free(h);
         return NULL;
     }
     h->ref = lean_ctor_get(r, 0); /* IO.Ref HostContext */
@@ -176,7 +189,7 @@ int32_t lenet_host_connect(lenet_host *host, uint32_t ip, uint16_t port,
 
 int32_t lenet_host_send(lenet_host *host, uint16_t peer_id, uint8_t channel,
                         uint32_t flags, const void *data, size_t len) {
-    if (host == NULL) return -1;
+    if (host == NULL || len > LENET_MAX_PACKET_SIZE) return -1;
     lean_object *arr = mk_byte_array(data, len);
     lean_object *r = lenet_ffi_host_send(href(host), peer_id, channel,
                                          flags, arr);
@@ -189,7 +202,7 @@ int32_t lenet_host_send(lenet_host *host, uint16_t peer_id, uint8_t channel,
 
 void lenet_host_broadcast(lenet_host *host, uint8_t channel, uint32_t flags,
                           const void *data, size_t len) {
-    if (host == NULL) return;
+    if (host == NULL || len > LENET_MAX_PACKET_SIZE) return;
     lean_object *arr = mk_byte_array(data, len);
     lean_object *r = lenet_ffi_host_broadcast(href(host), channel,
                                               flags, arr);
@@ -296,7 +309,7 @@ void lenet_peer_set_timeout(lenet_host *host, uint16_t peer_id,
 int32_t lenet_host_handle_datagram(lenet_host *host, uint32_t now_ms,
                                    uint32_t ip, uint16_t port,
                                    const void *data, size_t len) {
-    if (host == NULL) return -1;
+    if (host == NULL || len > 65535) return -1;
     lean_object *arr = mk_byte_array(data, len);
     return ffi_status(lenet_ffi_host_handle_datagram(href(host), now_ms,
                                                      ip, port, arr));

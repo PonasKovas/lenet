@@ -83,8 +83,12 @@ and docs. Worked through in order; each item says what was done.
     of those can clash.
 11. **Connect IDs seeded from `time(NULL)`** in the C API: hosts made in
     the same second pick the same IDs.
+    **Done:** `getrandom`, else the clock's nanoseconds and the handle's
+    address; `Lenet.Net` seeds from `IO.getRandomBytes`.
 12. **`lenet_host_send` / `broadcast` copy before the size check**, so a
     huge length aborts on out-of-memory instead of returning -1.
+    **Done:** `LENET_MAX_PACKET_SIZE` checked first; a datagram longer than
+    65535 is refused too. Pinned in `check.c`.
 13. **`Lenet.Net` swallows receive errors** and can spin at full CPU on a
     dead socket.
     **Done** with 3: a failed receive is counted and its round sleeps out
@@ -141,6 +145,7 @@ and docs. Worked through in order; each item says what was done.
 30. Undocumented: the first host ignores SIGPIPE process-wide and starts
     two threads; `lenet_host_flush` produces datagrams too; the C build is
     Linux / GNU binutils only.
+    **Done:** `lenet.h` and README.
 31. Stale docs: "seven windows" in test/README.md, "near-MTU" `send_c2s`,
     "one fragmented", a list of undecided divergences that does not exist,
     TODO's "What is left" and "big gap left", three different lossy-wrap

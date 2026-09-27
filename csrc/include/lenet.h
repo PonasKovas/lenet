@@ -139,16 +139,21 @@ void lenet_host_destroy(lenet_host *host);
 int32_t lenet_host_connect(lenet_host *host, uint32_t ip, uint16_t port,
                            size_t channel_count, uint32_t user_data);
 
+/** The largest packet lenet_host_send takes (ENet's default maximum
+ * packet size). */
+#define LENET_MAX_PACKET_SIZE (32u * 1024u * 1024u)
+
 /**
  * Queues a packet for transmission on `channel`. `flags` is one
  * LENET_* delivery mode.
  * Returns 0 on success, -1 on error (unknown peer, peer not connected,
- * channel out of range, packet too large).
+ * channel out of range, packet larger than LENET_MAX_PACKET_SIZE).
  */
 int32_t lenet_host_send(lenet_host *host, uint16_t peer_id, uint8_t channel,
                         uint32_t flags, const void *data, size_t len);
 
-/** Queues a packet on `channel` of every connected peer. */
+/** Queues a packet on `channel` of every connected peer. A packet larger
+ * than LENET_MAX_PACKET_SIZE is not sent. */
 void lenet_host_broadcast(lenet_host *host, uint8_t channel, uint32_t flags,
                           const void *data, size_t len);
 
@@ -207,7 +212,8 @@ void lenet_peer_set_timeout(lenet_host *host, uint16_t peer_id,
  * Feeds one received UDP datagram into the protocol engine.
  * `ip` (network byte order) and `port` (host byte order) identify the
  * sender. Returns 0 on success (the datagram was consumed; it may still
- * have been discarded as invalid), -1 on error.
+ * have been discarded as invalid), -1 on error, including a `len` larger
+ * than a UDP datagram can be (65535).
  */
 int32_t lenet_host_handle_datagram(lenet_host *host, uint32_t now_ms,
                                    uint32_t ip, uint16_t port,

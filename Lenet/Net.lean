@@ -268,7 +268,13 @@ def bind (address : SocketAddress) (config : Config := {}) : IO Endpoint := do
   let socket ← Std.Async.UDP.Socket.mk
   socket.bind address
   let clock ← IO.monoNanosNow
-  let seed := config.seed.getD clock.toUInt32
+  -- connect IDs from the OS's randomness, not the clock (hosts started
+  -- together would pick the same)
+  let seed ← match config.seed with
+    | some s => pure s
+    | none => do
+      let b ← IO.getRandomBytes 4
+      pure (b.foldl (fun n x => n <<< 8 ||| x.toUInt32) clock.toUInt32)
   let host := Host.create local_ config.peerCount config.channelLimit config.incomingBandwidth
     config.outgoingBandwidth seed config.mtu
   let host := { host with checksumEnabled := config.checksum }

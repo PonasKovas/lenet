@@ -87,6 +87,12 @@ int main(void) {
           "send before the connection completes must fail");
     CHECK(lenet_host_send(h, 999, 0, LENET_RELIABLE, "hello", 5) == -1,
           "send to an unknown peer must fail");
+    /* sizes are checked before anything is read: these lengths lie */
+    CHECK(lenet_host_send(h, (uint16_t)peer, 0, LENET_RELIABLE, "x",
+                          (size_t)LENET_MAX_PACKET_SIZE + 1) == -1,
+          "a packet over the maximum size must fail");
+    CHECK(lenet_host_handle_datagram(h, 0, 0x0100007F, 40010, "x", 70000) == -1,
+          "a datagram longer than UDP allows must fail");
 
     CHECK(lenet_host_service(h, 0) == 0, "service");
     lenet_datagram dg;

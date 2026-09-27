@@ -38,7 +38,11 @@ cc app.c -Ipath/to/csrc/include -Lpath/to/csrc/build -llenet -lpthread -ldl -lm
 ```
 
 A shared library is not possible yet: the Lean runtime archive is built
-without `-fPIC`.
+without `-fPIC`. The C build is Linux only for now: `merge-ar.sh` needs GNU
+`ar` (its `N` flag) and the shim seeds connect IDs with `getrandom`.
+
+The first `lenet_host_create` starts the Lean runtime, which ignores
+SIGPIPE for the whole process and starts two background threads.
 
 ## Using it from C
 
