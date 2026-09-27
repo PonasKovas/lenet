@@ -34,9 +34,12 @@ static uint32_t now_ms(void) {
 
 static size_t packet_size(int i) { return i == 30 ? 20000 : 1 + (size_t)(i * 97) % 3000; }
 
-static void fill(uint8_t *buf, int i) {
-    for (size_t j = 0; j < packet_size(i); j++) buf[j] = (uint8_t)((j * 31 + (size_t)i) % 251);
+/* the first n bytes of packet i's pattern (NetInterop.lean `packet i n`) */
+static void fill_n(uint8_t *buf, int i, size_t n) {
+    for (size_t j = 0; j < n; j++) buf[j] = (uint8_t)((j * 31 + (size_t)i) % 251);
 }
+
+static void fill(uint8_t *buf, int i) { fill_n(buf, i, packet_size(i)); }
 
 static ENetHost *make_host(uint16_t port) {
     ENetAddress a;
@@ -116,7 +119,7 @@ static int run_client(uint16_t port) {
                     enet_peer_send(peer, 0, enet_packet_create(buf, packet_size(i), ENET_PACKET_FLAG_RELIABLE));
                 }
                 for (int i = 0; i < 5; i++) {
-                    fill(buf, i);
+                    fill_n(buf, i, 64);
                     enet_peer_send(peer, 1, enet_packet_create(buf, 64, ENET_PACKET_FLAG_UNSEQUENCED));
                 }
                 break;
@@ -139,7 +142,7 @@ static int run_client(uint16_t port) {
                     /* an unsequenced echo: one of the five, intact */
                     int ok = 0;
                     for (int i = 0; i < 5 && !ok; i++) {
-                        fill(buf, i);
+                        fill_n(buf, i, 64);
                         ok = ev.packet->dataLength == 64 && memcmp(ev.packet->data, buf, 64) == 0;
                     }
                     if (!ok) {
@@ -160,10 +163,8 @@ static int run_client(uint16_t port) {
                     fprintf(stderr, "FAIL: the disconnect took %u ms: a timeout\n", now_ms() - disconnect_at);
                     return 1;
                 }
-                if (unseq == 0) {
-                    fprintf(stderr, "FAIL: no unsequenced echo arrived\n");
-                    return 1;
-                }
+                /* none need arrive: the echoing side's packet throttle may
+                 * drop all five */
                 printf("  enet: all %d reliable echoes back in order, %d unsequenced; DISCONNECT\n", back, unseq);
                 enet_host_destroy(host);
                 return 0;

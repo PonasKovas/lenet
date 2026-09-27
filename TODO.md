@@ -136,10 +136,13 @@ and docs. Worked through in order; each item says what was done.
 17. `net-interop` accepts a timeout as the far end's clean disconnect.
     **Done:** the servers require the client's DISCONNECT data (9), the
     clients require the disconnect to complete within 2 s (ENet's shortest
-    timeout is 5 s) and at least one intact unsequenced echo; they wait for
-    the unsequenced echoes before disconnecting, since a disconnecting
-    peer takes no more data (the first version of the check caught that
-    race in the test).
+    timeout is 5 s) and every unsequenced echo that arrives to be intact;
+    they wait up to 500 ms for those before disconnecting, since a
+    disconnecting peer takes no more data. None has to arrive: a datagram
+    log of a failing run showed the ENet server never sent them, its packet
+    throttle having dropped all five after retransmissions. (The ENet
+    client's unsequenced packets were 64 bytes of which only the first
+    `packet_size(i)` were set; they are now the full pattern.)
 18. `make -C test traces` ignores failed recordings; `record` re-records
     only clock offset 0.
     **Done:** both stop at a failed recording and `record` covers every

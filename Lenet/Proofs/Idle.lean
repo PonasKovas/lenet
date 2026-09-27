@@ -188,7 +188,7 @@ theorem service_before_timers {h : Host} {now : UInt32} (hq : Quiet h) (hp : Pas
         -- a peer that may ping has its keepalive timer scheduled
         have helig' : Host.pingEligible p = true := by
           unfold Host.pingEligible at helig ⊢
-          simp only [Bool.and_eq_true, beq_iff_eq, Array.isEmpty_iff_size_eq_zero] at helig ⊢
+          simp only [Bool.and_eq_true, Array.isEmpty_iff_size_eq_zero] at helig ⊢
           rw [e2, ho] at helig
           refine ⟨⟨e4 ▸ helig.1.1, by rw [← e3]; exact helig.1.2⟩, by rw [ho]; simp⟩
         have ht : p.lastReceiveTime + p.pingInterval ∈ hostTimers h :=

@@ -341,7 +341,7 @@ theorem go_cmdsBytes : ∀ (l : List Command) (pre : ByteArray) (fuel : Nat) (ac
     (∀ c ∈ l, c.WellFormed) → l.length ≤ fuel →
       Datagram.parseCommands.go (pre ++ cmdsBytes l) fuel pre.size acc = acc ++ l.toArray
   | [], pre, fuel, acc, _, _ => by
-    rw [go_eq_of_done _ fuel _ acc (by simp [cmdsBytes, ByteArray.size_append])]; simp
+    rw [go_eq_of_done _ fuel _ acc (by simp [cmdsBytes])]; simp
   | c :: cs, pre, fuel + 1, acc, h, hl => by
     have hwf := h c List.mem_cons_self
     have ⟨hs, _, hr⟩ := cmdBytes_spec hwf
