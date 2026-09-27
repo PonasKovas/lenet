@@ -10,7 +10,7 @@ For each trace file `<dir>/<scenario>.trace`:
   - compare the merged outgoing command stream (decoded from emitted
     datagrams, packet-boundary tolerant) against ENet's, masking fields
     that are inherently non-deterministic (see maskCmd),
-  - sanity-check every emitted datagram (decodes cleanly, <= 4096 bytes).
+  - sanity-check every emitted datagram (decodes cleanly, within the MTU).
 
 Exit code 0 iff every scenario/role comparison passes.
 -/
@@ -623,7 +623,9 @@ private def replayAndReport (scenario : String) (lines : Array Line) (offset : U
   for res in results do
     let label := s!"{scenario}/{res.role.label}{shifted}"
     let maxLen := res.emitted.foldl (init := 0) fun acc b => max acc b.size
-    let sizeOk := maxLen ≤ 4096
+    -- no datagram over the MTU the scenario's hosts were created with
+    let (_, _, _, mtu) := scenarioHostConfig scenario
+    let sizeOk := maxLen ≤ mtu.toNat
     let eventDiff := eventDiffOf res.expEvents res.events
     let cmdDiff := cmdDiffOf res.expCmds res.outCmds
     let ok := eventDiff.isNone && cmdDiff.isNone && res.errors.isEmpty && res.expDecodeErrors.isEmpty && sizeOk
@@ -638,6 +640,7 @@ private def replayAndReport (scenario : String) (lines : Array Line) (offset : U
       match cmdDiff with
       | some (i, d) => IO.println s!"    command[{i}] mismatch:\n         {d}"
       | none => pure ()
+      if !sizeOk then IO.println s!"    a datagram of {maxLen} bytes is over the MTU ({mtu})"
       for e in res.errors do
         IO.println s!"    error: {e}"
       for e in res.expDecodeErrors do

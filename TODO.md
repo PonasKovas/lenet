@@ -1,8 +1,10 @@
 # Open work
 
-**Not done: the audit below found real bugs (2026-09-27).** The two tasks
-further down pass locally, both ways round; the lossy and clock-wrap steps
-are in CI but have not run there yet (nothing pushed).
+**The audit below is worked through (2026-09-27).** Every item is fixed
+or its claim corrected, except the license (29, the owner's call) and the
+fragment-by-fragment connection proof (28, a known limit decided against
+under "Not planned"). The lossy, clock-wrap and new C checks are in CI but
+have not run there yet (nothing pushed): push and watch them first.
 
 ## Audit (2026-09-27)
 
@@ -195,10 +197,14 @@ and docs. Worked through in order; each item says what was done.
     **Done:** DESIGN, "What the proofs trust".
 28. `Connection` models fragment sets sent whole; the real receiver ACKs
     each fragment (already listed under "Proofs" below).
+    **Left:** a known limit, decided against under "Not planned". The code
+    side is tested: a reliable assembler is never evicted, a fragment that
+    finds no room or does not fit is not acknowledged.
 
 ### Docs and repo
 
 29. No LICENSE (needs the owner's choice).
+    **Left** for the owner.
 30. Undocumented: the first host ignores SIGPIPE process-wide and starts
     two threads; `lenet_host_flush` produces datagrams too; the C build is
     Linux / GNU binutils only.
