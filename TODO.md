@@ -1,9 +1,107 @@
 # Open work
 
-**The engine is done (2026-09-27).** Both tasks below pass locally, both
-ways round; the lossy and clock-wrap steps are in CI but have not run
-there yet (nothing pushed). What remains in this file is history, notes,
-known limits and things decided against.
+**Not done: the audit below found real bugs (2026-09-27).** The two tasks
+further down pass locally, both ways round; the lossy and clock-wrap steps
+are in CI but have not run there yet (nothing pushed).
+
+## Audit (2026-09-27)
+
+A full read of the engine, wire codec, C API, `Lenet.Net`, proofs, tests
+and docs. Worked through in order; each item says what was done.
+
+### Bugs
+
+1. **Unbounded memory from held-back packets.** A fragment claiming 1 of
+   1 with a 32 MB total and 1 byte of data completes at once into a 32 MB
+   zeroed packet. Staged ahead of the frontier, it leaves the assemblers,
+   so `maximumWaitingData` no longer counts it; staging is capped by count
+   only. 40 such fragments (1160 wire bytes) held 1.5 GB. ENet charges
+   every queued incoming packet to `totalWaitingData`. Fix: charge staged
+   packets to the budget, reject a total larger than the fragment count
+   allows, complete a set only when its bytes cover the total.
+2. **C API: one outgoing buffer per thread, not per host**
+   (`lenet_capi.c` `g_out_buf`). lenet-rs promises per host and its `Host`
+   is `Send`, so two hosts on a thread, or a task moved between threads,
+   read the wrong or freed bytes.
+3. **`Lenet.Net.transmit` rethrows the first send error.** State is
+   already advanced, so the rest of the batch is lost, and a CONNECT
+   spoofed from port 0 makes every `service` throw until that peer times
+   out.
+4. **Receive cost grows with what is staged.** `drainContiguousLoop` is
+   O(n²) (`findIdx?` + `eraseIdx` per packet); each push onto a stage
+   copies the array while the peer's channel array still shares it;
+   `fragmentSetLive` scans the stage for up to 32 assemblers per data
+   command.
+5. **A freed slot keeps its queue.** `throttleConfigure` (and friends) on
+   a free slot queue a command that the next `connect` or incoming CONNECT
+   sends ahead of CONNECT / VERIFY_CONNECT, and the handshake fails.
+6. **`lenet_host_poll_event` with a NULL buffer loses the packet.** The
+   header says NULL learns the size, but the event is popped.
+7. **Datagram parsing copies the rest of the buffer after every command**
+   (O(n²) in the datagram, before any peer or session check).
+8. **With checksums on, datagrams can be MTU + 4** (the checksum field is
+   not counted when packing). `Lenet.Net` receives 4096 bytes, so at MTU
+   4096 such a datagram is cut short and dropped. ENet has the same bug.
+9. **`csrc/Makefile` picks the first installed toolchain**, not the one in
+   `lean-toolchain`.
+10. **`liblenet.a` exports every bundled symbol** (mimalloc, libuv, GMP,
+    OpenSSL, libc++abi, libunwind, the Lean runtime), so apps linking any
+    of those can clash.
+11. **Connect IDs seeded from `time(NULL)`** in the C API: hosts made in
+    the same second pick the same IDs.
+12. **`lenet_host_send` / `broadcast` copy before the size check**, so a
+    huge length aborts on out-of-memory instead of returning -1.
+13. **`Lenet.Net` swallows receive errors** and can spin at full CPU on a
+    dead socket.
+14. **Smaller hot-path costs:** the unsequenced window is copied on every
+    accepted packet (shared with the peer); each ACK erases from the
+    in-flight array; `packOutgoingCommands` rebuilds the whole queue every
+    service; the bandwidth throttle's `contains` in a fold is O(P³) worst
+    case.
+
+### Tests that check less than they say
+
+15. The replay compares fragment payloads by length, other payloads by
+    their first 64 bytes, never headers; test/README.md says only
+    `connectID` is masked.
+16. The lossy runs never require unreliable or unsequenced packets to
+    arrive, and `NetStream` ignores `send` results.
+17. `net-interop` accepts a timeout as the far end's clean disconnect.
+18. `make -C test traces` ignores failed recordings; `record` re-records
+    only clock offset 0.
+19. `interop` `multip` never checks client 2's bytes.
+20. `test/Net.lean` has tight wall-clock bounds; the workflow has no
+    `timeout-minutes`.
+
+### Proofs that claim more than they prove
+
+21. `run_wf` / `run_span`: `Op` leaves out `disconnectNow`, `resetPeer`,
+    `pollOutgoing` and the checksum toggle, all exported.
+22. Resource bounds are per step, not composed over whole runs.
+23. `nextDeadline_earliest` only says the fold finds the minimum of the
+    list it folds; nothing says `service` before the deadline does no
+    work.
+24. `checkAndAdd_idempotent` covers the next check only; DESIGN says
+    "always".
+25. `addFragment_completion_sound` does not tie the released data to the
+    fragments written.
+26. `Panic.lean`'s division list is stale; its claim that library code
+    panics only through a `…!` name is false (`Array.get!Internal`).
+27. `wire_roundtrip` and `nextDeadline_earliest` use `bv_decide` axioms;
+    DESIGN does not say so.
+28. `Connection` models fragment sets sent whole; the real receiver ACKs
+    each fragment (already listed under "Proofs" below).
+
+### Docs and repo
+
+29. No LICENSE (needs the owner's choice).
+30. Undocumented: the first host ignores SIGPIPE process-wide and starts
+    two threads; `lenet_host_flush` produces datagrams too; the C build is
+    Linux / GNU binutils only.
+31. Stale docs: "seven windows" in test/README.md, "near-MTU" `send_c2s`,
+    "one fragmented", a list of undecided divergences that does not exist,
+    TODO's "What is left" and "big gap left", three different lossy-wrap
+    run times, "What is compared" in test/README.md.
 
 Done: full ENet 1.3.x interop except compression (21 golden-trace
 scenarios, each recorded at three clock starts, and 12 live interop
