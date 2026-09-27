@@ -48,7 +48,11 @@ Done this session:
 - `make -C test net-interop` (in CI): `Lenet.Net` in one process against
   an ENet echo peer (`test/c/echo.c`) in another, both ways round.
 
-Suggested next: channel handles, or the receiver-side proof (see Proofs).
+- **Channel handles** (later the same day): see API and bindings below.
+  `test/Net.lean` checks a server's channel limit shows up on both sides'
+  connections and that packets echo back on the channel they came in on.
+
+Suggested next: the receiver-side proof (see Proofs).
 
 Checks before each commit: `lake build` (library and proofs, including the
 no-panic audit in `Proofs/Panic.lean`), `./.lake/build/bin/unit`,
@@ -114,9 +118,13 @@ found). Known costs left:
 
 ## API and bindings
 
-- **Typed Lean API**: done (`Lenet.Net`). Channels are still plain
-  `UInt8`s; a per-connection channel type (`Fin channelCount`) would catch
-  a bad channel at compile time, at the cost of carrying the count around.
+- **Typed Lean API**: done (`Lenet.Net`). Channels are typed too: the
+  connect event hands out a `Connection` (handle plus the channel count
+  both sides agreed on) and `send` takes a `conn.Channel`, a
+  `Fin channelCount`. No numeric literal for it on purpose, since `Fin`'s
+  wraps around the count: `conn.first`, `conn.channel? i`, `conn.channels`
+  or the channel a packet came in on. `broadcast` still takes a `UInt8`
+  and skips peers without that channel.
 - **ENet API parity** (2026-09-26): disconnect_now, peer reset, ping,
   ping interval, bandwidth limit, channel limit, flush and a peer-info
   getter now exist in Lean (`Host.*`) and C (`lenet.h`).

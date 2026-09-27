@@ -41,19 +41,20 @@ def isDisconnect : Event → Bool | .disconnect .. => true | _ => false
 def received (es : Array Event) : Array ByteArray :=
   es.filterMap fun | .receive _ _ p => some p.data | _ => none
 
-/-- A connected pair: client, server, and each side's handle. -/
-def connected : ExceptT String IO (Endpoint × Endpoint × PeerHandle × PeerHandle) := do
-  let server ← Endpoint.bind loopback
+/-- A connected pair: client, server, and each side's connection. -/
+def connected (channels : Nat := 2) (serverConfig : Config := {}) :
+    ExceptT String IO (Endpoint × Endpoint × Connection × Connection) := do
+  let server ← Endpoint.bind loopback serverConfig
   let client ← Endpoint.bind loopback
-  let peer ← match ← client.connect (← server.localAddress) 2 42 with
+  let peer ← match ← client.connect (← server.localAddress) channels 42 with
     | .ok p => pure p
     | .error e => throw s!"connect: {e}"
   let (ec, es) ← pump client server 2000 fun ec es => ec.any isConnect && es.any isConnect
   let some (.connect cp cdata) := ec.find? isConnect | throw "the client never connected"
   let some (.connect sp sdata) := es.find? isConnect | throw "the server never saw the connect"
-  expect (cp == peer) "the client's connect event names the handle connect returned"
+  expect (cp.peer == peer) "the client's connect event names the handle connect returned"
   expect (cdata == 0 && sdata == 42) s!"connect data: client {cdata}, server {sdata} (want 0, 42)"
-  return (client, server, peer, sp)
+  return (client, server, cp, sp)
 
 def bytes (n : Nat) (seed : Nat) : ByteArray :=
   ⟨(Array.range n).map fun i => ((i * 31 + seed) % 251).toUInt8⟩
@@ -63,7 +64,7 @@ def connectAndExchange : Check := do
   -- reliable packets arrive once and in order, a fragmented one whole
   let payloads := (List.range 50).map (bytes 100 ·) ++ [bytes 100000 7]
   for d in payloads do
-    match ← client.send peer 0 (.reliable d) with
+    match ← client.send peer peer.first (.reliable d) with
     | .ok () => pure ()
     | .error e => throw s!"send: {e}"
   let (_, es) ← pump client server 3000 fun _ es => (received es).size ≥ payloads.length
@@ -71,11 +72,12 @@ def connectAndExchange : Check := do
   expect (got.size == payloads.length) s!"{got.size} of {payloads.length} packets arrived"
   expect (got.toList == payloads) "the packets arrived out of order or changed"
   -- and back the other way, on channel 1
-  match ← server.send sp 1 (.reliable (bytes 10 3)) with
+  let some ch1 := sp.channel? 1 | throw "the server's connection has no channel 1"
+  match ← server.send sp ch1 (.reliable (bytes 10 3)) with
   | .ok () => pure ()
   | .error e => throw s!"server send: {e}"
   let (ec, _) ← pump client server 2000 fun ec _ => !(received ec).isEmpty
-  expect (ec.any fun | .receive p 1 pk => p == peer && pk.data == bytes 10 3 | _ => false)
+  expect (ec.any fun | .receive p ch pk => p == peer && ch.val == 1 && pk.data == bytes 10 3 | _ => false)
     "the client got the server's packet on channel 1"
   -- the RTT estimate came from real ACKs
   let some info ← client.info peer | throw "no info for a live handle"
@@ -85,10 +87,10 @@ def disconnectKillsHandles : Check := do
   let (client, server, peer, sp) ← connected
   client.disconnect peer 7
   let (ec, es) ← pump client server 2000 fun ec es => ec.any isDisconnect && es.any isDisconnect
-  expect (ec.any fun | .disconnect p _ => p == peer | _ => false) "the client reported its disconnect"
-  expect (es.any fun | .disconnect p 7 => p == sp | _ => false) "the server got the disconnect with data 7"
+  expect (ec.any fun | .disconnect p _ => p == peer.peer | _ => false) "the client reported its disconnect"
+  expect (es.any fun | .disconnect p 7 => p == sp.peer | _ => false) "the server got the disconnect with data 7"
   -- the old handles are dead, even once the slots hold new connections
-  match ← client.send peer 0 (.reliable (bytes 1 0)) with
+  match ← client.send peer peer.first (.reliable (bytes 1 0)) with
   | .error (.peerNotConnected _) => pure ()
   | _ => throw "a send on a dead handle did not fail with peerNotConnected"
   let peer2 ← match ← client.connect (← server.localAddress) with
@@ -96,10 +98,10 @@ def disconnectKillsHandles : Check := do
     | .error e => throw s!"reconnect: {e}"
   let (_, es) ← pump client server 2000 fun ec es => ec.any isConnect && es.any isConnect
   let some (.connect sp2 _) := es.find? isConnect | throw "the reconnect never arrived"
-  expect (peer2.slot == peer.slot && peer2 != peer) "a reused slot gets a new handle"
-  expect (sp2 != sp) "the server's reused slot gets a new handle"
+  expect (peer2.slot == peer.peer.slot && peer2 != peer.peer) "a reused slot gets a new handle"
+  expect (sp2.peer != sp.peer) "the server's reused slot gets a new handle"
   expect ((← client.info peer).isNone) "a dead handle has no info"
-  match ← server.send sp 0 (.reliable (bytes 1 0)) with
+  match ← server.send sp sp.first (.reliable (bytes 1 0)) with
   | .error (.peerNotConnected _) => pure ()
   | _ => throw "a dead server handle reached the new connection"
 
@@ -151,7 +153,7 @@ def wakesOnDatagram : Check := do
   let (client, server, peer, sp) ← connected
   -- let the handshake's ACKs settle, so the next event is the packet
   let _ ← pump client server 200 fun _ _ => false
-  match ← server.send sp 0 (.reliable (bytes 10 1)) with
+  match ← server.send sp sp.first (.reliable (bytes 10 1)) with
   | .ok () => pure ()
   | .error e => throw s!"send: {e}"
   -- sent 50 ms into the client's sleep, from another thread
@@ -160,9 +162,29 @@ def wakesOnDatagram : Check := do
   let ev ← client.service 2000
   let dt := (← IO.monoMsNow) - t0
   let _ ← IO.wait sender
-  expect (ev.any fun | .receive p 0 pk => p == peer && pk.data == bytes 10 1 | _ => false)
+  expect (ev.any fun | .receive p ch pk => p == peer && ch.val == 0 && pk.data == bytes 10 1 | _ => false)
     "the sleeping client did not get the packet"
   expect (dt < 150) s!"a packet sent at 50 ms woke the client at {dt} ms"
+
+def channelsAgreed : Check := do
+  -- a server allowing 3 channels grants a client asking for 5 only 3, and
+  -- both sides' connections say so
+  let (client, server, cp, sp) ← connected 5 { channelLimit := 3 }
+  expect (cp.channelCount == 3 && sp.channelCount == 3)
+    s!"channel counts: client {cp.channelCount}, server {sp.channelCount} (want 3, 3)"
+  expect ((cp.channel? 3).isNone && (cp.channel? 2).isSome) "channel? stops at the count"
+  -- a packet on each channel arrives on that channel, and echoing it back
+  -- on the channel it came in on needs no check
+  for ch in cp.channels do
+    let _ ← client.send cp ch (.reliable (bytes 5 ch.val))
+  let (_, es) ← pump client server 2000 fun _ es => (received es).size ≥ 3
+  for ev in es do
+    if let .receive conn ch pk := ev then
+      expect (pk.data == bytes 5 ch.val) s!"the packet sent on channel {ch.val} arrived on another"
+      let _ ← server.send conn ch pk
+  let (ec, _) ← pump client server 2000 fun ec _ => (received ec).size ≥ 3
+  expect ((ec.filterMap fun | .receive _ ch _ => some ch.val | _ => none).qsort (· < ·) == #[0, 1, 2])
+    "the echoes came back on channels 0, 1 and 2"
 
 def tests : List (String × Check) := [
   ("connect, then reliable packets both ways arrive once and in order", connectAndExchange),
@@ -170,7 +192,8 @@ def tests : List (String × Check) := [
   ("an unanswered connect times out with a disconnect event", connectTimesOut),
   ("an idle service returns once its timeout is up, not before", serviceWaits),
   ("service 0 alone moves datagrams, without blocking", pollingOnly),
-  ("a sleeping service wakes as soon as a datagram lands", wakesOnDatagram)
+  ("a sleeping service wakes as soon as a datagram lands", wakesOnDatagram),
+  ("both sides' connections carry the channel count the server granted", channelsAgreed)
 ]
 
 end NetTest

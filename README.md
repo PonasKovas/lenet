@@ -71,7 +71,9 @@ separate repository (`lenet-rs`).
 `Lenet.Net` (library `LenetNet`) runs a host over a UDP socket, the way
 ENet's own API does. Connections are `PeerHandle`s, which stop working
 when their connection ends, so a reused peer slot is never mistaken for the
-old connection.
+old connection. Once a connection is up, `service` reports it as a
+`Connection`, whose channels are `Fin`s of the count both sides agreed on,
+so a send cannot name a channel the connection does not have.
 
 ```lean
 import Lenet.Net
@@ -93,7 +95,7 @@ def ask (text : String) : IO Unit := do
   let .ok server ← host.connect (.v4 ⟨.ofParts 127 0 0 1, 7777⟩) | throw (.userError "no free slot")
   repeat
     match ← host.service 1000 with
-    | some (.connect _ _) => discard <| host.send server 0 (.reliable text.toUTF8)
+    | some (.connect conn _) => discard <| host.send conn conn.first (.reliable text.toUTF8)
     | some (.receive _ _ packet) =>
       IO.println (String.fromUTF8! packet.data)
       host.disconnect server

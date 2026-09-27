@@ -16,6 +16,11 @@ meaning someone else; a handle carries the generation of the connection it
 names, and once that connection is over, calls with it do nothing (or fail
 with `peerNotConnected`).
 
+Once a connection is up, `service` hands out a `Connection`: the handle and
+the channels the two sides agreed on (the server may grant fewer than the
+client asked for). Its channels are `Fin`s of that count, so a send cannot
+name a channel the connection does not have.
+
 This lives in its own library (`LenetNet`): the engine and the C
 distribution do not depend on it.
 -/
@@ -39,17 +44,64 @@ deriving BEq, Hashable, Repr, Inhabited
 instance : ToString PeerHandle where
   toString p := s!"peer {p.slot}#{p.generation}"
 
+/-- A connection that is up: its handle and how many channels it has.
+Only `service` makes these, so the count is the one both sides agreed on. -/
+structure Connection where
+  private mk ::
+  peer         : PeerHandle
+  channelCount : Nat
+  channelCount_pos : 0 < channelCount
+deriving Repr
+
+instance : BEq Connection where
+  beq a b := a.peer == b.peer && a.channelCount == b.channelCount
+
+instance : Hashable Connection where
+  hash c := mixHash (hash c.peer) (hash c.channelCount)
+
+instance : Coe Connection PeerHandle := ⟨Connection.peer⟩
+
+instance : ToString Connection where
+  toString c := toString c.peer
+
+/-- A channel of connection `c`. There is no numeric literal for it
+(`Fin`'s would wrap around the count): take `c.channel? i`, `c.first` or
+the channel a packet came in on. -/
+abbrev Connection.Channel (c : Connection) := Fin c.channelCount
+
+namespace Connection
+
+/-- Channel `i`, if the connection has it. -/
+def channel? (c : Connection) (i : Nat) : Option c.Channel :=
+  if h : i < c.channelCount then some ⟨i, h⟩ else none
+
+/-- Channel 0, which every connection has. -/
+def first (c : Connection) : c.Channel := ⟨0, c.channelCount_pos⟩
+
+/-- Every channel of the connection, in order. -/
+def channels (c : Connection) : List c.Channel := List.finRange c.channelCount
+
+end Connection
+
 /-- What `Endpoint.service` reports. -/
 inductive Event where
   /-- A connection completed; `data` is what the client sent with its
   CONNECT (0 on the client's own side, as in ENet). -/
-  | connect (peer : PeerHandle) (data : UInt32)
+  | connect (conn : Connection) (data : UInt32)
   /-- A connection ended: gracefully (with the remote's data) or by timeout
   (data 0). The handle is dead from now on. -/
   | disconnect (peer : PeerHandle) (data : UInt32)
-  /-- A packet arrived on a channel. -/
-  | receive (peer : PeerHandle) (channel : UInt8) (packet : Packet)
-deriving BEq, Inhabited
+  /-- A packet arrived on one of the connection's channels. -/
+  | receive (conn : Connection) (channel : conn.Channel) (packet : Packet)
+
+instance : BEq Event where
+  beq
+    | .connect a d, .connect b e => a == b && d == e
+    | .disconnect a d, .disconnect b e => a == b && d == e
+    | .receive a c p, .receive b d q => a == b && c.val == d.val && p == q
+    | _, _ => false
+
+instance : Inhabited Event := ⟨.disconnect default 0⟩
 
 /-- How to set up an endpoint (the parameters of ENet's enet_host_create). -/
 structure Config where
@@ -84,12 +136,18 @@ def ofAddress (a : Address) : SocketAddress :=
   let (b0, b1, b2, b3) := Address.toOctets a.host
   .v4 { addr := IPv4Addr.ofParts b0 b1 b2 b3, port := a.port }
 
+/-- A slot's connection, while the application may use it. -/
+structure Slot where
+  generation   : Nat
+  /-- The connection's channels, from its connect event on (the client
+  starts connecting before it knows how many the server grants). -/
+  channelCount : Nat := 0
+
 structure State where
   host       : Host
-  /-- The generation of each slot's connection, while the application may
-  use it: set when the client starts connecting or the server reports the
-  connect, cleared when the connection ends. -/
-  live       : Array (Option Nat)
+  /-- Each slot's connection: set when the client starts connecting or the
+  server reports the connect, cleared when the connection ends. -/
+  live       : Array (Option Slot)
   generation : Nat := 0
   pending    : Std.Queue Event := .empty
 
@@ -112,11 +170,15 @@ namespace State
 
 /-- Whether `peer` still names the connection in its slot. -/
 def isLive (s : State) (peer : PeerHandle) : Bool :=
-  s.live[peer.slot.toNat]? == some (some peer.generation)
+  (s.live[peer.slot.toNat]?.bind id).map (·.generation) == some peer.generation
+
+/-- The connection in slot `slot`, if the application may use it. -/
+def slot? (s : State) (slot : UInt16) : Option Slot := s.live[slot.toNat]?.bind id
 
 /-- A new generation for slot `slot`. -/
 def openSlot (s : State) (slot : UInt16) : State × Nat :=
-  ({ s with live := s.live.setIfInBounds slot.toNat (some s.generation), generation := s.generation + 1 },
+  ({ s with live := s.live.setIfInBounds slot.toNat (some { generation := s.generation }),
+            generation := s.generation + 1 },
     s.generation)
 
 def closeSlot (s : State) (slot : UInt16) : State :=
@@ -129,19 +191,31 @@ def push (s : State) (events : Array Lenet.Event) : State :=
   events.foldl (init := s) fun s ev =>
     match ev with
     | .connect id data =>
-      let (s, g) := match s.live[id.toNat]? with
-        | some (some g) => (s, g)
-        | _ => s.openSlot id
-      { s with pending := s.pending.enqueue (.connect ⟨id, g⟩ data) }
+      let (s, g) := match s.slot? id with
+        | some slot => (s, slot.generation)
+        | none => s.openSlot id
+      -- a connected peer has at least one channel; 0 only if something
+      -- later in the same batch already reset it, and then every call
+      -- with the handle fails anyway
+      let count := max 1 ((s.host.peers[id.toNat]?.map (·.channels.size)).getD 0)
+      let conn : Connection := ⟨⟨id, g⟩, count, by omega⟩
+      { s with live := s.live.setIfInBounds id.toNat (some { generation := g, channelCount := count }),
+               pending := s.pending.enqueue (.connect conn data) }
     | .disconnect id data =>
-      match s.live[id.toNat]? with
-      | some (some g) => { s.closeSlot id with pending := s.pending.enqueue (.disconnect ⟨id, g⟩ data) }
+      match s.slot? id with
+      | some slot => { s.closeSlot id with pending := s.pending.enqueue (.disconnect ⟨id, slot.generation⟩ data) }
       -- a connection the application never had a handle for
-      | _ => s
+      | none => s
     | .receive id ch packet =>
-      match s.live[id.toNat]? with
-      | some (some g) => { s with pending := s.pending.enqueue (.receive ⟨id, g⟩ ch packet) }
-      | _ => s
+      match s.slot? id with
+      | some slot =>
+        if h : 0 < slot.channelCount then
+          let conn : Connection := ⟨⟨id, slot.generation⟩, slot.channelCount, h⟩
+          if hc : ch.toNat < slot.channelCount then
+            { s with pending := s.pending.enqueue (.receive conn ⟨ch.toNat, hc⟩ packet) }
+          else s
+        else s
+      | none => s
 
 end State
 
@@ -202,17 +276,19 @@ def connect (e : Endpoint) (address : SocketAddress) (channelCount : Nat := 2) (
       (.ok ⟨id, g⟩, s)
     | .error err => (.error err, s)
 
-/-- Queues `packet` for `peer` on `channel`; it goes out on the next
-`service` or `flush`. -/
-def send (e : Endpoint) (peer : PeerHandle) (channel : UInt8) (packet : Packet) :
+/-- Queues `packet` for `conn` on `channel`; it goes out on the next
+`service` or `flush`. Fails with `peerNotConnected` once the connection is
+over, and for a packet ENet cannot send (too large, too many fragments). -/
+def send (e : Endpoint) (conn : Connection) (channel : conn.Channel) (packet : Packet) :
     IO (Except LenetError Unit) :=
   e.state.modifyGet fun s =>
-    if !s.isLive peer then (.error (.peerNotConnected peer.slot), s)
+    if !s.isLive conn.peer then (.error (.peerNotConnected conn.peer.slot), s)
     else
-      let (host, result) := s.host.trySend peer.slot channel packet
+      let (host, result) := s.host.trySend conn.peer.slot channel.val.toUInt8 packet
       (result, { s with host })
 
-/-- Queues `packet` for every connected peer on `channel`. -/
+/-- Queues `packet` for every connected peer on `channel`, skipping peers
+without that channel. -/
 def broadcast (e : Endpoint) (channel : UInt8) (packet : Packet) : IO Unit :=
   e.state.modify fun s => { s with host := s.host.broadcast channel packet }
 

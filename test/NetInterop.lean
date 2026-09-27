@@ -39,14 +39,16 @@ partial def client (port : UInt16) : IO UInt32 := do
       IO.eprintln s!"FAIL: lenet client gave up ({back} of {reliableCount} echoes)"
       return 1
     match ← host.service 5 with
-    | some (.connect _ _) =>
+    | some (.connect conn _) =>
       IO.println "  lenet: CONNECT"
+      let some ch1 := conn.channel? 1
+        | IO.eprintln s!"FAIL: the connection has {conn.channelCount} channels"; return 1
       for i in [0:reliableCount] do
-        let _ ← host.send server 0 (.reliable (packet i))
+        let _ ← host.send conn conn.first (.reliable (packet i))
       for i in [0:5] do
-        let _ ← host.send server 1 (.unsequenced (packet i 64))
+        let _ ← host.send conn ch1 (.unsequenced (packet i 64))
       loop back disconnecting
-    | some (.receive _ 0 pk) =>
+    | some (.receive _ ⟨0, _⟩ pk) =>
       if back ≥ reliableCount then
         IO.eprintln "FAIL: more echoes than packets sent"; return 1
       if pk.data != packet back then
