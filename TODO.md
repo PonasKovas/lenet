@@ -81,6 +81,11 @@ and docs. Worked through in order; each item says what was done.
 10. **`liblenet.a` exports every bundled symbol** (mimalloc, libuv, GMP,
     OpenSSL, libc++abi, libunwind, the Lean runtime), so apps linking any
     of those can clash.
+    **Done:** `liblenet.a` is one relocatable object, section-GCed from the
+    `lenet_*` entry points, with every other symbol local (24 exported, was
+    64483); `check_cxx.cc` links a C++ program with its own `mi_malloc` and
+    `uv_loop_init` (the old archive failed with a duplicate symbol). A side
+    effect: the check program went from 19 MB to 5 MB.
 11. **Connect IDs seeded from `time(NULL)`** in the C API: hosts made in
     the same second pick the same IDs.
     **Done:** `getrandom`, else the clock's nanoseconds and the handle's

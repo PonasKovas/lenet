@@ -16,7 +16,9 @@ protocol, wire compatible with ENet 1.3.x, with a plain C API.
 - **Correct before compatible.** Where ENet has a bug, Lenet does the right
   thing instead of copying it; every such divergence is written down.
 - **One static library.** The C build is a single `liblenet.a` with the Lean
-  runtime inside; users see only `lenet.h`.
+  runtime inside; users see only `lenet.h`, and the archive exports only
+  the `lenet_*` functions, so its bundled runtime cannot clash with an
+  application's own libraries.
 
 ENet's optional packet compression is not implemented: compressed
 datagrams are dropped. See [DESIGN.md](DESIGN.md) for why.
