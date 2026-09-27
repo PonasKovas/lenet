@@ -16,8 +16,9 @@ client learns its connection attempt failed (ENet does the same).
 and after, and every per-peer step of the host keeps it:
 `handleCommand_wf` (every incoming command), `checkPeerTimeouts_wf`,
 `pollPeer_wf`, `queueDisconnect_phase` (the application's disconnect), and
-`checkPeerPing_state`. Writing these found two bugs (test/README.md,
-"Disconnect events for peers never reported").
+`checkPeerPing_state`. Writing these found that a server peer
+still in its handshake reported a disconnect, on a timeout and on a
+DISCONNECT, though the application never saw it connect.
 
 `EventsWf.disconnect_between` spells out what it rules out.
 `Proofs/HostEvents.lean` lifts it to the host: `Host.handleDatagram`,

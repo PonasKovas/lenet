@@ -26,7 +26,10 @@ def toFlags : DeliveryMode → UInt32
   | .unreliable         => 0
   | .unreliableFragment => Constants.packetFlagUnreliableFragment
 
-/-- Parses ENet packet flag bits into a strongly-typed `DeliveryMode`. -/
+/-- Parses ENet packet flag bits into a strongly-typed `DeliveryMode`.
+UNSEQUENCED wins over UNRELIABLE_FRAGMENT, so a large packet with both goes
+as reliable fragments, as with UNSEQUENCED alone. ENet sends it as
+unreliable fragments. -/
 def fromFlags (flags : UInt32) : DeliveryMode :=
   if (flags &&& Constants.packetFlagReliable) != 0 then
     .reliable

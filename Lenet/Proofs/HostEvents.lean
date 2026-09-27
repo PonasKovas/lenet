@@ -17,8 +17,7 @@ well formed events. It composes (`HostStep.trans`), and holds for
 operations (`Op`), every slot's events are well formed.
 
 Writing these found that `Host.create` allowed more than 4095 slots: slot
-4095 would carry the CONNECT peer ID 0xFFF, and past 65536 IDs repeat
-(test/README.md).
+4095 would carry the CONNECT peer ID 0xFFF, and past 65536 IDs repeat.
 -/
 
 namespace Lenet.Proofs

@@ -4,8 +4,7 @@ import Lenet.Proofs.Basic
 /-!
 # Channel delivery proofs
 
-Pins the wrap-boundary behavior fixed by the receive-window gate (see
-test/README.md, divergence triage) and proves the drain loop's adequacy and
+Pins the wrap-boundary behavior of the receive-window gate and proves the drain loop's adequacy and
 correctness, plus delivery monotonicity.
 
 Non-obvious content:

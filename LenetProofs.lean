@@ -18,6 +18,12 @@ import Lenet.Proofs.Idle
 /-!
 # LenetProofs
 
-Machine-checked properties of the Lenet core; DESIGN.md summarizes what is
-proven. A separate library, so the C distribution never compiles proofs.
+Machine-checked properties of the Lenet core, one file per topic; each
+file's header says what it proves. A separate library, so the C
+distribution never compiles proofs.
+
+Most results rest on Lean's kernel and its three standard axioms. The
+bit-level lemmas proved with `bv_decide` add one axiom each: the SAT
+solver's certificate is checked by Lean's compiled LRAT checker, not by the
+kernel. `#print axioms` shows which results depend on them.
 -/

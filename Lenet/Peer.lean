@@ -88,6 +88,8 @@ structure Peer where
   outgoingUnsequencedGroup       : UInt16 := 0
   outgoingCommands               : Array OutgoingCommand := #[]
   sentReliableCommands           : Array OutgoingCommand := #[]
+  /-- ACKs owed. Not capped: a datagram adds at most 32 and every service
+  sends them all, and a cap would only force retransmissions (as in ENet). -/
   acknowledgements               : Array Acknowledgement := #[]
   fragmentAssemblers             : Array FragmentAssembler := #[]
 deriving BEq, Inhabited
@@ -499,7 +501,7 @@ set (`origin`, `params.startSequenceNumber`), or creates one when
 
 The byte budget is ENet's (queue_incoming_command refuses a new packet once
 `totalWaitingData` reaches `maximumWaitingData`, the next one too); the
-rest are robustness guards, DESIGN.md, stricter than ENet. Returns the
+rest are robustness guards, stricter than ENet. Returns the
 (possibly changed) array and the index of the set's assembler in it. -/
 def absorbFragment (xs : Array FragmentAssembler) (origin : FragmentOrigin)
     (params : Protocol.FragmentParams) (held : Unit → Nat) (next : Bool) :
@@ -585,7 +587,11 @@ def handleFragment (p : Peer) (channelId : UInt8) (reliableSeq : UInt16)
       else ({ p with fragmentAssemblers := xs }, #[], false)
 
 /-- Handles an unfragmented data command (send reliable/unreliable/
-unsequenced); other commands are ignored. -/
+unsequenced); other commands are ignored.
+
+An unsequenced packet is delivered when it arrives. ENet appends it to the
+channel's unreliable queue, where it waits behind any staged unreliable
+packet (forever, if that one's reliable frontier never comes). -/
 def handleData (p : Peer) (cmd : Protocol.Command) : Peer × Array Event :=
   match cmd.body with
   | .sendReliable data =>

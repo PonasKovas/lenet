@@ -14,8 +14,9 @@ A decoded ENet protocol datagram. Wire layout:
 2. `checksum` (4 bytes, only when the hosts have checksums enabled)
 3. the commands, back to back
 
-ENet's optional payload compression is not supported (see DESIGN.md):
-compressed datagrams are rejected on decode and never produced.
+ENet's optional payload compression is not supported: compressed
+datagrams are rejected on decode and never produced. It is opt-in in ENet,
+and a decoder would have to copy ENet's range coder model exactly.
 -/
 structure Datagram where
   header   : Header

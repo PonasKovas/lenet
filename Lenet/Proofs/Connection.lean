@@ -45,8 +45,7 @@ Results, from the start of a connection, after any operations:
   inside its receive window. So the receiver never drops a copy for being
   ahead, and the proof holds with ENet's ACK rule too: a Lenet sender is
   safe with an ENet receiver. (With ENet's sender, whose span is seven
-  windows, this fails; `isReliableTooFarAhead` is the receiver's defense,
-  test/README.md.)
+  windows, this fails; `isReliableTooFarAhead` is the receiver's defense.)
 * `deliver_next`: a copy of the next message delivers it.
 
 The argument: every command the sender retired belongs to a message the

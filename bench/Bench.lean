@@ -1,5 +1,5 @@
 /-
-Benchmark executable (baseline numbers: TODO.md, "Performance").
+Benchmark executable.
 
 Measures, through the pure sans-I/O core only (no sockets, no FFI):
 

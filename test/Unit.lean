@@ -289,8 +289,7 @@ def budgetTests : List Test := [
 /-! ## Unsequenced window
 
 Lenet slides a 1024-group window behind the highest group seen; ENet keeps
-aligned blocks of 1024 and drops everything below the current block (see
-test/README.md, "Unsequenced window"). -/
+aligned blocks of 1024 and drops everything below the current block. -/
 
 /-- The groups of `groups` that `feed` delivers, one packet per group. -/
 def fragmentValidationTests : List Test := [

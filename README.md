@@ -1,153 +1,63 @@
 # lenet
 
 A Lean 4 implementation of the [ENet](https://github.com/lsalzman/enet)
-protocol, wire compatible with ENet 1.3.x, with a plain C API.
+protocol: reliable, ordered and unreliable packets over UDP. It speaks ENet
+1.3.x on the wire, so Lenet and ENet hosts talk to each other.
 
-- **Sans-I/O.** The protocol engine opens no sockets and reads no clocks.
-  The driver owns the UDP socket and the time, feeds datagrams in and sends
-  what comes out. That works the same for a C loop, a thread, or an async
-  runtime such as Tokio.
-- **Checked against real ENet.** Golden traces recorded from the C library
-  are replayed through Lenet and diffed, and a live test runs Lenet against
-  ENet over real UDP sockets.
-- **Partly proven.** Codec roundtrip, fragment reassembly, reliable
-  delivery across sequence wrap, timer scheduling, resource bounds and a
-  build-time no-panic audit are machine-checked Lean proofs.
-- **Correct before compatible.** Where ENet has a bug, Lenet does the right
-  thing instead of copying it; every such divergence is written down.
-- **One static library.** The C build is a single `liblenet.a` with the Lean
-  runtime inside; users see only `lenet.h`, and the archive exports only
-  the `lenet_*` functions, so its bundled runtime cannot clash with an
-  application's own libraries.
+## Features
 
-ENet's optional packet compression is not implemented: compressed
-datagrams are dropped. See [DESIGN.md](DESIGN.md) for why.
+- **Everything ENet's protocol does except compression.** Reliable,
+  unreliable and unsequenced packets, fragmentation of large packets, up to
+  255 channels, checksums, bandwidth limits and throttling, pings,
+  timeouts and graceful disconnects. Compressed datagrams are dropped.
+- **Sans-I/O engine.** The core is pure: you feed it datagrams and the
+  time, and it hands back datagrams to send and events. It fits a plain C
+  loop, a thread or an async runtime alike.
+- **C API.** One static library, `liblenet.a`, with the Lean runtime
+  inside and only the `lenet_*` functions exported. See
+  [`csrc/include/lenet.h`](csrc/include/lenet.h).
+- **Lean API.** `Lenet.Net` runs a host over a UDP socket with ENet's
+  calls (`connect`, `send`, `service`, ...), with typed peer and channel
+  handles. See [`Lenet/Net.lean`](Lenet/Net.lean).
+- **Safe against hostile peers.** Every wire value is checked, and the
+  memory a peer can make a host hold is bounded.
+- **Proven in part.** Lean proofs cover the wire codec, fragment
+  reassembly, reliable in-order delivery over a lossy network, timers,
+  memory bounds and peer events. A build-time check rejects any code that
+  could panic.
+- **Tested against real ENet.** Recorded ENet traffic is replayed through
+  Lenet, and live tests run Lenet against ENet over UDP, over lossy links
+  too.
+
+Where ENet has a bug, Lenet does not copy it. [DIFFERENCES.md](DIFFERENCES.md)
+lists every place Lenet behaves differently from ENet.
+
+The C library builds on Linux only.
 
 ## Building
 
 Needs [Lean 4](https://lean-lang.org/) (through elan) and a C compiler.
 
 ```sh
-lake build                 # the library and the proofs
-make -C csrc               # -> csrc/build/liblenet.a
-make -C csrc check         # a C program using only lenet.h links and runs
+lake build           # the library and the proofs
+make -C csrc         # csrc/build/liblenet.a
 ```
 
-Link your program with the header and the archive:
+Link a C program with:
 
 ```sh
-cc app.c -Ipath/to/csrc/include -Lpath/to/csrc/build -llenet -lpthread -ldl -lm
+cc app.c -Icsrc/include -Lcsrc/build -llenet -lpthread -ldl -lm
 ```
-
-A shared library is not possible yet: the Lean runtime archive is built
-without `-fPIC`. The C build is Linux only for now: `merge-ar.sh` needs GNU
-`ar` (its `N` flag) and the shim seeds connect IDs with `getrandom`.
-
-The first `lenet_host_create` starts the Lean runtime, which ignores
-SIGPIPE for the whole process and starts two background threads.
-
-## Using it from C
-
-```c
-lenet_host *host = lenet_host_create(0, 0, 32, 2, 0, 0, 0);
-for (;;) {
-    /* for every datagram your socket receives: */
-    lenet_host_handle_datagram(host, now_ms(), ip, port, buf, len);
-
-    lenet_host_service(host, now_ms());          /* timers + packing */
-
-    lenet_datagram out;
-    while (lenet_host_poll_outgoing(host, &out) == 1)
-        sendto(sock, out.data, out.len, ...);    /* to out.ip:out.port */
-
-    lenet_event ev;
-    while (lenet_host_poll_event(host, &ev, payload, sizeof payload, &plen) == 1)
-        handle(&ev);
-
-    /* sleep until the next datagram or lenet_host_next_deadline() */
-}
-```
-
-The full API, with the rules a driver has to follow, is documented in
-[csrc/include/lenet.h](csrc/include/lenet.h). Async Rust bindings live in a
-separate repository (`lenet-rs`).
-
-## Using it from Lean
-
-`Lenet.Net` (library `LenetNet`) runs a host over a UDP socket, the way
-ENet's own API does. Connections are `PeerHandle`s, which stop working
-when their connection ends, so a reused peer slot is never mistaken for the
-old connection. Once a connection is up, `service` reports it as a
-`Connection`, whose channels are `Fin`s of the count both sides agreed on,
-so a send cannot name a channel the connection does not have.
-
-```lean
-import Lenet.Net
-open Lenet.Net Std.Net
-
-/-- An echo server on port 7777. -/
-def serve : IO Unit := do
-  let host ← Endpoint.bind (.v4 ⟨.ofParts 0 0 0 0, 7777⟩)
-  repeat
-    match ← host.service 1000 with
-    | some (.connect peer data) => IO.println s!"{peer} connected, data {data}"
-    | some (.receive peer channel packet) => discard <| host.send peer channel packet
-    | some (.disconnect peer _) => IO.println s!"{peer} left"
-    | none => pure ()
-
-/-- Sends one packet and waits for the echo. -/
-def ask (text : String) : IO Unit := do
-  let host ← Endpoint.bind (.v4 ⟨.ofParts 0 0 0 0, 0⟩)
-  let .ok server ← host.connect (.v4 ⟨.ofParts 127 0 0 1, 7777⟩) | throw (.userError "no free slot")
-  repeat
-    match ← host.service 1000 with
-    | some (.connect conn _) => discard <| host.send conn conn.first (.reliable text.toUTF8)
-    | some (.receive _ _ packet) =>
-      IO.println (String.fromUTF8! packet.data)
-      host.disconnect server
-    | some (.disconnect _ _) => return
-    | none => pure ()
-```
-
-`service timeout` returns the next event, waiting up to `timeout`
-milliseconds; `service 0` only checks, for a program with its own loop.
-The pure engine (`Lenet.Host`) is there too, for a driver of your own.
 
 ## Testing
 
 ```sh
-lake build replay && ./.lake/build/bin/replay test/traces   # golden-trace replay
 lake build unit && ./.lake/build/bin/unit                   # unit tests
+lake build replay && ./.lake/build/bin/replay test/traces   # replay of recorded ENet traffic
 lake build net && ./.lake/build/bin/net                     # Lenet.Net over UDP on 127.0.0.1
-make -C csrc check                                          # C API smoke test
-make -C test interop                                        # live interop (needs ENet in ../enet)
-make -C test net-interop                                    # Lenet.Net against ENet, two processes
-make -C test lossy-interop                                  # the same over a lossy link
-make -C test lossy-wrap lossy-clock                         # through every wrap (long, local)
+make -C csrc check                                          # C API
+make -C test interop net-interop lossy-interop              # against ENet (needs ENet in ../enet)
 lake build bench && ./.lake/build/bin/bench                 # benchmark
 ```
 
-CI runs all of it except the benchmark, which it only builds, and the two
-long runs (it runs a short clock wrap instead). How the ENet
-comparison works is explained in [test/README.md](test/README.md).
-
-## Layout
-
-| path                  | what                                                     |
-|-----------------------|----------------------------------------------------------|
-| `Lenet/`              | the protocol engine (pure Lean); `Lenet/Host.lean` is the entry point |
-| `Lenet/Protocol/`     | the wire format: header, commands, datagrams             |
-| `Lenet/Proofs/`       | the proofs (library `LenetProofs`, never linked into C)  |
-| `Lenet/FFI.lean`      | the exports the C shim wraps                             |
-| `Lenet/Net.lean`      | the engine over a UDP socket, for Lean programs (library `LenetNet`) |
-| `csrc/`               | the C distribution: `include/lenet.h`, the shim, the build |
-| `test/`               | ENet comparison: trace recorder, replayer, live interop  |
-| `bench/`              | throughput and service-cost benchmark                    |
-
-## Documents
-
-- [DESIGN.md](DESIGN.md): principles, architecture, code rules, what is
-  proven, and the scope decisions.
-- [test/README.md](test/README.md): the test setup, every scenario, and the
-  record of where Lenet differs from ENet and why.
-- [TODO.md](TODO.md): open work.
+See [test/README.md](test/README.md) for how the ENet tests work.

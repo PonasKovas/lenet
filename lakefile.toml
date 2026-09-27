@@ -47,7 +47,7 @@ name = "netstream"
 root = "NetStream"
 srcDir = "test"
 
-# Benchmark: built in CI, run locally (baseline numbers in TODO.md).
+# Benchmark: built in CI, run locally.
 [[lean_exe]]
 name = "bench"
 root = "Bench"

@@ -503,7 +503,7 @@ throttle nothing is dropped.
 ENet drops a packet together with every directly following command that has
 the same sequence numbers. Unsequenced packets all have (0, 0), so ENet also
 drops every unsequenced packet queued right behind a dropped one; Lenet only
-drops the packet itself (see test/README.md, divergence triage). -/
+drops the packet itself. -/
 def packUnreliable (p : Peer) (st : PackState) (cmd : Protocol.Command) : PackState :=
   if !startsUnreliablePacket cmd then st.pack cmd
   else
@@ -694,7 +694,11 @@ structure TimeoutScan where
 /-- ENet check_timeouts: in-flight commands past their retransmit timeout go
 back to the front of the queue with the timeout doubled, unless the peer has
 exceeded its timeout limits, which disconnects it (event with data 0, slot
-reset). -/
+reset).
+
+Every command is checked against its own deadline. ENet checks only once
+`peer->nextTimeout` (the front command's deadline) is reached, so a later
+command with a shorter timeout waits for it; Lenet may resend it sooner. -/
 def checkPeerTimeouts (p : Peer) (now : UInt32) : Peer × Option Event :=
   let scan := p.sentReliableCommands.foldl (init := ({ earliestTimeout := p.earliestTimeout } : TimeoutScan))
     fun scan outCmd =>
@@ -803,8 +807,7 @@ gets the throttle that spreads the rest of the budget over the bytes queued.
 
 The arithmetic is on `Nat`. ENet computes `bandwidth * elapsed` in 32 bits,
 which overflows from about 4.3 MB/s up, and subtracts a limited peer's
-bandwidth from a host budget that may be smaller, which wraps to "no limit"
-(see test/README.md, divergence triage). -/
+bandwidth from a host budget that may be smaller, which wraps to "no limit". -/
 def outgoingThrottleLimits (h : Host) (elapsed : Nat) : Array Peer :=
   let budget : OutgoingBudget :=
     if h.outgoingBandwidth == 0 then none

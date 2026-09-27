@@ -235,7 +235,7 @@ private def cmpBytes (b : ByteArray) : String :=
   if b.size ≤ 64 then s!"{b.size}:{hexOf b}" else s!"{b.size}:crc{Checksum.crc32Buffers #[b]}"
 
 /-- Canonical, mask-aware representation of a protocol command.
-Masked fields (inherently non-deterministic, see test/README.md):
+Masked fields (inherently non-deterministic):
   - connect/verifyConnect: `connectId` (drawn from real-clock-seeded ENet
     randomness at record time)
 Session IDs are NOT masked: negotiation is deterministic (client sends

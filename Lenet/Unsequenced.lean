@@ -15,6 +15,12 @@ def sequenceDistance (a b : UInt16) : Int :=
 
 /--
 Continuous sliding window for unsequenced packet deduplication using a circular ring buffer.
+
+The window slides behind the highest group seen, so any unseen group less
+than 1024 behind it is delivered. ENet (protocol.c handle_send_unsequenced)
+keeps aligned blocks of 1024 groups and drops everything below the current
+block, seen or not: when 1024 overtakes 1023, ENet drops 1023. Both drop
+every duplicate.
 -/
 structure UnsequencedWindow where
   highestGroup : UInt16 := 0

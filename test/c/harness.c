@@ -378,7 +378,7 @@ static const Action act_multip[] = {
  * Hand-crafted probes pinning ENet's receive-path validation gates. Each is
  * spliced into the C2S proxy path (appearing to come from the client), and
  * ENet's response (or silence) is recorded like any other traffic; the replay
- * then checks Lenet behaves identically. See test/README.md for the matrix. */
+ * then checks Lenet behaves identically. */
 
 /* valid header, zero commands: loop never runs, no response */
 static unsigned char inject_empty[] =
