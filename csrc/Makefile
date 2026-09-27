@@ -9,7 +9,12 @@
 # Note: a shared liblenet.so is not possible with a stock Lean toolchain
 # because libleanrt.a is built without -fPIC (TLS relocations).
 
-TOOLCHAIN := $(patsubst %/bin/leanc,%,$(shell ls $(HOME)/.elan/toolchains/*/bin/leanc | head -1))
+# The toolchain lean-toolchain names (elan resolves it from the repo root),
+# so the shim and the runtime match what lake builds the library with.
+TOOLCHAIN := $(shell cd .. && lean --print-prefix)
+ifeq ($(TOOLCHAIN),)
+$(error no Lean toolchain: `lean --print-prefix` failed in the repo root)
+endif
 LEAN_INC  := $(TOOLCHAIN)/include
 LEANLIB   := $(TOOLCHAIN)/lib/lean
 
@@ -31,13 +36,13 @@ build/lenet_capi.o: lenet_capi.c include/lenet.h | build
 	$(CC) -O2 -Iinclude -I$(LEAN_INC) -c lenet_capi.c -o $@
 
 # Merge everything into one archive: the Lean-compiled library, this shim,
-# the Lean runtime (libInit, leanrt), bundled GMP, and the bundled libc++
+# the Lean runtime (libInit, libStd for the hash maps, leanrt), bundled GMP, and the bundled libc++
 # (the Lean runtime is C++ and compiled against LLVM libc++). Members must
 # be copied via `ar p` because Lean module paths flatten to colliding
 # basenames, which makes plain `ar x` silently drop archive members.
 build/liblenet.a: $(LEAN_STATIC) build/lenet_capi.o merge-ar.sh
 	./merge-ar.sh $@ $(LEAN_STATIC) build/lenet_capi.o \
-	    $(LEANLIB)/libInit.a $(LEANLIB)/libleanrt.a \
+	    $(LEANLIB)/libInit.a $(LEANLIB)/libStd.a $(LEANLIB)/libleanrt.a \
 	    $(TOOLCHAIN)/lib/libgmp.a $(TOOLCHAIN)/lib/libc++.a $(TOOLCHAIN)/lib/libc++abi.a \
 	    $(TOOLCHAIN)/lib/libuv.a $(TOOLCHAIN)/lib/libssl.a $(TOOLCHAIN)/lib/libcrypto.a \
 	    $(TOOLCHAIN)/lib/libunwind.a
