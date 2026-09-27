@@ -431,6 +431,12 @@ the bench. For a new test, break the code it guards once to see it fail.
 
 ## Testing gaps
 
+Seen once (2026-09-27): `./.lake/build/bin/net` reported 1 of 8 failed,
+run right after a full proof build; which test was not captured. Not
+reproduced in 68 reruns since, 43 of them under load (six at once, or
+during a proof build). If it comes back, keep the FAIL line: a wall-clock
+bound is the likely cause.
+
 Several bugs fixed recently were invisible to the corpus: RTT samples broke
 after 65 s of uptime, retransmissions leaked in-transit bytes, the sender's
 reliable windows were never occupied. The benchmark's lossy link now covers
