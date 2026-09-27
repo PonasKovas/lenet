@@ -3,8 +3,69 @@
 Done so far: full ENet 1.3.x interop except compression (21 golden-trace
 scenarios, each recorded at three clock starts, and 12 live interop
 scenarios pass), unit tests, a lossy-link benchmark, the C distribution,
-and the proofs listed in [DESIGN.md](DESIGN.md#what-is-proven). What
-follows is what is left, roughly in priority order.
+and the proofs listed in [DESIGN.md](DESIGN.md#what-is-proven).
+
+## What is left before Lenet is done (decided 2026-09-27)
+
+Two tasks, then the engine is done. Everything else in this file is
+history, notes, or explicitly not planned (see the end of this section).
+
+Why these two: the bugs of the last sessions (retransmissions leaking
+in-transit bytes, sender windows never occupied, the fragment assembler
+leak, the ACK that lost a packet) all lived in the loss and resend paths,
+and every test against real ENet runs on a clean link. The lossy benchmark
+is Lenet against Lenet only, so it cannot catch a divergence from ENet.
+
+### 1. Interop with real ENet over a bad link
+
+- A small UDP proxy (C, in `test/c/`, or Lean over `Std.Async.UDP`) that
+  sits between the two processes of `make -C test net-interop` and drops,
+  duplicates, reorders and delays datagrams. Driven by a seed so a failure
+  replays. Loss rates worth running: light (1 in 20), heavy (1 in 3), and
+  bursts (drop everything for a few hundred ms, which also exercises
+  timeouts without disconnecting).
+- Both ways round: Lenet client against ENet server, and ENet client
+  against Lenet server (`test/c/echo.c` is the ENet side today).
+- Traffic: reliable, fragmented reliable (several fragment sets in flight
+  at once), unreliable, unreliable fragments, unsequenced, on more than one
+  channel. Check on both ends: reliable packets arrive once each, in order,
+  none missing; unreliable ones arrive at most once and in order;
+  nothing is left in flight at the end; the connection ends with a clean
+  disconnect, not a timeout.
+- Add it to CI next to `net-interop` (short runs), with a longer run
+  available locally.
+- For every divergence: triage in test/README.md ("Divergence triage"),
+  fix Lenet or record the ENet bug, and pin it with a unit test.
+
+### 2. Long runs through the wraps
+
+- More than 65536 reliable packets per channel through the proxy of task
+  1, against ENet both ways, so the 16-bit sequence numbers wrap for real
+  (the reliable and unreliable counters, the receive window, staging and
+  the sender's windows across the wrap). Include fragmented packets that
+  straddle the wrap.
+- The 32-bit millisecond clock wrapping during a live connection: start
+  Lenet's clock a little before 2^32 (the driver owns the clock, so the
+  test can offset it) and run long enough to cross it under loss, so RTT,
+  retransmission timeouts, pings and the bandwidth throttle all cross it.
+- Keep a short version in CI if it runs in under a minute; otherwise
+  local only, with the command in test/README.md.
+
+### Done means
+
+Both tasks pass both ways round and in CI, every divergence found is
+triaged and fixed or recorded, and the checks listed under "Checks before
+each commit" pass. Then update this file to say the engine is done.
+
+### Not planned (decided, not forgotten)
+
+- Compression (DESIGN.md, "Scope decisions").
+- More proofs. The fragment-by-fragment connection proof and the
+  two-host proof from `Host.create` (under "Proofs") would cost far more
+  than they find; they stay listed as known limits of what is proven.
+- A fuzzer (DESIGN.md). More loss-free trace scenarios.
+- Performance work and a comparison with C ENet: nice to know, not
+  blocking. The shared library waits on Lean shipping a `-fPIC` runtime.
 
 ## Next step (handoff, 2026-09-27)
 
@@ -106,7 +167,7 @@ Done this session:
   stays, as the defense against ENet senders). The host-level unit test
   now checks the sender holds seq 28672 back while seq 4096 is lost.
 
-Suggested next: the connection proof's gaps (see Proofs).
+Suggested next: task 1 of "What is left before Lenet is done" above.
 
 Checks before each commit: `lake build` (library and proofs, including the
 no-panic audit in `Proofs/Panic.lean`), `./.lake/build/bin/unit`,
@@ -123,12 +184,14 @@ loss (and found the fragment assembler leak), and `test/Unit.lean` pins the
 fragment-assembler rules, retransmission, timeouts and disconnect-later.
 The candidate list is done (unsequenced window, `nextDeadline` against
 `service`, packet throttle, bandwidth limits across peers); add more there
-as bugs show where the corpus is blind.
+as bugs show where the corpus is blind. The big gap left is ENet under
+loss and across the wraps: tasks 1 and 2 at the top.
 
 ## Proofs
 
 - Done: the whole connection over one channel (`Proofs/Connection`).
-  Left open, in rough order of value:
+  Not planned any further (see "What is left" above); the known limits of
+  what is proven are:
   - Fragments one by one. The model sends and resends a fragment set
     whole, and the receiver ACKs its fragments once the set is complete;
     the real receiver ACKs each fragment as it arrives and the assembler
@@ -141,8 +204,9 @@ as bugs show where the corpus is blind.
     reconnects need care: a slot's session number is two bits, so a stale
     datagram from an earlier connection can pass `acceptsDatagram`.
   - The delay bound is in first sends, not time. That is the natural unit
-    here (like TCP's segment lifetime), but no test checks real traffic
-    stays under three windows per datagram lifetime.
+    here (like TCP's segment lifetime); task 1's proxy should keep its
+    delays under it (a datagram outlived by three windows of first sends
+    is lost).
 
 ## Performance
 
