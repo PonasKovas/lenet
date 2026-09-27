@@ -408,8 +408,26 @@ compatibility"). Open, undecided differences are listed in TODO.md.
   `totalWaitingData` reaches `maximumWaitingData` (32 MB). Lenet had no
   byte budget, only its cap of 32 assemblers, which with 32 MB packets let
   a peer hold 1 GB. `Peer.absorbFragment` now starts no set once the
-  assemblers hold 32 MB (a refused fragment is not acknowledged). ENet
-  also counts staged and undelivered packets; Lenet bounds those by count.
+  assemblers hold 32 MB (a refused fragment is not acknowledged).
+- **Staged packets escaped the budget (lenet bug - fixed 2026-09-27,
+  hostile input).** The budget counted only the fragment sets under way, and
+  a set was complete once its fragment count was, so one fragment of one
+  byte claiming a 32 MB total made a 32 MB packet. Staged ahead of the
+  frontier, it left the assemblers and the budget; staging was capped by
+  count only. 40 such fragments, 1160 bytes on the wire, held 1.5 GB. Now,
+  like ENet's `totalWaitingData`, the budget counts what the channels
+  stage too (`Peer.heldBytes`): past it, a packet that would be staged is
+  refused and not acknowledged (`Peer.handleHeldData`), and no new set
+  starts, except the packet or set the channel delivers next, which what it
+  staged waits for (ENet refuses that one too and stalls until the
+  connection times out). Stricter than ENet: a set completes only once its
+  fragments carried exactly its total length (`FragmentAssembler.bytesFit`;
+  ENet counts fragments only, and an honest sender's fragments tile the
+  packet), and an assembler keeps only the fragments that arrived, building
+  the packet at the end, so a set that claims 32 MB and sends one byte costs
+  one byte, not a zeroed 32 MB buffer (ENet mallocs the whole packet when
+  the set starts). ENet also counts packets delivered but not yet read by
+  the application; Lenet hands those out as events.
 - **Fragment validation (lenet bug - fixed, hostile input).** ENet refuses
   an empty fragment and one whose total length or fragment count differs
   from the set under way (no ACK, the rest of the datagram dropped). Lenet

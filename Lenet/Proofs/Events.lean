@@ -213,6 +213,19 @@ theorem wf_of_state_receives {p q : Peer} {es : Array Event} (hs : q.state = p.s
   rw [hs, isConnected_up hup]
   exact .receives fun e h => he e (Array.mem_toList_iff.mp h)
 
+/-- `handleHeldData` either refuses the packet, leaving the peer as it was,
+or is `handleData`. -/
+theorem handleHeldData_cases (p : Peer) (cmd) :
+    p.handleHeldData cmd = (p, #[], false) ∨
+      p.handleHeldData cmd = ((p.handleData cmd).1, (p.handleData cmd).2, true) := by
+  unfold handleHeldData
+  generalize p.handleData cmd = r
+  obtain ⟨q, ev⟩ := r
+  dsimp only
+  split
+  · exact .inl rfl
+  · exact .inr rfl
+
 /-- The data branches of `applyCommand` run only for a connected peer. -/
 theorem connected_of_takesData {p : Peer} {c : Nat} {x : Bool}
     (h : ¬((!(p.isConnected && decide (c < p.channels.size)) || x) = true)) : p.isConnected = true := by
@@ -243,7 +256,9 @@ theorem applyCommand_wf (p : Peer) (now cmd) :
        · next h =>
          split
          · exact .nil
-         · exact wf_of_state_receives (handleData_state _ _) (connected_of_takesData' h) (handleData_events _ _))
+         · rcases handleHeldData_cases p cmd with he | he <;> rw [he]
+           · exact .nil
+           · exact wf_of_state_receives (handleData_state _ _) (connected_of_takesData' h) (handleData_events _ _))
     | (split
        · exact .nil
        · next h =>

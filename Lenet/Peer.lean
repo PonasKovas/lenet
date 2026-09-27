@@ -451,21 +451,53 @@ def assemblerRoom (xs : Array FragmentAssembler) : Option (Array FragmentAssembl
     | some i => some (xs.eraseIdx i)
     | none => none
 
-/-- The bytes the assemblers in `xs` hold for their packets. -/
+/-- The bytes the assemblers in `xs` hold back for their packets: a set's
+whole `totalLength` from the moment it starts, as ENet charges it, so a set
+once started never waits on the budget. -/
 def waitingBytes (xs : Array FragmentAssembler) : Nat :=
   xs.foldl (fun n a => n + a.totalLength) 0
 
+/-- The fragments the sets in `xs` claim. -/
+def waitingFragments (xs : Array FragmentAssembler) : Nat :=
+  xs.foldl (fun n a => n + a.fragmentCount) 0
+
+/-- The bytes of the packets `channels` hold back. -/
+def channelsStagedBytes (channels : Array Channel) : Nat :=
+  channels.foldl (fun n ch => n + ch.stagedBytes) 0
+
+/-- The bytes of the packets the peer's channels hold back. -/
+def stagedBytes (p : Peer) : Nat := channelsStagedBytes p.channels
+
+/-- Whether a fragment set starting at `startSeq` is the next thing channel
+`channelId` delivers: a reliable set right after the frontier. -/
+def deliversNext (channels : Array Channel) (channelId : UInt8) (startSeq : UInt16) (unreliable : Bool) : Bool :=
+  !unreliable && channels[channelId.toNat]?.any (·.incomingReliableSequenceNumber + 1 == startSeq)
+
+/-- What the peer holds back from the application: its fragment sets under
+way and the packets its channels staged. ENet's `totalWaitingData`, which
+also counts packets delivered but not yet read by the application; here
+those are events, which the application drains. -/
+def heldBytes (p : Peer) : Nat :=
+  waitingBytes p.fragmentAssemblers + p.stagedBytes
+
 /-- Absorbs a fragment into the assembler array: finds the assembler for the
-set (`origin`, `params.startSequenceNumber`), or creates one when there is
-room (`assemblerRoom`), the fragment count is within
-`maximumReceivedFragmentCount` and the assemblers hold less than
-`maximumWaitingData` bytes. The byte budget is ENet's
-(queue_incoming_command refuses a new packet once `totalWaitingData`
-reaches `maximumWaitingData`); the other two are robustness guards,
-DESIGN.md, stricter than ENet. Returns the (possibly changed) array and the
-index of the set's assembler in it. -/
+set (`origin`, `params.startSequenceNumber`), or creates one when
+- there is room (`assemblerRoom`) and the fragment count is within
+  `maximumReceivedFragmentCount`,
+- the assemblers hold less than `maximumWaitingData` bytes and claim fewer
+  than `maximumReceivedFragmentCount` fragments, and
+- the peer holds back less than `maximumWaitingData` bytes in all (`held`,
+  what its channels staged, is added), unless the set is the next thing
+  its channel delivers (`next`): refusing that one would stall the channel,
+  since what it staged waits for it.
+
+The byte budget is ENet's (queue_incoming_command refuses a new packet once
+`totalWaitingData` reaches `maximumWaitingData`, the next one too); the
+rest are robustness guards, DESIGN.md, stricter than ENet. Returns the
+(possibly changed) array and the index of the set's assembler in it. -/
 def absorbFragment (xs : Array FragmentAssembler) (origin : FragmentOrigin)
-    (params : Protocol.FragmentParams) : Array FragmentAssembler × Option Nat :=
+    (params : Protocol.FragmentParams) (held : Unit → Nat) (next : Bool) :
+    Array FragmentAssembler × Option Nat :=
   match xs.findFinIdx? (fun a => a.origin == origin && a.startSequenceNumber == params.startSequenceNumber) with
   | some i => (xs, some i.val)
   | none =>
@@ -477,6 +509,8 @@ def absorbFragment (xs : Array FragmentAssembler) (origin : FragmentOrigin)
       | none => (xs, none)
       | some room =>
         if waitingBytes room ≥ Constants.maximumWaitingData then (xs, none)
+        else if waitingFragments room ≥ Constants.maximumReceivedFragmentCount then (xs, none)
+        else if !next && waitingBytes room + held () ≥ Constants.maximumWaitingData then (xs, none)
         else
         match FragmentAssembler.init params.startSequenceNumber params.totalLength.toNat
             params.fragmentCount.toNat with
@@ -495,7 +529,7 @@ set. When the fragment completes the packet, the assembler is consumed and
 the packet goes through the channel's receive path; a reliable set occupies
 `fragmentCount` sequence numbers (ENet advances the dispatch frontier by the
 whole span). The flag is false when the fragment passed the gate but found
-no assembler (no room, or invalid parameters) or does not fit it, which
+no assembler (no room, over budget, or invalid parameters) or does not fit it, which
 ENet validates identically: ENet refuses such a command (`applyCommand`),
 so it is not acknowledged and the sender retransmits it. -/
 def handleFragment (p : Peer) (channelId : UInt8) (reliableSeq : UInt16)
@@ -511,7 +545,8 @@ def handleFragment (p : Peer) (channelId : UInt8) (reliableSeq : UInt16)
     -- place: a shared buffer would be copied whole for every fragment
     let xs := p.fragmentAssemblers
     let p := { p with fragmentAssemblers := #[] }
-    match absorbFragment xs origin params with
+    match absorbFragment xs origin params (fun _ => channelsStagedBytes p.channels)
+        (deliversNext p.channels channelId params.startSequenceNumber unreliable) with
     | (xs, none) => ({ p with fragmentAssemblers := xs }, #[], false)
     | (xs, some i) =>
       if hi : i < xs.size then
@@ -519,10 +554,13 @@ def handleFragment (p : Peer) (channelId : UInt8) (reliableSeq : UInt16)
         let number := params.fragmentNumber.toNat
         let offset := params.fragmentOffset.toNat
         -- a fragment that does not describe the set under way, or does not
-        -- fit it, is refused (ENet)
+        -- fit it, is refused (ENet), and so is one whose bytes do not fit
+        -- what the set is missing (`bytesFit`, stricter than ENet)
         if asm.totalLength != params.totalLength.toNat || asm.fragmentCount != params.fragmentCount.toNat ||
-            !asm.fits number offset params.data then
-          ({ p with fragmentAssemblers := xs.setIfInBounds i asm }, #[], false)
+            !asm.takes number offset params.data then
+          -- a set this fragment would have started is not kept
+          if asm.fragments.isEmpty then ({ p with fragmentAssemblers := xs.eraseIdxIfInBounds i }, #[], false)
+          else ({ p with fragmentAssemblers := xs.setIfInBounds i asm }, #[], false)
         else
           match asm.addFragment number offset params.data with
           | .ok (asm, none) => ({ p with fragmentAssemblers := xs.setIfInBounds i asm }, #[], true)
@@ -536,7 +574,7 @@ def handleFragment (p : Peer) (channelId : UInt8) (reliableSeq : UInt16)
               else
                 ch.receiveReliableAndRelease params.startSequenceNumber params.fragmentCount.toNat (.reliable data)
             (p, events, true)
-          -- unreachable: `fits` covers every refusal of `addFragment`
+          -- unreachable: `takes` covers every refusal of `addFragment`
           | .error _ => ({ p with fragmentAssemblers := xs.eraseIdxIfInBounds i }, #[], false)
       else ({ p with fragmentAssemblers := xs }, #[], false)
 
@@ -640,6 +678,32 @@ def handleVerifyConnect (p : Peer) (params : Protocol.ConnectParams) : Peer × A
       state             := .connected }
     (p, #[.connect p.peerId p.eventData], true)
 
+/-- Whether channel `channelId` would stage unfragmented packet `cmd`
+rather than deliver or drop it: reliable data ahead of the frontier but not
+next, or unreliable data sent after such a reliable command. -/
+def wouldStage (p : Peer) (cmd : Protocol.Command) : Bool :=
+  match p.channels[cmd.channelId.toNat]? with
+  | none => false
+  | some ch =>
+    match cmd.body with
+    | .sendReliable .. =>
+      ch.isReliableAhead cmd.reliableSequenceNumber &&
+        cmd.reliableSequenceNumber != ch.incomingReliableSequenceNumber + 1
+    | .sendUnreliable .. => ch.isReliableAhead cmd.reliableSequenceNumber
+    | _ => false
+
+/-- An unfragmented reliable or unreliable packet (`handleData`), refused
+when it would be staged while the peer already holds back
+`maximumWaitingData` bytes (ENet's queue_incoming_command). A packet the
+channel delivers at once is always taken: it is what the channel staged
+waits for. The test comes first, so `p` is not kept for a refusal and
+`handleData` updates it in place. -/
+def handleHeldData (p : Peer) (cmd : Protocol.Command) : Peer × Array Event × Bool :=
+  if p.wouldStage cmd && p.heldBytes ≥ Constants.maximumWaitingData then (p, #[], false)
+  else
+    let (q, events) := p.handleData cmd
+    (q, events, true)
+
 /-- ENet's handler for one incoming command (protocol.c
 handle_incoming_commands and the handle_* functions): the updated peer, the
 events, and whether ENet accepts the command. A refused command is not
@@ -682,9 +746,7 @@ def applyCommand (p : Peer) (now : UInt32) (cmd : Protocol.Command) : Peer × Ar
   | .sendReliable .. | .sendUnreliable .. =>
     if !takesData then (p, #[], false)
     else if draining then (p, #[], true)
-    else
-      let (p, events) := p.handleData cmd
-      (p, events, true)
+    else p.handleHeldData cmd
   | .sendUnsequenced .. =>
     if !takesData then (p, #[], false)
     else

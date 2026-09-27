@@ -190,7 +190,78 @@ def fragmentTests : List Test := [
       -- a fragment of a set already being assembled still gets in
       let (p, evs) := feed p [relFrag 0 1 10 2 1]
       expect (p.acknowledgements.size == acks + 1) "fragment of a known set not acked"
-      expect (received evs == #[(0, whole 10 2)]) "known set not delivered" } ]
+      expect (received evs == #[(0, whole 10 2)]) "known set not delivered" },
+  { name := "a one-byte fragment claiming a whole packet is refused and keeps nothing"
+    run := fun _ => do
+      let p ← serverPeer
+      let acks := p.acknowledgements.size
+      let cmd : Protocol.Command :=
+        { channelId := 0, reliableSequenceNumber := 2, acknowledge := true
+          body := .sendFragment { startSequenceNumber := 2, fragmentCount := 1, fragmentNumber := 0
+                                  totalLength := (32 * 1024 * 1024 : Nat).toUInt32, fragmentOffset := 0
+                                  data := bytes 1 0 } }
+      let (p, evs, ok) := p.handleCommand 2000 cmd (some 0)
+      expect (!ok) "refused fragment reported as taken"
+      expect evs.isEmpty "delivered something"
+      expect (p.acknowledgements.size == acks) "refused fragment was acked"
+      expect p.fragmentAssemblers.isEmpty "kept an assembler for it"
+      expect (p.channels.all (·.stagedReliable.isEmpty)) "staged a packet" },
+  { name := "a set completes only once its fragments carried its whole length"
+    run := fun _ => do
+      -- two fragments of 4 bytes make the packet; a short last one is refused
+      let short : Protocol.Command :=
+        { relFrag 0 1 10 2 1 with body := .sendFragment { fragParams 1 10 2 1 with data := bytes 2 0 } }
+      let (p, _) := feed (← serverPeer) [relFrag 0 1 10 2 0]
+      let acks := p.acknowledgements.size
+      let (p, evs, ok) := p.handleCommand 2000 short (some 0)
+      expect (!ok && evs.isEmpty) "short last fragment taken"
+      expect (p.acknowledgements.size == acks) "short last fragment acked"
+      expect (p.fragmentAssemblers.size == 1) "the set under way was dropped"
+      let (_, evs) := feed p [relFrag 0 1 10 2 1]
+      expect (received evs == #[(0, whole 10 2)]) "set not delivered once whole" } ]
+
+/-! ## The waiting-data budget
+
+Packets a channel stages count against `maximumWaitingData` with the
+fragment sets under way (ENet's `totalWaitingData`). 1 MB packets, so 32
+of them fill it. -/
+
+def mb : Nat := 1024 * 1024
+
+/-- A peer with reliable packets of 1 MB staged at `seqs` on channel 0. -/
+def stagedPeer (seqs : List Nat) : Except String Peer := do
+  return (feed (← serverPeer) (seqs.map fun s => reliableCmd 0 s.toUInt16 (bytes mb s))).1
+
+def budgetTests : List Test := [
+  { name := "past the budget a packet that would be staged is refused and not acked"
+    run := fun _ => do
+      let p ← stagedPeer ((List.range 32).map (· + 3))
+      expect (p.heldBytes ≥ Constants.maximumWaitingData) "budget not filled"
+      let acks := p.acknowledgements.size
+      let (p, evs, ok) := p.handleCommand 2000 (reliableCmd 0 40 (bytes 3 1)) (some 0)
+      expect (!ok && evs.isEmpty) "staged past the budget"
+      expect (p.acknowledgements.size == acks) "refused packet acked"
+      -- an unreliable packet that would be staged is refused too
+      let (_, _, ok) := p.handleCommand 2000 (unreliableCmd 0 5 1 (bytes 3 1)) (some 0)
+      expect (!ok) "staged an unreliable packet past the budget" },
+  { name := "past the budget the packet the channel waits for is still delivered"
+    run := fun _ => do
+      let p ← stagedPeer ((List.range 32).map (· + 2))
+      let (p, evs) := feed p [reliableCmd 0 1 (bytes 3 1)]
+      expect ((received evs).size == 33) "gap filled, but the staged packets were not delivered"
+      expect (p.heldBytes == 0) "still holding bytes" },
+  { name := "past the budget only the set the channel waits for gets an assembler"
+    run := fun _ => do
+      let p ← stagedPeer ((List.range 32).map (· + 3))
+      let acks := p.acknowledgements.size
+      -- a set further ahead is refused
+      let (p, _, ok) := p.handleCommand 2000 (relFrag 0 40 10 2 0) (some 0)
+      expect (!ok && p.fragmentAssemblers.isEmpty) "started a set past the budget"
+      -- the set at 1..2 is what the channel waits for
+      let (p, evs) := feed p [relFrag 0 1 10 2 0, relFrag 0 1 10 2 1]
+      expect (p.acknowledgements.size == acks + 2) "the waited-for set was not acked"
+      expect ((received evs).size == 33) "the set and the staged packets were not delivered"
+      expect ((received evs)[0]? == some (0, whole 10 2)) "the set did not come first" } ]
 
 /-! ## Unsequenced window
 
@@ -773,7 +844,7 @@ def hostTests : List Test := [
         expect (outs.isEmpty && evs.isEmpty) "service before the deadline sent something"
         expect (h'.peers == h.peers) "service before the deadline changed a peer" } ]
 
-def tests : List Test := fragmentTests ++ fragmentValidationTests ++ unsequencedTests ++ hostTests
+def tests : List Test := fragmentTests ++ budgetTests ++ fragmentValidationTests ++ unsequencedTests ++ hostTests
 
 end Unit
 

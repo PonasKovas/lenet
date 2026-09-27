@@ -90,12 +90,12 @@ default build and CI compile. The C library never includes them.
 |-----------------|--------|
 | `Codec`         | every reader primitive either advances past a bounds-checked region or fails in place; field-level write/read inverses; the command parser's fuel is always enough (`parseCommands_fuel_adequate`) |
 | `Roundtrip`     | every command kind roundtrips (`rt_command`), canonical headers roundtrip (`rt_header`), the command list is recovered exactly (`parseCommands_cmdsBytes`), and the full wire datagram roundtrips through the host's real encode/decode pair, checksum verification included (`wire_roundtrip`) |
-| `Reassembly`    | the assembler's bitmap and counter stay in step, writes stay in bounds, and a packet is only released when every fragment arrived (`addFragment_completion_sound`) |
+| `Reassembly`    | the assembler's bitmap and counter stay in step, writes stay in bounds, and a packet is only released when every fragment arrived and they carried exactly its length, and it is those fragments copied to their offsets (`addFragment_completion_sound`) |
 | `Channel`       | the staged-delivery drain has enough fuel and advances the frontier by exactly the delivered span; delivery works across the 16-bit wrap (`wrap_delivery`) |
 | `Unsequenced`   | a group accepted once is always rejected afterwards (`checkAndAdd_idempotent`) |
 | `Time`          | time differences don't depend on when the clock started; 16-bit wire timestamps are recovered exactly (`fromWire_recovers`) |
 | `Deadline`      | `nextDeadline` is always one of the host's timers and no timer is earlier (`nextDeadline_mem`, `nextDeadline_earliest`) |
-| `Resources`     | the fragment-assembler cap holds and every assembler stays well formed with its memory fixed at creation (`handleFragment_assemblersOk`), the assemblers hold under 64 MB per peer (`handleFragment_waiting`), and a channel stages at most seven windows of reliable packets whatever the sender does (`stagedReliableInv_size`) |
+| `Resources`     | the fragment-assembler cap holds and every assembler stays well formed, storing at most 65536 fragments that carry at most 32 MB (`handleFragment_assemblersOk`, `assemblerOk_footprint`), the sets under way claim under 64 MB per peer (`handleFragment_waiting`), and a channel stages at most seven windows of reliable packets whatever the sender does (`stagedReliableInv_size`) |
 | `Events`        | every per-peer step keeps the peer's events consistent: connect only when not already connected, receives only while connected, no way back but a disconnect (`handleCommand_wf`, `checkPeerTimeouts_wf`, `pollPeer_wf`) |
 | `HostEvents`    | the same for the whole host: from `Host.create`, after any sequence of received datagrams, `service` calls and application calls, every peer slot's events are consistent, so between two connects of a slot there is always a disconnect (`run_wf`, `EventsWf.disconnect_between`) |
 | `Window`        | the sender side of every channel: from `Host.create`, after any sequence of operations, first sends of reliable commands go out in sequence order (`SpanInv.consecutive`), the window counters count exactly the commands in flight (`SpanInv.counters`), and those lie within six windows ending at the last one sent (`run_span`, `SpanInv.windows`), one fewer than ENet |
@@ -137,23 +137,30 @@ build-time audit rather than a theorem.
 Memory an attacker can make a host hold is bounded:
 
 - **Fragment assemblers:** at most `maximumFragmentAssemblers` (32) per peer
-  are in progress. Each one allocates its full packet up front, capped by
-  the validated total length (32 MB, ENet's `maximumPacketSize`) and a fragment count of at most
-  `maximumReceivedFragmentCount` (65536). ENet has no such cap. When it is
-  full, a new set evicts the oldest unreliable one; if all 32 are reliable,
-  the fragment is dropped without an ACK, so the sender retransmits it
-  later instead of losing it. On top, ENet's byte budget: no new set starts
-  once the assemblers hold `maximumWaitingData` (32 MB), so they hold less
-  than 64 MB per peer (`handleFragment_waiting`).
+  are in progress. Each one holds only the fragments that arrived and a
+  one-byte-per-fragment bitset; the packet is built once the last fragment
+  is in, and only if the fragments carried exactly the set's total length
+  (at most 32 MB, ENet's `maximumPacketSize`), with at most
+  `maximumReceivedFragmentCount` (65536) fragments. ENet has no such cap,
+  and allocates the whole packet when a set starts. When the cap is full, a
+  new set evicts the oldest unreliable one; if all 32 are reliable, the
+  fragment is dropped without an ACK, so the sender retransmits it later
+  instead of losing it. No new set starts once the sets under way claim
+  `maximumWaitingData` (32 MB) or 65536 fragments between them, so they
+  claim less than 64 MB per peer (`handleFragment_waiting`).
+- **The waiting-data budget:** ENet's `maximumWaitingData` (32 MB) covers
+  the sets under way and what the channels stage (`Peer.heldBytes`). Past
+  it, a packet that would be staged is refused without an ACK and no new
+  set starts, except the packet or set its channel delivers next.
 - **Staged reliable packets:** only in-window sequence numbers are staged,
   each at most once, and a delivery drops the ones its span jumped over, so
   a channel never holds more than 28672 (seven windows). ENet keeps those
   jumped-over packets, where they stall its dispatch.
 - **Staged unreliable packets:** only those sent after an in-window reliable
   command, each at most once, at most `maximumStagedUnreliable` (1024) per
-  channel. ENet bounds them only by `maximumWaitingData`.
+  channel, and within the budget. ENet bounds them by the budget only.
 - **ACK queue:** not capped on purpose. It grows by at most 32 entries per
   received datagram and each service call drains it; capping it would only
   force retransmissions. This matches ENet.
 
-The replay checks all four bounds after every service step.
+The replay checks the counts after every service step.

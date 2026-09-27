@@ -16,9 +16,15 @@ and docs. Worked through in order; each item says what was done.
    zeroed packet. Staged ahead of the frontier, it leaves the assemblers,
    so `maximumWaitingData` no longer counts it; staging is capped by count
    only. 40 such fragments (1160 wire bytes) held 1.5 GB. ENet charges
-   every queued incoming packet to `totalWaitingData`. Fix: charge staged
-   packets to the budget, reject a total larger than the fragment count
-   allows, complete a set only when its bytes cover the total.
+   every queued incoming packet to `totalWaitingData`.
+   **Done:** the budget counts staged packets (`Peer.heldBytes`,
+   `handleHeldData`), except the packet or set the channel delivers next;
+   a set completes only once its fragments carried its total
+   (`bytesFit`); assemblers store what arrived and build the packet at the
+   end, and the sets under way claim at most 65536 fragments. Proofs
+   updated, five unit tests, test/README.md triage. Bench: small packets
+   within noise, 4096-byte fragmented ~5% slower (more allocations), large
+   packets unchanged.
 2. **C API: one outgoing buffer per thread, not per host**
    (`lenet_capi.c` `g_out_buf`). lenet-rs promises per host and its `Host`
    is `Send`, so two hosts on a thread, or a task moved between threads,

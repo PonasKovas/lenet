@@ -14,9 +14,11 @@ structure FragmentOrigin where
   reliable set. -/
   reliableSeq : UInt16 := 0
 deriving DecidableEq, Inhabited
-
 /--
-State machine for assembling a fragmented packet from incoming fragment commands.
+State machine for assembling a fragmented packet from incoming fragment
+commands. It holds only what arrived: the packet is built once the last
+fragment is in (`assemble`), so a set that claims a large total but sends
+little costs little. ENet allocates the whole packet when a set starts.
 -/
 structure FragmentAssembler where
   origin              : FragmentOrigin := {}
@@ -24,8 +26,14 @@ structure FragmentAssembler where
   totalLength         : Nat
   fragmentCount       : Nat
   fragmentsRemaining  : Nat
-  received            : Array Bool
-  buffer              : ByteArray
+  /-- One byte per fragment of the set, nonzero once it arrived: a byte, not
+  a `Bool`, so the bitset a set claims costs one byte per fragment, not a
+  boxed word. -/
+  received            : ByteArray
+  /-- Data bytes received so far. -/
+  receivedBytes       : Nat
+  /-- The fragments received so far, as `(offset, data)`, in arrival order. -/
+  fragments           : Array (Nat × ByteArray)
 deriving BEq, Inhabited
 
 namespace FragmentAssembler
@@ -64,15 +72,14 @@ def init (startSequenceNumber : UInt16) (totalLength : Nat) (fragmentCount : Nat
   if totalLength < fragmentCount then
     throw (CodecError.custom "Total length cannot be less than fragment count")
 
-  let received := Array.replicate fragmentCount false
-  let buffer := zeros totalLength
   return {
     startSequenceNumber
     totalLength
     fragmentCount
     fragmentsRemaining := fragmentCount
-    received
-    buffer
+    received           := zeros fragmentCount
+    receivedBytes      := 0
+    fragments          := #[]
   }
 
 /-- Whether `addFragment` takes fragment `fragmentNumber` of `data` at
@@ -80,9 +87,48 @@ def init (startSequenceNumber : UInt16) (totalLength : Nat) (fragmentCount : Nat
 def fits (a : FragmentAssembler) (fragmentNumber : Nat) (offset : Nat) (data : ByteArray) : Bool :=
   fragmentNumber < a.fragmentCount && offset < a.totalLength && offset + data.size ≤ a.totalLength
 
+/-- Whether fragment `fragmentNumber` already arrived. -/
+def hasFragment (a : FragmentAssembler) (fragmentNumber : Nat) : Bool :=
+  if h : fragmentNumber < a.received.size then a.received[fragmentNumber] != 0 else false
+
+/-- Whether a new fragment of `size` bytes leaves the set able to complete:
+it fits in what is still missing, and the last missing fragment brings
+exactly the rest. So a set completes only once its fragments carried
+`totalLength` bytes. ENet completes a set on its fragment count alone, so
+one fragment of one byte can claim a whole packet; no honest sender does
+that, since its fragments tile the packet. -/
+def bytesFit (a : FragmentAssembler) (size : Nat) : Bool :=
+  a.receivedBytes + size ≤ a.totalLength &&
+    (a.fragmentsRemaining != 1 || a.receivedBytes + size == a.totalLength)
+
+/-- Whether `addFragment` takes fragment `fragmentNumber` of `data` at
+`offset`: it `fits` the set, and it is a duplicate (taken and ignored, so
+its lost ACK is sent again) or its bytes fit what is missing. -/
+def takes (a : FragmentAssembler) (fragmentNumber : Nat) (offset : Nat) (data : ByteArray) : Bool :=
+  a.fits fragmentNumber offset data && (a.hasFragment fragmentNumber || a.bytesFit data.size)
+
+/-- The fragments appended in arrival order, when each starts where the
+ones before it ended (they arrived in order, as they usually do). -/
+def appendInOrder (fragments : Array (Nat × ByteArray)) (capacity : Nat) : Option ByteArray :=
+  fragments.foldl (init := some (ByteArray.emptyWithCapacity capacity)) fun acc (offset, data) =>
+    match acc with
+    | some buf => if offset == buf.size then some (buf ++ data) else none
+    | none => none
+
+/-- The packet: every fragment copied to its offset. A packet built from
+fragments that tile it holds exactly their bytes. Fragments that arrived in
+order are appended in one pass; otherwise they are copied into zeros. -/
+def assemble (a : FragmentAssembler) : ByteArray :=
+  match appendInOrder a.fragments a.totalLength with
+  | some buf => if buf.size == a.totalLength then buf else placed
+  | none => placed
+where
+  placed := a.fragments.foldl (fun buf (offset, data) => copyBytes buf offset data) (zeros a.totalLength)
+
 /--
 Adds an incoming fragment to the assembler.
 - If the fragment is already received, returns the unchanged assembler (idempotent).
+- If the fragment's bytes cannot fit the set (`bytesFit`), refuses it.
 - If the fragment completes the packet, returns `(updatedAssembler, some assembledData)`.
 - If more fragments are still needed, returns `(updatedAssembler, none)`.
 -/
@@ -94,30 +140,34 @@ def addFragment (a : FragmentAssembler) (fragmentNumber : Nat) (offset : Nat) (d
   if offset + data.size > a.totalLength then
     throw (CodecError.custom "Fragment data extends beyond total packet length")
 
-  -- If this fragment was already received, ignore duplicate chunk:
-  match a.received[fragmentNumber]? with
-  | none =>
+  if h : fragmentNumber < a.received.size then
+    -- If this fragment was already received, ignore duplicate chunk:
+    if a.received[fragmentNumber] != 0 then
+      return (a, none)
+    else if !a.bytesFit data.size then
+      throw (CodecError.custom "Fragment bytes do not fit what the set is missing")
+    else
+      -- the fields leave `a` first, so its arrays are held once and update in
+      -- place (reading them while `a` still holds them would copy them)
+      match a, h with
+      | { origin, startSequenceNumber, totalLength, fragmentCount, fragmentsRemaining, received,
+          receivedBytes, fragments }, h =>
+      let remaining := fragmentsRemaining - 1
+      let updated : FragmentAssembler := {
+        origin, startSequenceNumber, totalLength, fragmentCount
+        received           := received.set fragmentNumber 1 h
+        receivedBytes      := receivedBytes + data.size
+        fragments          := fragments.push (offset, data)
+        fragmentsRemaining := remaining
+      }
+      if remaining == 0 then
+        return (updated, some updated.assemble)
+      else
+        return (updated, none)
+  else
     -- Unreachable: `fragmentNumber < a.fragmentCount` was checked above and
     -- `received` is allocated with `fragmentCount` slots in `init`.
     throw (CodecError.custom s!"received-bitset out of sync with fragment count {a.fragmentCount}")
-  | some true =>
-    return (a, none)
-  | some false =>
-    -- the fields leave `a` first, so its arrays are held once and update in
-    -- place (reading them while `a` still holds them would copy them)
-    let { origin, startSequenceNumber, totalLength, fragmentCount, fragmentsRemaining, received, buffer } := a
-    let remaining := fragmentsRemaining - 1
-    let updated : FragmentAssembler := {
-      origin, startSequenceNumber, totalLength, fragmentCount
-      received           := received.setIfInBounds fragmentNumber true
-      buffer             := copyBytes buffer offset data
-      fragmentsRemaining := remaining
-    }
-
-    if remaining == 0 then
-      return (updated, some updated.buffer)
-    else
-      return (updated, none)
 
 end FragmentAssembler
 

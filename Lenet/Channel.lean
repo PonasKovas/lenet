@@ -51,6 +51,12 @@ deriving BEq, Inhabited
 
 namespace Channel
 
+/-- The bytes of the packets the channel holds back, reliable and
+unreliable. -/
+def stagedBytes (c : Channel) : Nat :=
+  c.stagedReliable.foldl (fun n e => n + e.packet.data.size) 0 +
+    c.stagedUnreliable.foldl (fun n e => n + e.packet.data.size) 0
+
 /-- Any index reduced mod the window count is a valid window slot. -/
 theorem modWindowIndex_lt (i : Nat) :
     i % Constants.reliableWindows < Constants.reliableWindows :=

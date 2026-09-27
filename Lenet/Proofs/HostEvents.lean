@@ -116,6 +116,15 @@ theorem handleVerifyConnect_named (p : Peer) (pr) : ∀ e ∈ (p.handleVerifyCon
     · intro e he; simp at he; subst he; rfl
     · intro e he; simp at he; subst he; exact removeSent_peerId _ _ _
 
+theorem handleHeldData_peerId (p : Peer) (cmd) : (p.handleHeldData cmd).1.peerId = p.peerId := by
+  rcases handleHeldData_cases p cmd with he | he <;> rw [he]
+  exact handleData_peerId _ _
+theorem handleHeldData_named (p : Peer) (cmd) :
+    ∀ e ∈ (p.handleHeldData cmd).2.1, eventPeer e = p.peerId := by
+  rcases handleHeldData_cases p cmd with he | he <;> rw [he]
+  · intro e he; simp at he
+  · exact handleData_named _ _
+
 theorem applyCommand_peerId (p : Peer) (now cmd) : (p.applyCommand now cmd).1.peerId = p.peerId := by
   unfold applyCommand; dsimp only
   split
@@ -124,6 +133,7 @@ theorem applyCommand_peerId (p : Peer) (now cmd) : (p.applyCommand now cmd).1.pe
     | exact handleDisconnect_peerId _ _
     | exact handleVerifyConnect_peerId _ _
     | exact handleData_peerId _ _
+    | exact handleHeldData_peerId _ _
     | exact handleFragment_peerId _ _ _ _ _
     | rfl
 
@@ -136,6 +146,7 @@ theorem applyCommand_named (p : Peer) (now cmd) :
     | exact handleDisconnect_named _ _
     | exact handleVerifyConnect_named _ _
     | exact handleData_named _ _
+    | exact handleHeldData_named _ _
     | exact handleFragment_named _ _ _ _ _
     | (intro e he; simp at he; done)
 

@@ -14,18 +14,18 @@ The attacker-controlled memory surfaces and their bounds:
 1. **Fragment assemblers** (`Peer.fragmentAssemblers`): capped at
    `maximumFragmentAssemblers` concurrent assemblies
    (`handleFragment_cap_preserved`); every assembler is created by
-   `FragmentAssembler.init`, whose validation pins the allocation
-   (`init_bounds`: buffer = totalLength ≤ maxPacketSize, bitset =
-   fragmentCount; the create-guard additionally bounds fragmentCount by
-   `maximumReceivedFragmentCount`), and `addFragment` never resizes
-   (`addFragment_size_preserved`). Over the whole array: every assembler
-   keeps `Proofs.Inv` (Proofs/Reassembly.lean) and those bounds, and the cap holds
-   (`AssemblersOk`, `handleFragment_assemblersOk`,
-   `assemblerOk_footprint`). Worst-case attacker-triggered footprint per
-   peer: `cap × (maximumPacketSize + maximumReceivedFragmentCount)` - a
-   constant, not a function of attack duration. In bytes held, tighter:
-   under `maximumWaitingData + maximumPacketSize` (`handleFragment_waiting`,
-   `waitingOk_footprint`), ENet's budget.
+   `FragmentAssembler.init`, whose validation pins `totalLength ≤
+   maxPacketSize` and the bitset to `fragmentCount` bytes (`init_bounds`;
+   the create-guard additionally bounds fragmentCount by
+   `maximumReceivedFragmentCount`), and `addFragment` never resizes the
+   bitset (`addFragment_size_preserved`). An assembler stores only the
+   fragments that arrived. Over the whole array: every assembler keeps
+   `Proofs.Inv` (Proofs/Reassembly.lean) and those bounds, and the cap
+   holds (`AssemblersOk`, `handleFragment_assemblersOk`), so each one stores
+   at most `maximumReceivedFragmentCount` fragments carrying at most
+   `maximumPacketSize` bytes (`assemblerOk_footprint`). What the sets under
+   way claim, in bytes: under `maximumWaitingData + maximumPacketSize`
+   (`handleFragment_waiting`, `waitingOk_footprint`), ENet's budget.
 2. **Staged reliable packets** (`Channel.stagedReliable`): at most
    `(freeReliableWindows - 1) * reliableWindowSize` per channel
    (`stagedReliableInv_size`), whatever the sender does. The receive-window
@@ -59,79 +59,29 @@ open Peer FragmentAssembler
 
 /-! ## Per-assembler allocation bounds -/
 
-/-- A successfully created assembler allocates exactly `totalLength` buffer
-bytes and a `fragmentCount`-slot bitset, both validated by `init`
-(the throws pin `totalLength ≤ maxPacketSize` and
-`fragmentCount ≤ maximumFragmentCount`). -/
+/-- A successfully created assembler allocates only its `fragmentCount`-slot
+bitset, and `init`'s validation pins `totalLength ≤ maxPacketSize` and
+`fragmentCount ≤ maximumFragmentCount`. -/
 theorem init_bounds {ssn : UInt16} {tl fc maxPacketSize : Nat} {a : FragmentAssembler}
     (h : FragmentAssembler.init ssn tl fc maxPacketSize = .ok a) :
-    a.buffer.size = tl ∧ tl ≤ maxPacketSize ∧ fc ≤ Constants.maximumFragmentCount := by
+    a.received.size = fc ∧ tl ≤ maxPacketSize ∧ fc ≤ Constants.maximumFragmentCount := by
   unfold FragmentAssembler.init at h
-  by_cases hc : fc = 0
-  · simp [hc, Except.throw_eq', Except.bind_error'] at h
-  by_cases hc2 : fc > Constants.maximumFragmentCount
-  · simp [hc, hc2, Except.throw_eq', Except.bind_error'] at h
-  by_cases hc3 : tl > maxPacketSize
-  · simp [hc, hc2, hc3, Except.throw_eq', Except.bind_error'] at h
-  by_cases hc4 : tl < fc
-  · simp [hc, hc2, hc3, hc4, Except.throw_eq', Except.map_error'] at h
-  have hc' : (fc == 0) = false := by simp [hc]
-  have hc2' : (fc > Constants.maximumFragmentCount) = false := by simp [hc2]
-  have hc3' : (tl > maxPacketSize) = false := by simp [hc3]
-  have hc4' : (tl < fc) = false := by simp [hc4]
-  simp only [hc', hc2', hc3', hc4', Bool.false_eq_true, reduceIte, Except.throw_eq',
-    Except.pure_eq'] at h
-  simp at h
-  cases h
-  refine ⟨?_, ?_, ?_⟩
-  · exact zeros_size tl
-  · omega
-  · omega
+  simp only [bind, Except.bind, pure, Except.pure, throw, throwThe, MonadExceptOf.throw] at h
+  repeat' split at h
+  all_goals cases h
+  next h2 h3 _ =>
+  exact ⟨zeros_size fc, by omega, by omega⟩
 
 /-! ## Size preservation through `addFragment` -/
 
-/-- `addFragment` never resizes the bitset or the buffer. -/
+/-- `addFragment` never resizes the bitset. -/
 theorem addFragment_size_preserved {a a' : FragmentAssembler} {n off : Nat} {d : ByteArray}
     {r : Option ByteArray} (h : a.addFragment n off d = .ok (a', r)) :
-    a'.received.size = a.received.size ∧ a'.buffer.size = a.buffer.size := by
-  by_cases h1 : a.fragmentCount ≤ n
-  · simp only [FragmentAssembler.addFragment,
-      show (a.fragmentCount ≤ n) = true from by simp [h1], reduceIte,
-      Except.throw_eq', Except.bind_error'] at h
-    cases h
-  by_cases h2 : a.totalLength ≤ off
-  · simp only [FragmentAssembler.addFragment,
-      show (a.fragmentCount ≤ n) = false from by simp [h1],
-      show (a.totalLength ≤ off) = true from by simp [h2], reduceIte,
-      Except.throw_eq', Except.bind_error'] at h
-    cases h
-  by_cases h3 : a.totalLength < off + d.size
-  · simp only [FragmentAssembler.addFragment,
-      show (a.fragmentCount ≤ n) = false from by simp [h1],
-      show (a.totalLength ≤ off) = false from by simp [h2],
-      show (a.totalLength < off + d.size) = true from by simp [h3], reduceIte,
-      Except.throw_eq', Except.bind_error'] at h
-    cases h
-  -- range checks passed; case on the bitset slot
-  simp only [FragmentAssembler.addFragment,
-    show (a.fragmentCount ≤ n) = false from by simp [h1],
-    show (a.totalLength ≤ off) = false from by simp [h2],
-    show (a.totalLength < off + d.size) = false from by simp [h3],
-    Bool.false_eq_true, reduceIte] at h
-  split at h
-  · next hb => cases h
-  · next hb =>
-    -- duplicate: assembler returned unchanged
-    cases h
-    exact ⟨rfl, rfl⟩
-  · next hb =>
-    -- fresh slot: record it, copy the bytes
-    split at h
-    all_goals cases h
-    all_goals
-      refine ⟨?_, ?_⟩
-      · simp
-      · exact copyBytes_size _ _ _
+    a'.received.size = a.received.size := by
+  obtain ⟨-, -, -, hn, hc⟩ := addFragment_ok_cases h
+  rcases hc with ⟨-, rfl, -⟩ | ⟨-, -, rfl, -⟩
+  · rfl
+  · exact byteArray_size_set _ _ _ _
 
 /-! ## The assembler concurrency cap -/
 
@@ -155,9 +105,9 @@ theorem assemblerRoom_size {xs room : Array FragmentAssembler}
 
 /-- `absorbFragment` never grows the array beyond the cap. -/
 theorem absorbFragment_cap_preserved (xs : Array FragmentAssembler) (origin : FragmentOrigin)
-    (params : Protocol.FragmentParams)
+    (params : Protocol.FragmentParams) (held : Unit → Nat) (next : Bool)
     (hcap : xs.size ≤ Constants.maximumFragmentAssemblers) :
-    (absorbFragment xs origin params).1.size ≤ Constants.maximumFragmentAssemblers := by
+    (absorbFragment xs origin params held next).1.size ≤ Constants.maximumFragmentAssemblers := by
   unfold absorbFragment
   split
   · exact hcap
@@ -167,6 +117,10 @@ theorem absorbFragment_cap_preserved (xs : Array FragmentAssembler) (origin : Fr
       · exact hcap
       · next room hroom =>
         have hlt := assemblerRoom_size hroom hcap
+        split
+        · exact hcap
+        split
+        · exact hcap
         split
         · exact hcap
         split
@@ -196,18 +150,19 @@ theorem receiveOnChannel_fragmentAssemblers_size (p : Peer) (channelId : UInt8)
 /-- Where `handleFragment` can leave the assembler array: unchanged, the
 absorbed array `xs`, `xs` with the set's assembler replaced by what
 `addFragment` made of it, or `xs` without it (then maybe pruned by a
-channel delivery). A property of all four holds afterwards. -/
+channel delivery). A property of all four, for whatever budget inputs
+`absorbFragment` is given, holds afterwards. -/
 theorem handleFragment_assemblers (p : Peer) (c : UInt8) (s : UInt16) (pr : Protocol.FragmentParams)
     (u : Bool) (P : Array FragmentAssembler → Prop) (h0 : P p.fragmentAssemblers)
-    (habs : P (absorbFragment p.fragmentAssemblers (fragmentOrigin c s u) pr).1)
-    (hset : ∀ i (hi : i < (absorbFragment p.fragmentAssemblers (fragmentOrigin c s u) pr).1.size) w r,
-      (absorbFragment p.fragmentAssemblers (fragmentOrigin c s u) pr).2 = some i →
-      ((absorbFragment p.fragmentAssemblers (fragmentOrigin c s u) pr).1[i]).addFragment
+    (habs : ∀ held next, P (absorbFragment p.fragmentAssemblers (fragmentOrigin c s u) pr held next).1)
+    (hset : ∀ held next i (hi : i < (absorbFragment p.fragmentAssemblers (fragmentOrigin c s u) pr held next).1.size) w r,
+      (absorbFragment p.fragmentAssemblers (fragmentOrigin c s u) pr held next).2 = some i →
+      ((absorbFragment p.fragmentAssemblers (fragmentOrigin c s u) pr held next).1[i]).addFragment
         pr.fragmentNumber.toNat pr.fragmentOffset.toNat pr.data = .ok (w, r) →
-      P ((absorbFragment p.fragmentAssemblers (fragmentOrigin c s u) pr).1.set i w hi))
-    (herase : ∀ i (hi : i < (absorbFragment p.fragmentAssemblers (fragmentOrigin c s u) pr).1.size),
-      (absorbFragment p.fragmentAssemblers (fragmentOrigin c s u) pr).2 = some i →
-      P ((absorbFragment p.fragmentAssemblers (fragmentOrigin c s u) pr).1.eraseIdx i hi))
+      P ((absorbFragment p.fragmentAssemblers (fragmentOrigin c s u) pr held next).1.set i w hi))
+    (herase : ∀ held next i (hi : i < (absorbFragment p.fragmentAssemblers (fragmentOrigin c s u) pr held next).1.size),
+      (absorbFragment p.fragmentAssemblers (fragmentOrigin c s u) pr held next).2 = some i →
+      P ((absorbFragment p.fragmentAssemblers (fragmentOrigin c s u) pr held next).1.eraseIdx i hi))
     (hrecv : ∀ (q : Peer), P q.fragmentAssemblers → ∀ c recv, P (q.receiveOnChannel c recv).1.fragmentAssemblers) :
     P (p.handleFragment c s pr u).1.fragmentAssemblers := by
   unfold handleFragment
@@ -216,7 +171,10 @@ theorem handleFragment_assemblers (p : Peer) (c : UInt8) (s : UInt16) (pr : Prot
   split
   · exact h0
   dsimp only
-  generalize hab : absorbFragment p.fragmentAssemblers (fragmentOrigin c s u) pr = ab at habs hset herase
+  have habs := habs (fun _ => channelsStagedBytes p.channels) (deliversNext p.channels c pr.startSequenceNumber u)
+  have hset := hset (fun _ => channelsStagedBytes p.channels) (deliversNext p.channels c pr.startSequenceNumber u)
+  have herase := herase (fun _ => channelsStagedBytes p.channels) (deliversNext p.channels c pr.startSequenceNumber u)
+  generalize hab : absorbFragment p.fragmentAssemblers (fragmentOrigin c s u) pr _ _ = ab at habs hset herase
   obtain ⟨xs, i?⟩ := ab
   dsimp only at habs hset herase ⊢
   cases i? with
@@ -228,7 +186,10 @@ theorem handleFragment_assemblers (p : Peer) (c : UInt8) (s : UInt16) (pr : Prot
       rw [takeAt_eq]
       dsimp only
       split
-      · rw [set_setIfInBounds_same, Array.set_getElem_self]; exact habs
+      · split
+        · show P ((xs.set i default hi).eraseIdxIfInBounds i)
+          rw [set_eraseIdxIfInBounds_same]; exact herase i hi rfl
+        · rw [set_setIfInBounds_same, Array.set_getElem_self]; exact habs
       · split
         · next w heq => rw [set_setIfInBounds_same]; exact hset i hi w none rfl heq
         · next heq =>
@@ -247,12 +208,12 @@ theorem handleFragment_cap_preserved (p : Peer) (channelId : UInt8) (reliableSeq
     (hcap : p.fragmentAssemblers.size ≤ Constants.maximumFragmentAssemblers) :
     (handleFragment p channelId reliableSeq params unreliable).1.fragmentAssemblers.size
       ≤ Constants.maximumFragmentAssemblers := by
-  have hxs := absorbFragment_cap_preserved p.fragmentAssemblers
-    (fragmentOrigin channelId reliableSeq unreliable) params hcap
+  have hxs := fun held next => absorbFragment_cap_preserved p.fragmentAssemblers
+    (fragmentOrigin channelId reliableSeq unreliable) params held next hcap
   refine handleFragment_assemblers p channelId reliableSeq params unreliable
     (fun ys => ys.size ≤ Constants.maximumFragmentAssemblers) hcap hxs ?_ ?_ ?_
-  · intro i hi w r _ _; simpa using hxs
-  · intro i hi _; simp only [Array.size_eraseIdx]; omega
+  · intro held next i hi w r _ _; simpa using hxs held next
+  · intro held next i hi _; simp only [Array.size_eraseIdx]; have := hxs held next; omega
   · intro q hq c recv; exact Nat.le_trans (receiveOnChannel_fragmentAssemblers_size _ _ _) hq
 
 /-! ## Staged reliable packets -/
@@ -593,7 +554,7 @@ theorem handleFragment_peerStagedInv {p : Peer} (h : PeerStagedInv p) (channelId
   split
   · exact h
   dsimp only
-  generalize absorbFragment p.fragmentAssemblers (fragmentOrigin channelId reliableSeq unreliable) params = ab
+  generalize absorbFragment p.fragmentAssemblers (fragmentOrigin channelId reliableSeq unreliable) params _ _ = ab
   obtain ⟨xs, i?⟩ := ab
   cases i? with
   | none => exact hfa _
@@ -603,7 +564,7 @@ theorem handleFragment_peerStagedInv {p : Peer} (h : PeerStagedInv p) (channelId
     · rw [takeAt_eq]
       dsimp only
       split
-      · exact hfa _
+      · split <;> exact hfa _
       · split
         · exact hfa _
         · refine receiveOnChannel_peerStagedInv (hfa _) _ _ fun c hc => ?_
@@ -804,8 +765,8 @@ theorem assemblerRoom_sub {xs room : Array FragmentAssembler} (h : assemblerRoom
 
 /-- Absorbing a fragment keeps every assembler well formed. -/
 theorem absorbFragment_ok {xs : Array FragmentAssembler} (hxs : ∀ a ∈ xs, AssemblerOk a)
-    (origin : FragmentOrigin) (params : Protocol.FragmentParams) :
-    ∀ a ∈ (absorbFragment xs origin params).1, AssemblerOk a := by
+    (origin : FragmentOrigin) (params : Protocol.FragmentParams) (held : Unit → Nat) (next : Bool) :
+    ∀ a ∈ (absorbFragment xs origin params held next).1, AssemblerOk a := by
   unfold absorbFragment
   split
   · exact hxs
@@ -815,6 +776,10 @@ theorem absorbFragment_ok {xs : Array FragmentAssembler} (hxs : ∀ a ∈ xs, As
       split
       · exact hxs
       · next room hroom =>
+        split
+        · exact hxs
+        split
+        · exact hxs
         split
         · exact hxs
         split
@@ -861,14 +826,14 @@ theorem receiveOnChannel_ok {p : Peer} (h : ∀ a ∈ p.fragmentAssemblers, Asse
 theorem handleFragment_ok {p : Peer} (h : ∀ a ∈ p.fragmentAssemblers, AssemblerOk a) (channelId : UInt8)
     (reliableSeq : UInt16) (params : Protocol.FragmentParams) (unreliable : Bool) :
     ∀ a ∈ (handleFragment p channelId reliableSeq params unreliable).1.fragmentAssemblers, AssemblerOk a := by
-  have hxs := absorbFragment_ok h (fragmentOrigin channelId reliableSeq unreliable) params
+  have hxs := fun held next => absorbFragment_ok h (fragmentOrigin channelId reliableSeq unreliable) params held next
   refine handleFragment_assemblers p channelId reliableSeq params unreliable
     (fun ys => ∀ a ∈ ys, AssemblerOk a) h hxs ?_ ?_ ?_
-  · intro i hi w r _ hadd a ha
+  · intro held next i hi w r _ hadd a ha
     rcases Array.mem_or_eq_of_mem_set (w := hi) ha with ha | rfl
-    · exact hxs a ha
-    · exact addFragment_ok (hxs _ (Array.getElem_mem hi)) hadd
-  · intro i hi _ a ha; exact hxs a (Array.mem_of_mem_eraseIdx ha)
+    · exact hxs held next a ha
+    · exact addFragment_ok (hxs held next _ (Array.getElem_mem hi)) hadd
+  · intro held next i hi _ a ha; exact hxs held next a (Array.mem_of_mem_eraseIdx ha)
   · intro q hq c recv; exact receiveOnChannel_ok hq _ _
 
 /-- The fragment path keeps the peer's assemblers within the cap and well
@@ -888,13 +853,16 @@ theorem receiveOnChannel_assemblersOk {p : Peer} (h : AssemblersOk p) (channelId
 theorem assemblersOk_reset (p : Peer) : AssemblersOk p.reset := by
   simp [AssemblersOk, Peer.reset, Constants.maximumFragmentAssemblers]
 
-/-- Each assembler's memory: at most `maximumPacketSize` buffer bytes and
-`maximumReceivedFragmentCount` bitset slots. -/
+/-- Each assembler's memory: the fragments it stores, at most
+`maximumReceivedFragmentCount` of them carrying at most `maximumPacketSize`
+bytes between them, and a bitset of at most `maximumReceivedFragmentCount`
+bytes. -/
 theorem assemblerOk_footprint {a : FragmentAssembler} (h : AssemblerOk a) :
-    a.buffer.size ≤ Constants.maximumPacketSize ∧
+    (a.fragments.toList.map (·.2.size)).sum ≤ Constants.maximumPacketSize ∧
+      a.fragments.size ≤ Constants.maximumReceivedFragmentCount ∧
       a.received.size ≤ Constants.maximumReceivedFragmentCount := by
-  obtain ⟨⟨hr, hb, -⟩, htl, hfc⟩ := h
-  exact ⟨hb ▸ htl, hr ▸ hfc⟩
+  obtain ⟨⟨hr, hc, hf, hs, hb, -⟩, htl, hfc⟩ := h
+  exact ⟨by omega, by omega, by omega⟩
 
 /-! ## The waiting-data budget
 
@@ -964,8 +932,8 @@ theorem addFragment_key {a a' : FragmentAssembler} {n off : Nat} {d : ByteArray}
 
 /-- Absorbing a fragment keeps the budget. -/
 theorem absorbFragment_waiting {xs : Array FragmentAssembler} (hxs : WaitingOk xs)
-    (origin : FragmentOrigin) (params : Protocol.FragmentParams) :
-    WaitingOk (absorbFragment xs origin params).1 := by
+    (origin : FragmentOrigin) (params : Protocol.FragmentParams) (held : Unit → Nat) (next : Bool) :
+    WaitingOk (absorbFragment xs origin params held next).1 := by
   unfold absorbFragment
   split
   · exact hxs
@@ -978,6 +946,10 @@ theorem absorbFragment_waiting {xs : Array FragmentAssembler} (hxs : WaitingOk x
         split
         · exact hxs
         · next hbudget =>
+          split
+          · exact hxs
+          split
+          · exact hxs
           split
           · next newAsm hinit =>
             have htl := (init_bounds hinit).2.1
@@ -1056,12 +1028,12 @@ theorem receiveOnChannel_waiting {p : Peer} (h : WaitingOk p.fragmentAssemblers)
 theorem handleFragment_waiting {p : Peer} (h : WaitingOk p.fragmentAssemblers) (channelId : UInt8)
     (reliableSeq : UInt16) (params : Protocol.FragmentParams) (unreliable : Bool) :
     WaitingOk (handleFragment p channelId reliableSeq params unreliable).1.fragmentAssemblers := by
-  have hxs := absorbFragment_waiting h (fragmentOrigin channelId reliableSeq unreliable) params
+  have hxs := fun held next => absorbFragment_waiting h (fragmentOrigin channelId reliableSeq unreliable) params held next
   refine handleFragment_assemblers p channelId reliableSeq params unreliable WaitingOk h hxs ?_ ?_ ?_
-  · intro i hi w r _ hadd
+  · intro held next i hi w r _ hadd
     obtain ⟨ko, ks, kt⟩ := addFragment_key hadd
-    exact hxs.set i hi w ko ks kt
-  · intro i hi _; exact hxs.eraseIdx i hi
+    exact (hxs held next).set i hi w ko ks kt
+  · intro held next i hi _; exact (hxs held next).eraseIdx i hi
   · intro q hq c recv; exact receiveOnChannel_waiting hq _ _
 
 theorem waitingOk_empty : WaitingOk #[] :=

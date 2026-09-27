@@ -1256,6 +1256,12 @@ theorem handleData_spanInv {p : Peer} (h : SpanInv p) (cmd : Protocol.Command) :
     · exact h
   · exact h
 
+theorem handleHeldData_spanInv {p : Peer} (h : SpanInv p) (cmd : Protocol.Command) :
+    SpanInv (p.handleHeldData cmd).1 := by
+  rcases handleHeldData_cases p cmd with he | he <;> rw [he]
+  · exact h
+  · exact handleData_spanInv h _
+
 theorem handleFragment_spanInv {p : Peer} (h : SpanInv p) (channelId : UInt8) (reliableSeq : UInt16)
     (params : Protocol.FragmentParams) (unreliable : Bool) :
     SpanInv (p.handleFragment channelId reliableSeq params unreliable).1 := by
@@ -1266,7 +1272,7 @@ theorem handleFragment_spanInv {p : Peer} (h : SpanInv p) (channelId : UInt8) (r
   split
   · exact h
   dsimp only
-  generalize absorbFragment p.fragmentAssemblers (fragmentOrigin channelId reliableSeq unreliable) params = ab
+  generalize absorbFragment p.fragmentAssemblers (fragmentOrigin channelId reliableSeq unreliable) params _ _ = ab
   obtain ⟨xs, i?⟩ := ab
   cases i? with
   | none => exact hfa _
@@ -1276,7 +1282,7 @@ theorem handleFragment_spanInv {p : Peer} (h : SpanInv p) (channelId : UInt8) (r
     · rw [takeAt_eq]
       dsimp only
       split
-      · exact hfa _
+      · split <;> exact hfa _
       · split
         · exact hfa _
         · refine receiveOnChannel_spanInv (hfa _) _ _ fun c => ?_
@@ -1351,6 +1357,7 @@ theorem applyCommand_spanInv {p : Peer} (h : SpanInv p) (now : UInt32) (cmd : Pr
     | exact handleDisconnect_spanInv h _
     | exact handleVerifyConnect_spanInv h _
     | exact handleData_spanInv h _
+    | exact handleHeldData_spanInv h _
     | exact handleFragment_spanInv h _ _ _ _
     | exact h
     | exact h.kept ⟨rfl, rfl, rfl, rfl⟩
