@@ -550,7 +550,10 @@ def packCommand (p : Peer) (now : UInt32) (st : PackState) (outCmd : OutgoingCom
     { st with reliableHeld := true }.defer outCmd
   else
   let st := if st.fits p.mtu cmd then st else st.nextDatagram
-  if !st.fits p.mtu cmd then st.defer outCmd -- larger than a datagram: never
+  -- larger than a datagram: never sent. Fragments are sized to fit, so this
+  -- does not happen, but a reliable one would still hold back later ones,
+  -- which keeps first sends in sequence order (Proofs/Window.lean)
+  if !st.fits p.mtu cmd then { st with reliableHeld := st.reliableHeld || reliableData }.defer outCmd
   else if !cmd.acknowledge then st.packUnreliable p cmd -- fire-and-forget
   else
     -- reliable: occupy its sequence window on first send, and track it for

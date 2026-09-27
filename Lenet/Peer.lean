@@ -186,14 +186,14 @@ command, if there was one. -/
 def removeSentReliableCommand (p : Peer) (channelId : UInt8) (seq : UInt16) : Peer × Option Protocol.Command :=
   let isIt (outCmd : OutgoingCommand) : Bool :=
     outCmd.command.channelId == channelId && outCmd.command.reliableSequenceNumber == seq
-  match p.sentReliableCommands.find? isIt with
-  | some outCmd =>
+  match p.sentReliableCommands.findFinIdx? isIt with
+  | some i =>
     ({ p with
-      sentReliableCommands  := p.sentReliableCommands.erase outCmd
+      sentReliableCommands  := p.sentReliableCommands.eraseIdx i
       channels              := p.channels.modify channelId.toNat (·.releaseReliableWindow seq)
       -- no underflow: these bytes were added when the command was sent
-      reliableDataInTransit := p.reliableDataInTransit - outCmd.fragmentLength
-    }, some outCmd.command)
+      reliableDataInTransit := p.reliableDataInTransit - p.sentReliableCommands[i].fragmentLength
+    }, some p.sentReliableCommands[i].command)
   | none =>
     -- the first reliable command that is either it or never sent
     match p.outgoingCommands.findFinIdx? fun outCmd =>
