@@ -170,6 +170,10 @@ and docs. Worked through in order; each item says what was done.
 23. `nextDeadline_earliest` only says the fold finds the minimum of the
     list it folds; nothing says `service` before the deadline does no
     work.
+    **Done:** `Proofs/Idle`: on a quiet host (nothing queued, no ACKs owed,
+    no close half done) whose recorded times are in the past, `service`
+    before every timer, and so before `nextDeadline`, sends and reports
+    nothing (`service_before_timers`, `service_before_deadline`).
 24. `checkAndAdd_idempotent` covers the next check only; DESIGN says
     "always".
     **Done (claim):** DESIGN now says what is proven. That a group stays

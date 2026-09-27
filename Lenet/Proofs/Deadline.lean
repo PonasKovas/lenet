@@ -10,8 +10,9 @@ the returned deadline
 
 1. is always present and is one of the host's actual timers
    (`nextDeadline_mem`) - never a spurious wakeup time;
-2. is no later than any scheduled timer (`nextDeadline_earliest`) - a driver
-   that sleeps until it never skips pending work.
+2. is no later than any scheduled timer (`nextDeadline_earliest`). That a
+   driver sleeping until it never skips pending work also needs the timers
+   to be all the work there is: `Proofs/Idle` (`service_before_deadline`).
 
 (2) is about the **wrap-aware** order, and holds whenever the timers lie
 within ENet's 24-hour disambiguation window (`Time.overflow`) of some base

@@ -13,6 +13,7 @@ import Lenet.Proofs.Window
 import Lenet.Proofs.Delivery
 import Lenet.Proofs.Connection
 import Lenet.Proofs.ResourcesRun
+import Lenet.Proofs.Idle
 
 /-!
 # LenetProofs
