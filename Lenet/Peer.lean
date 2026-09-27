@@ -707,13 +707,25 @@ def acksIn (s : PeerState) (cmd : Protocol.Command) : Bool :=
   | .acknowledgingDisconnect => (cmd.body matches .disconnect _)
   | _ => true
 
+/-- Whether `cmd` is reliable data just past its channel's receive window
+(`Channel.isReliableTooFarAhead`, by the set's start for a fragment): it is
+dropped, and not acknowledged, so the sender sends it again. -/
+def tooFarAhead (p : Peer) (cmd : Protocol.Command) : Bool :=
+  let ahead (seq : UInt16) := p.channels[cmd.channelId.toNat]?.any (·.isReliableTooFarAhead seq)
+  match cmd.body with
+  | .sendReliable .. => ahead cmd.reliableSequenceNumber
+  | .sendFragment params => ahead params.startSequenceNumber
+  | _ => false
+
 /-- Processes one incoming command from this peer (`applyCommand`), then
 queues the ACK it asks for when ENet would, echoing the datagram's
-`sentTime`. The flag says whether to read on in the datagram: not after a
-refused command, nor after one asking for an ACK in a datagram without a
-sent time (ENet same). -/
+`sentTime`, except for reliable data too far ahead (`tooFarAhead`). The
+flag says whether to read on in the datagram: not after a refused command,
+nor after one asking for an ACK in a datagram without a sent time (ENet
+same). -/
 def handleCommand (p : Peer) (now : UInt32) (cmd : Protocol.Command) (sentTime : Option UInt16) :
     Peer × Array Event × Bool :=
+  let withhold := p.tooFarAhead cmd
   let (p, events, accepted) := p.applyCommand now cmd
   if !accepted then (p, events, false)
   else if !cmd.acknowledge then (p, events, true)
@@ -721,7 +733,7 @@ def handleCommand (p : Peer) (now : UInt32) (cmd : Protocol.Command) (sentTime :
     match sentTime with
     | none => (p, events, false)
     | some sentTime =>
-      let p := if acksIn p.state cmd then
+      let p := if acksIn p.state cmd && !withhold then
         p.queueAck { channelId := cmd.channelId, reliableSequenceNumber := cmd.reliableSequenceNumber, sentTime }
       else p
       (p, events, true)

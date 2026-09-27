@@ -43,13 +43,14 @@ structure Pair where
 
 /-- One round at `p.now`: service both hosts and route what they emit to
 the other side, unless `drop` says to lose it (`true` for client-to-server
-datagrams, `false` for the other way). The clock then moves 1 ms. -/
-def Pair.round (p : Pair) (drop : Bool → Bool := fun _ => false) : Pair :=
+datagrams, `false` for the other way); `edit` may change a client-to-server
+datagram on the way. The clock then moves 1 ms. -/
+def Pair.round (p : Pair) (drop : Bool → Bool := fun _ => false) (edit : ByteArray → ByteArray := id) : Pair :=
   let (c, couts, cevs) := p.client.service p.now
   let (s, souts, sevs) := p.server.service p.now
   let (s, sevs) := if drop true then (s, sevs) else
     couts.foldl (init := (s, sevs)) fun (s, evs) d =>
-      let (s, e) := s.handleDatagram p.now clientAddr d.2
+      let (s, e) := s.handleDatagram p.now clientAddr (edit d.2)
       (s, evs ++ e)
   let (c, cevs) := if drop false then (c, cevs) else
     souts.foldl (init := (c, cevs)) fun (c, evs) d =>
@@ -58,8 +59,9 @@ def Pair.round (p : Pair) (drop : Bool → Bool := fun _ => false) : Pair :=
   { p with client := c, server := s, now := p.now + 1
            clientEvents := p.clientEvents ++ cevs, serverEvents := p.serverEvents ++ sevs }
 
-def Pair.rounds (p : Pair) (n : Nat) (drop : Bool → Bool := fun _ => false) : Pair :=
-  (List.range n).foldl (init := p) fun p _ => p.round drop
+def Pair.rounds (p : Pair) (n : Nat) (drop : Bool → Bool := fun _ => false)
+    (edit : ByteArray → ByteArray := id) : Pair :=
+  (List.range n).foldl (init := p) fun p _ => p.round drop edit
 
 def Pair.clientP (p : Pair) : Peer := p.client.peers[p.clientPeer.toNat]!
 def Pair.serverP (p : Pair) : Peer := p.server.peers[p.serverPeer.toNat]!
@@ -280,6 +282,14 @@ def dgram (cmds : List Protocol.Command) : Protocol.Datagram :=
 def ackOf (ch : UInt8) (seq t : UInt16) : Protocol.Command :=
   { channelId := ch, reliableSequenceNumber := seq, body := .acknowledge seq t }
 
+/-- `bytes` without the reliable packet `seq` on channel `ch` (a datagram
+as the client sends it: no checksum). -/
+def stripReliable (ch : UInt8) (seq : UInt16) (bytes : ByteArray) : ByteArray :=
+  match ReaderM.run (Protocol.Datagram.decode false none) bytes with
+  | .error _ => bytes
+  | .ok d => Protocol.Datagram.encode 0 { d with commands := d.commands.filter fun c =>
+      !(c.channelId == ch && c.reliableSequenceNumber == seq && c.body matches .sendReliable ..) }
+
 /-- A connected pair whose client has started a disconnect and sent its
 DISCONNECT (lost), with the DISCONNECT's sequence number. -/
 def disconnecting : Except String (Pair × UInt16) := do
@@ -356,6 +366,36 @@ def hostTests : List Test := [
       -- (check_outgoing_commands: currentSendReliableCommand = end)
       expect (!cmds.any (·.body matches .sendReliable ..)) "a later reliable packet overtook the held one"
       expect (q.outgoingCommands.size == 2) "both packets not left queued" },
+  { name := "reliable data just past the receive window is dropped unacknowledged, the rest acknowledged"
+    run := fun _ => do
+      -- frontier 4095, the last of window 0: windows 0..6 are received,
+      -- window 7 is just past them, 8.. read as behind
+      let peer ← serverPeer
+      let peer := { peer with channels := peer.channels.modify 0 ({ · with incomingReliableSequenceNumber := 4095 }) }
+      let acked := fun (seq : UInt16) =>
+        let (q, _, _) := peer.handleCommand 2000 (reliableCmd 0 seq (bytes 1 1)) (some 0)
+        q.acknowledgements.size == 1
+      expect (!acked 28672 && !acked 32767) "a command in window 7 acknowledged"
+      expect (acked 4096 && acked 28671) "a command in the receive window not acknowledged"
+      expect (acked 4095 && acked 32768 && acked 100) "a command behind the frontier not acknowledged"
+      let frag := relFrag 0 28672 10 2 1
+      let (q, _, _) := peer.handleCommand 2000 frag (some 0)
+      expect q.acknowledgements.isEmpty "a fragment of a set in window 7 acknowledged" },
+  { name := "a reliable packet sent seven windows past a lost one still arrives"
+    run := fun _ => do
+      -- 30000 empty reliable packets; seq 4096 (window 1) is lost until
+      -- seq 28672 (window 7) went out: the receiver's frontier is still in
+      -- window 0, so 28672 is past its window. Acknowledged, it would be
+      -- lost for good and the channel would stall behind it (ENet does).
+      let total := 30000
+      let p ← (List.range total).foldlM (init := ← connected) fun p _ => send p (pkt 0)
+      let p := p.rounds 60 (edit := stripReliable 0 4096)
+      expect (!p.clientP.outgoingCommands.any fun o =>
+          o.sendAttempts == 0 && o.command.reliableSequenceNumber ≤ 28672) "28672 not sent yet"
+      let p := p.rounds 400
+      let got := (received p.serverEvents).size
+      expect (got == total) s!"{got} of {total} delivered"
+      expect (p.clientP.sentReliableCommands.isEmpty && p.clientP.outgoingCommands.isEmpty) "left in flight" },
   { name := "a command ENet refuses ends its datagram: a stray ACK hides the DISCONNECT's"
     run := fun _ => do
       let (p, seq) ← disconnecting

@@ -100,6 +100,20 @@ keeps. -/
 def isReliableAhead (c : Channel) (seq : UInt16) : Bool :=
   c.isIncomingReliableInWindow seq && seq != c.incomingReliableSequenceNumber
 
+/-- Whether reliable sequence number `seq` lies in the window just past the
+receive window, which the receive path drops. A sender may be that far
+ahead: it keeps up to seven windows in flight ending at the last one sent
+(Proofs/Window.lean), and the oldest of them may be the first after the
+frontier, in the window after the frontier's. So such a command is not
+acknowledged, or the sender would retire a packet the receiver dropped.
+ENet acknowledges it and loses the packet. -/
+def isReliableTooFarAhead (c : Channel) (seq : UInt16) : Bool :=
+  let winSize := Constants.reliableWindowSize
+  let rawWin  := seq.toNat / winSize
+  let curWin  := c.incomingReliableSequenceNumber.toNat / winSize
+  let win     := if seq < c.incomingReliableSequenceNumber then rawWin + Constants.reliableWindows else rawWin
+  win == curWin + Constants.freeReliableWindows - 1
+
 /--
 Records that a reliable command has been sent in the sequence window of `seq`.
 -/

@@ -197,6 +197,21 @@ compatibility"). Open, undecided differences are listed in TODO.md.
   happen exactly as before for in-window traffic. The wrap boundary is now
   pinned by proofs (`Lenet/Proofs/Channel.lean`), since golden traces cannot
   reach it.
+- **ACK of reliable data past the receive window (enet bug - not copied).**
+  ENet acknowledges a reliable command (or fragment) it discards for being
+  past the receive window (`peer.c` enet_peer_queue_incoming_command
+  returns `&dummyCommand`, so handle_incoming_commands queues the ACK). The
+  sender may be one window past it: it keeps up to seven windows in flight
+  (`canSendReliable`), and the receiver's frontier can sit just before the
+  oldest of them, one window lower. If the first command of a window is
+  lost while the sender goes on for six more windows, the command that
+  opens the seventh is acknowledged, retired and never delivered: the
+  channel stalls behind it for good (reproduced with 30000 empty reliable
+  packets and one lost datagram). Lenet drops such a command without an ACK
+  (`Peer.tooFarAhead`, `Channel.isReliableTooFarAhead`), so the sender
+  sends it again once the receiver has caught up. ENet senders see only a
+  retransmission. Pinned by two unit tests; `Proofs/Connection.lean` proves
+  no reliable packet is lost this way.
 - **Throttle drops of unreliable packets (lenet bug - fixed).** ENet drops
   unreliable, unsequenced and unreliable-fragment packets on send in
   proportion to the packet throttle (`protocol.c` check_outgoing_commands,
