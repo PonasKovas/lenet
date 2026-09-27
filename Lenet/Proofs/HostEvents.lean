@@ -751,10 +751,16 @@ theorem connect_step {h h' : Host} {id} (hids : IdsOk h.peers) {addr n d}
 /-- Everything a driver can do to a host, but `Host.disconnectNow` and
 `Host.resetPeer`: those end a connection without an event, as ENet's
 enet_peer_disconnect_now and enet_peer_reset do (the application asked for
-it), so a slot's events alone no longer tell its story. -/
+it), so a slot's events alone no longer tell its story. `AppOp` adds them,
+with a marker for each close. -/
 inductive Op
   | datagram (now : UInt32) (fromAddr : Address) (bytes : ByteArray)
   | service (now : UInt32)
+  /-- `Host.pollOutgoing`: send what is queued without running the timers
+  (the C API's and `Lenet.Net`'s flush). -/
+  | pollOutgoing (now : UInt32)
+  /-- Turning checksums on (the C API's `lenet_host_enable_checksum`). -/
+  | enableChecksum
   | connect (remoteAddress : Address) (channelCount : Nat) (data : UInt32)
   | send (peerId : UInt16) (channelId : UInt8) (packet : Packet)
   | broadcast (channelId : UInt8) (packet : Packet)
@@ -771,6 +777,8 @@ inductive Op
 def Op.apply (h : Host) : Op → Host × Array Event
   | .datagram now fromAddr bytes => h.handleDatagram now fromAddr bytes
   | .service now => ((h.service now).1, (h.service now).2.2)
+  | .pollOutgoing now => ((h.pollOutgoing now).1, (h.pollOutgoing now).2.2)
+  | .enableChecksum => ({ h with checksumEnabled := true }, #[])
   | .connect addr n d => match h.connect addr n d with
     | .ok (h, _) => (h, #[])
     | .error _ => (h, #[])
@@ -796,6 +804,8 @@ def run (h : Host) : List Op → Host × Array Event
 theorem Op.apply_step {h : Host} (hids : IdsOk h.peers) : ∀ op : Op, HostStep h.peers (op.apply h).1.peers (op.apply h).2
   | .datagram .. => handleDatagram_step hids _ _ _
   | .service .. => service_step hids _
+  | .pollOutgoing now => pollOutgoing_step hids now
+  | .enableChecksum => .rfl' _
   | .connect addr n d => by
     simp only [Op.apply]
     split
@@ -834,6 +844,87 @@ theorem run_wf (address peerCount channelLimit inBw outBw seed mtu) (ops : List 
         EventsWf .down (slotEvents i (run h ops).2) (phase (run h ops).1.peers[i].state) := by
   intro h
   have hs := run_step ops (idsOk_create address peerCount channelLimit inBw outBw seed mtu)
+  refine ⟨fun e he => hs.size ▸ hs.named e he, fun i hi => ?_⟩
+  have hi0 : i < h.peers.size := hs.size ▸ hi
+  have := hs.wf i hi0 hi
+  have hfresh : h.peers[i].state = .disconnected := by simp [h, Host.create]
+  rwa [hfresh] at this
+
+/-! ## Runs where the application also ends connections itself -/
+
+/-- `Op` and the two calls that end a connection without an event
+(`Host.disconnectNow`, `Host.resetPeer`). -/
+inductive AppOp
+  | op (o : Op)
+  | disconnectNow (peerId : UInt16) (data : UInt32)
+  | resetPeer (peerId : UInt16)
+
+/-- One operation. For the two closing calls, the events carry a marker
+`disconnect peerId 0` for the slot, when it exists: it stands for the
+application's own close, which the host does not report (ENet same). -/
+def AppOp.apply (h : Host) : AppOp → Host × Array Event
+  | .op o => o.apply h
+  | .disconnectNow id d =>
+    (h.disconnectNow id d, if id.toNat < h.peers.size then #[.disconnect id 0] else #[])
+  | .resetPeer id => (h.resetPeer id, if id.toNat < h.peers.size then #[.disconnect id 0] else #[])
+
+/-- A run of operations: the final host, and every event and close marker. -/
+def runApp (h : Host) : List AppOp → Host × Array Event
+  | [] => (h, #[])
+  | op :: ops =>
+    let (h', es) := op.apply h
+    let (h'', es') := runApp h' ops
+    (h'', es ++ es')
+
+theorem disconnectNow_down (p : Peer) (d : UInt32) : phase (p.disconnectNow d).state = .down := by
+  unfold Peer.disconnectNow
+  split
+  · next hs => rw [hs]; rfl
+  · next hs => rw [hs]; rfl
+  · rfl
+  · rfl
+
+/-- A closing call takes its slot down, and its marker is that slot's. -/
+theorem closeStep {a : Array Peer} (hids : IdsOk a) (id : UInt16) (G : Peer → Peer)
+    (hG : ∀ p, (G p).peerId = p.peerId ∧ phase (G p).state = .down) :
+    HostStep a (a.modify id.toNat G) (if id.toNat < a.size then #[.disconnect id 0] else #[]) := by
+  refine hostStep_modify hids id.toNat G _ (fun hj => ?_) (fun hj => by simp [hj])
+  simp only [hj, if_true]
+  refine ⟨(hG _).1, fun e he => ?_, ?_⟩
+  · simp at he
+    subst he
+    show id = a[id.toNat].peerId
+    exact UInt16.toNat_inj.mp (hids _ hj).symm
+  · rw [(hG _).2]
+    exact .disconnect .nil
+
+theorem AppOp.apply_step {h : Host} (hids : IdsOk h.peers) :
+    ∀ op : AppOp, HostStep h.peers (op.apply h).1.peers (op.apply h).2
+  | .op o => Op.apply_step hids o
+  | .disconnectNow id d => closeStep hids id _ fun p => ⟨by
+      unfold Peer.disconnectNow; split <;> first | rfl | exact queueOutgoing_peerId _ _ | skip,
+      disconnectNow_down p d⟩
+  | .resetPeer id => closeStep hids id Peer.reset fun p => ⟨rfl, rfl⟩
+
+theorem runApp_step : ∀ (ops : List AppOp) {h : Host}, IdsOk h.peers →
+    HostStep h.peers (runApp h ops).1.peers (runApp h ops).2
+  | [], _, _ => .rfl' _
+  | op :: ops, h, hids => by
+    have h1 := AppOp.apply_step hids op
+    exact h1.trans (runApp_step ops (h1.idsOk hids))
+
+/-- **With the application's own closes too.** From a fresh host, whatever
+the driver does, `disconnectNow` and `resetPeer` included, the events of
+each slot, with a marker disconnect for each of those closes, form a run of
+connections: between two connects of a slot there is a disconnect or the
+application closed it. -/
+theorem runApp_wf (address peerCount channelLimit inBw outBw seed mtu) (ops : List AppOp) :
+    let h := Host.create address peerCount channelLimit inBw outBw seed mtu
+    (∀ e ∈ (runApp h ops).2, (eventPeer e).toNat < (runApp h ops).1.peers.size) ∧
+      ∀ i (hi : i < (runApp h ops).1.peers.size),
+        EventsWf .down (slotEvents i (runApp h ops).2) (phase (runApp h ops).1.peers[i].state) := by
+  intro h
+  have hs := runApp_step ops (idsOk_create address peerCount channelLimit inBw outBw seed mtu)
   refine ⟨fun e he => hs.size ▸ hs.named e he, fun i hi => ?_⟩
   have hi0 : i < h.peers.size := hs.size ▸ hi
   have := hs.wf i hi0 hi

@@ -1650,6 +1650,8 @@ theorem connect_inv {h h' : Host} {id} (hi : HostInv h) {addr n d} (hc : h.conne
 theorem Op.apply_inv {h : Host} (hi : HostInv h) : ∀ op : Op, HostInv (op.apply h).1
   | .datagram .. => handleDatagram_inv hi _ _ _
   | .service .. => service_inv hi _
+  | .pollOutgoing now => pollOutgoing_inv hi now
+  | .enableChecksum => hi
   | .connect addr n d => by
     simp only [Op.apply]
     split
@@ -1747,11 +1749,29 @@ theorem SpanInv.counters {p : Peer} (h : SpanInv p) (c : Nat) (hc : c < p.channe
 of received datagrams, `service` calls and application calls, the reliable
 commands in flight on every data channel of every peer lie within six
 windows ending at the last one sent (`SpanInv.windows` names them). -/
+theorem AppOp.apply_inv {h : Host} (hi : HostInv h) : ∀ op : AppOp, HostInv (op.apply h).1
+  | .op o => Op.apply_inv hi o
+  | .disconnectNow id d => disconnectNow_inv hi id d
+  | .resetPeer id => resetPeer_inv hi id
+
+theorem runApp_inv : ∀ (ops : List AppOp) {h : Host}, HostInv h → HostInv (runApp h ops).1
+  | [], _, hi => hi
+  | op :: ops, _, hi => runApp_inv ops (AppOp.apply_inv hi op)
+
 theorem run_span (address peerCount channelLimit inBw outBw seed mtu) (ops : List Op) :
     let h := (run (Host.create address peerCount channelLimit inBw outBw seed mtu) ops).1
     ∀ p ∈ h.peers, ∀ c (hc : c < p.channels.size), c < 255 →
       ∀ s ∈ inFlight p c, (sentFrontier p c hc - s).toNat < 6 * Constants.reliableWindowSize := by
   intro h p hp c hc h255
   exact (run_inv ops (create_inv address peerCount channelLimit inBw outBw seed mtu) p hp).span c hc h255
+
+/-- `run_span` for runs where the application also ends connections itself
+(`disconnectNow`, `resetPeer`). -/
+theorem runApp_span (address peerCount channelLimit inBw outBw seed mtu) (ops : List AppOp) :
+    let h := (runApp (Host.create address peerCount channelLimit inBw outBw seed mtu) ops).1
+    ∀ p ∈ h.peers, ∀ c (hc : c < p.channels.size), c < 255 →
+      ∀ s ∈ inFlight p c, (sentFrontier p c hc - s).toNat < 6 * Constants.reliableWindowSize := by
+  intro h p hp c hc h255
+  exact (runApp_inv ops (create_inv address peerCount channelLimit inBw outBw seed mtu) p hp).span c hc h255
 
 end Lenet.Proofs

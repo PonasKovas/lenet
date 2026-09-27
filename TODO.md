@@ -158,6 +158,9 @@ and docs. Worked through in order; each item says what was done.
 
 21. `run_wf` / `run_span`: `Op` leaves out `disconnectNow`, `resetPeer`,
     `pollOutgoing` and the checksum toggle, all exported.
+    **Done:** `Op` has `pollOutgoing` and `enableChecksum`; `AppOp` adds the
+    two closing calls, each with a marker disconnect for its slot, and
+    `runApp_wf` / `runApp_span` cover those runs.
 22. Resource bounds are per step, not composed over whole runs.
 23. `nextDeadline_earliest` only says the fold finds the minimum of the
     list it folds; nothing says `service` before the deadline does no
