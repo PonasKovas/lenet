@@ -64,7 +64,41 @@ Done this session:
   depends on code, break the code and stub any earlier proof that fails
   first with `sorry`, or Lake never gets to the new one.
 
-Suggested next: tie `Delivery` to `Window` (see Proofs).
+- **Found and fixed: an ACK could lose a reliable packet** (ENet too). The
+  receiver ACKed a reliable command it dropped for being one window past
+  its receive window, and the sender can be that far ahead: seven windows
+  in flight, the frontier just before the oldest. Lose the first command
+  of a window while the sender goes six windows on, and the command
+  opening the seventh is retired, never delivered, and the channel stalls
+  behind it for good (repro: 30000 empty reliable packets, one lost
+  datagram). Now `Peer.handleCommand` withholds that ACK
+  (`Peer.tooFarAhead`, `Channel.isReliableTooFarAhead`); two unit tests
+  pin it, and test/README.md records it as an ENet bug not copied.
+
+- **Connection proof** (`Proofs/Connection.lean`): `Delivery` joined to
+  `Window` over one channel. The model runs the sender's window code
+  (`nextReliableSequenceNumber`, `canSendReliable`, acquire/release) and
+  the receiver's `receiveReliableSpan` plus the new ACK rule, with a
+  network that loses, duplicates, reorders and delays, bounded only by
+  "lost once the sender made more than `D ≤ 12288` first sends since".
+  From the start: every arrival `Fits` (`run_fits`), delivery is messages
+  0, 1, 2, ... in order (`run_out`), a retired command's message is
+  delivered or staged (`run_retired`), and the next message's copy
+  delivers it (`deliver_next`). The key step is `sent_window`: the
+  receiver's frontier is at most one before the oldest command in flight,
+  so the last one sent is at most seven windows past the frontier's
+  window. `Delivery.step_spec` is the arrival step with what that needed
+  (staged messages stay staged, nothing made up, an in-window arrival is
+  received); `Inv` now keeps staged entries inside the receive window.
+  Breaking `isReliableTooFarAhead` breaks the proof (`tooFarAhead_of`).
+  Lean tips: there is no Mathlib, so no `by_contra` (use
+  `Nat.lt_of_not_le fun h => ...`); `Inv` alone resolves to another
+  namespace's `Inv` here, so write `Delivery.Inv`; and a staged entry
+  names its message only within a wrap, so facts about "the message of
+  this entry" carry the index with them (`step_spec`'s `P`).
+
+Suggested next: the connection proof's gaps (see Proofs), or the
+sender-side half of the ACK fix for ENet receivers.
 
 Checks before each commit: `lake build` (library and proofs, including the
 no-panic audit in `Proofs/Panic.lean`), `./.lake/build/bin/unit`,
@@ -85,13 +119,28 @@ as bugs show where the corpus is blind.
 
 ## Proofs
 
-- Open: the whole connection. `Delivery` assumes each arrival `Fits` the
-  receiver's frontier; the sender side (`Window`) bounds what is in flight
-  but not how far behind a delayed datagram can be. A connection-level
-  statement needs a network model with bounded delay (or the sender's
-  in-flight span plus "the receiver acked everything before the oldest
-  command in flight"), then `Fits` follows and so does in-order delivery
-  from `Host.create`.
+- Done: the whole connection over one channel (`Proofs/Connection`).
+  Left open, in rough order of value:
+  - Fragments one by one. The model sends and resends a fragment set
+    whole, and the receiver ACKs its fragments once the set is complete;
+    the real receiver ACKs each fragment as it arrives and the assembler
+    holds it. Needs the assemblers in the invariant ("a retired
+    fragment is in an assembler, or its set is delivered or staged").
+  - From `Host.create` on both ends. The model's sender and receiver are
+    channels, not the peers `Window` and `HostEvents` reason about; a
+    simulation from peer operations to `Link` operations (first sends in
+    order is `SpanInv.consecutive`) would close that. The handshake and
+    reconnects need care: a slot's session number is two bits, so a stale
+    datagram from an earlier connection can pass `acceptsDatagram`.
+  - The delay bound is in first sends, not time. That is the natural unit
+    here (like TCP's segment lifetime), but no test checks real traffic
+    stays under three windows per datagram lifetime.
+- ENet receivers still have the bug: a Lenet sender can put a command one
+  window past an ENet receiver's window, which ENet ACKs and drops.
+  Holding the first send of a window until the window six back is empty
+  too (`canSendReliable` over 11 windows, not 10) would keep the sender
+  inside ENet's receive window. It changes when Lenet sends, only with
+  over five windows in flight; `Window`'s span becomes six windows.
 
 ## Performance
 
