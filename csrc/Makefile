@@ -51,14 +51,20 @@ build/merged.a: $(LEAN_STATIC) build/lenet_capi.o merge-ar.sh
 # The distribution: one object holding what the API reaches (section GC from
 # the lenet_* entry points), every symbol but lenet_* made local, so the
 # bundled runtime (mimalloc, libuv, GMP, libc++, ...) cannot clash with an
-# application's own copies.
+# application's own copies. The COMDAT groups are removed too: the linker
+# merges groups by name whatever their symbols' binding, so one left in
+# would still meet an application's own copy (e.g. of libunwind) and the
+# linker would drop one side. Once everything is in one object the groups
+# have nothing left to merge.
 build/api.syms: include/lenet.h | build
 	grep -oE '\blenet_[a-z_]+\(' include/lenet.h | tr -d '(' | sort -u > $@
 
-build/liblenet.a: build/merged.a build/api.syms
+# Makefile too: a change to this recipe must reach existing builds.
+build/liblenet.a: build/merged.a build/api.syms Makefile
 	ld -r --gc-sections $$(sed 's/^/-u /' build/api.syms) \
 	    --whole-archive build/merged.a -o build/lenet_all.o
-	objcopy --keep-global-symbols=build/api.syms build/lenet_all.o build/lenet.o
+	objcopy --keep-global-symbols=build/api.syms --remove-section=.group \
+	    build/lenet_all.o build/lenet.o
 	rm -f $@ build/lenet_all.o
 	ar rcs $@ build/lenet.o
 
