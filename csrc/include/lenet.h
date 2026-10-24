@@ -192,6 +192,13 @@ void lenet_host_channel_limit(lenet_host *host, size_t channel_limit);
  * throttle. Returns 0, or -1 for an unknown peer ID. */
 int32_t lenet_peer_get_info(lenet_host *host, uint16_t peer_id, lenet_peer_info *out);
 
+/** Sets *out to the packet payload bytes peer `peer_id` holds on the sending
+ * side: queued and not yet sent, plus sent reliably and not yet
+ * acknowledged. A peer that stops acknowledging grows this without bound
+ * until it times out; callers can cap it by disconnecting the peer.
+ * Returns 0, or -1 for an unknown peer ID. */
+int32_t lenet_peer_outgoing_data(lenet_host *host, uint16_t peer_id, size_t *out);
+
 /** ENet's enet_peer_throttle_configure: sets the local throttle parameters
  * and informs the remote peer. */
 void lenet_peer_throttle_configure(lenet_host *host, uint16_t peer_id,

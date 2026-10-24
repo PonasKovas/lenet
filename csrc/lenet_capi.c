@@ -66,6 +66,7 @@ extern lean_object *lenet_ffi_peer_ping_interval(lean_object *, uint16_t, uint32
 extern lean_object *lenet_ffi_host_bandwidth_limit(lean_object *, uint32_t, uint32_t);
 extern lean_object *lenet_ffi_host_channel_limit(lean_object *, size_t);
 extern lean_object *lenet_ffi_peer_info(lean_object *, uint16_t);
+extern lean_object *lenet_ffi_peer_outgoing_data(lean_object *, uint16_t);
 extern lean_object *lenet_ffi_host_flush(lean_object *, uint32_t);
 extern lean_object *lenet_ffi_peer_throttle_configure(lean_object *, uint16_t,
                                                       uint32_t, uint32_t, uint32_t);
@@ -278,6 +279,23 @@ int32_t lenet_peer_get_info(lenet_host *host, uint16_t peer_id, lenet_peer_info 
     out->round_trip_time_variance = (uint32_t)lean_unbox_uint32(lean_ctor_get(p5, 0));
     out->packet_throttle = (uint32_t)lean_unbox_uint32(lean_ctor_get(p5, 1));
     lean_dec(opt);
+    return 0;
+}
+
+int32_t lenet_peer_outgoing_data(lenet_host *host, uint16_t peer_id, size_t *out) {
+    if (host == NULL || out == NULL) return -1;
+    lean_object *r = lenet_ffi_peer_outgoing_data(href(host), peer_id);
+    if (!lean_io_result_is_ok(r)) {
+        lean_dec(r);
+        return -1;
+    }
+    lean_object *opt = lean_ctor_get(r, 0); /* Option USize */
+    if (lean_obj_tag(opt) == 0) { /* none: no such peer */
+        lean_dec(r);
+        return -1;
+    }
+    *out = lean_unbox_usize(lean_ctor_get(opt, 0));
+    lean_dec(r);
     return 0;
 }
 

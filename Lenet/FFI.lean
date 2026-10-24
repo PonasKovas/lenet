@@ -119,6 +119,13 @@ def peerInfo (ctx : HostRef) (peerId : UInt16) :
     (stateCode p.state, p.address.host, p.address.port, p.roundTripTime, p.roundTripTimeVariance,
       p.packetThrottle)
 
+/-- Payload bytes peer `peerId` holds on the sending side (queued, or sent
+reliably and unacknowledged), or none for an unknown peer ID. -/
+@[export lenet_ffi_peer_outgoing_data]
+def peerOutgoingData (ctx : HostRef) (peerId : UInt16) : IO (Option USize) := do
+  let c ← ctx.get
+  return c.host.peers[peerId.toNat]?.map (·.outgoingPayloadBytes.toUSize)
+
 @[export lenet_ffi_host_enable_checksum]
 def hostEnableChecksum (ctx : HostRef) : IO Unit :=
   modifyHost ctx ({ · with checksumEnabled := true })

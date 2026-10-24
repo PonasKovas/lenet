@@ -57,6 +57,9 @@ static int check_pair(void) {
     uint8_t msg[100];
     for (int i = 0; i < 100; i++) msg[i] = (uint8_t)(i * 7);
     CHECK(lenet_host_send(a, (uint16_t)peer, 0, LENET_RELIABLE, msg, sizeof msg) == 0, "send");
+    size_t outgoing = 0;
+    CHECK(lenet_peer_outgoing_data(a, (uint16_t)peer, &outgoing) == 0 && outgoing == sizeof msg,
+          "a queued reliable packet counts as outgoing data");
     for (uint32_t t = 20; t < 25; t++) {
         route(a, 1, b, t);
         route(b, 2, a, t);
@@ -70,6 +73,8 @@ static int check_pair(void) {
           ev.type == LENET_EVENT_RECEIVE && plen == 100 && memcmp(payload, msg, 100) == 0,
           "the kept event, whole");
     CHECK(lenet_host_poll_event(b, &ev, payload, sizeof payload, &plen) == 0, "then nothing");
+    CHECK(lenet_peer_outgoing_data(a, (uint16_t)peer, &outgoing) == 0 && outgoing == 0,
+          "acknowledged data no longer counts");
     lenet_host_destroy(a);
     lenet_host_destroy(b);
     return 0;
@@ -112,6 +117,11 @@ int main(void) {
     CHECK(info.state == LENET_PEER_STATE_CONNECTING, "peer info: state");
     CHECK(info.ip == 0x0100007F && info.port == 40010, "peer info: address");
     CHECK(lenet_peer_get_info(h, 999, &info) == -1, "peer info of an unknown peer must fail");
+    size_t outgoing = 1;
+    CHECK(lenet_peer_outgoing_data(h, (uint16_t)peer, &outgoing) == 0 && outgoing == 0,
+          "a connecting peer holds no payload");
+    CHECK(lenet_peer_outgoing_data(h, 999, &outgoing) == -1,
+          "outgoing data of an unknown peer must fail");
 
     lenet_peer_ping_interval(h, (uint16_t)peer, 250);
     lenet_host_bandwidth_limit(h, 100000, 50000);

@@ -118,6 +118,12 @@ def queueOutgoingCommand (p : Peer) (cmd : OutgoingCommand) : Peer :=
     outgoingCommands  := p.outgoingCommands.push cmd
     outgoingDataTotal := p.outgoingDataTotal + cmd.command.wireSize }
 
+/-- Payload bytes this peer holds on the sending side: packets queued and
+not yet sent, plus reliable packets sent and not yet acknowledged. -/
+def outgoingPayloadBytes (p : Peer) : Nat :=
+  p.outgoingCommands.foldl (· + ·.fragmentLength) 0 +
+    p.sentReliableCommands.foldl (· + ·.fragmentLength) 0
+
 /-- Queues a reliable control command on channel 0xFF, numbered by the
 peer-level control sequence (pre-incremented: the first one is 1). -/
 def queueControlCommand (p : Peer) (body : Protocol.CommandBody) : Peer :=
